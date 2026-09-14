@@ -1,0 +1,10 @@
+{
+	"id": "unreader",
+	"name": "UNreader",
+	"version": "0.2.5",
+	"minAppVersion": "1.7.2",
+	"description": "A beautiful e-book reader for Obsidian. EPUB first. Also MOBI/AZW3 and TXT.",
+	"author": "UNcore",
+	"authorUrl": "https://github.com/UNcore-gh",
+	"isDesktopOnly": false
+}
