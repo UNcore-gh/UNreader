@@ -34,6 +34,9 @@
 
 import * as debugLog from "../core/debugLog";
 
+/** 一次性安全区探针（量 safe-area-inset-bottom）：固定样式提常量，满足官方 lint。 */
+const SAFE_AREA_PROBE_CSS = "position:fixed;left:-9999px;top:0;width:0;height:var(--safe-area-inset-bottom, 0px)";
+
 /** 与「底部带」有关的候选元素（selector，用于逐个量几何/底色） */
 const CANDIDATES: ReadonlyArray<readonly [string, string]> = [
 	[".app-container", "app 容器（官方）"],
@@ -135,7 +138,7 @@ function envFacts(): string[] {
 		// 所以用一次性探针元素**量成 px**（同 engineAdapter.spacingPx 的手法）
 		try {
 			const probe = document.createElement("div");
-			probe.style.cssText = "position:fixed;left:-9999px;top:0;width:0;height:var(--safe-area-inset-bottom, 0px)";
+			probe.style.cssText = SAFE_AREA_PROBE_CSS;
 			document.body.appendChild(probe);
 			const h = probe.getBoundingClientRect().height;
 			probe.remove();

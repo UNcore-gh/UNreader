@@ -43,10 +43,8 @@ function createInlineIcon(name: string, size = 14): SVGElement {
 	svg.setAttribute("stroke-width", "2");
 	svg.setAttribute("stroke-linecap", "round");
 	svg.setAttribute("stroke-linejoin", "round");
-	svg.setAttribute("class", "svg-icon");
-	// 内联样式兜底：规避任何全局 .svg-icon 规则把尺寸/显示压成 0
-	svg.style.display = "block";
-	svg.style.flex = "0 0 auto";
+		// 尺寸/显示兜底交给 .unreader-inline-icon 类（规避全局 .svg-icon 规则把尺寸压成 0）
+	svg.setAttribute("class", "svg-icon unreader-inline-icon");
 	for (const part of INLINE_ICON_DEFS[name] ?? []) {
 		const el = document.createElementNS(ns, part.tag);
 		for (const [k, v] of Object.entries(part.attrs)) el.setAttribute(k, v);
@@ -401,8 +399,7 @@ export class AppearancePanel {
 		const fgValue = isDark ? activeTextColor(this.current) : activeTextColor(this.current);
 		// 跟随 Obsidian 模式：不显示自定义色行，给一句说明
 		if ((this.current.colorMode ?? "obsidian") !== "custom") {
-			const hint = scrollEl.createDiv({ cls: "unreader-tag-desc", text: "背景与文字颜色跟随 Obsidian 当前主题（明暗切换自动同步）。切换「配色来源」为「自定义」可单独设置颜色。" });
-			hint.style.padding = "2px 12px 6px";
+			scrollEl.createDiv({ cls: "unreader-tag-desc unreader-color-follow-hint", text: "背景与文字颜色跟随 Obsidian 当前主题（明暗切换自动同步）。切换「配色来源」为「自定义」可单独设置颜色。" });
 		} else {
 		// 用 activeBackground/activeTextColor 已自动取对应主题
 		scrollEl.appendChild(
@@ -910,9 +907,7 @@ export class AppearancePanel {
 		// label 文字较长（"自动打开目录面板"7 字 > 72px）会溢出截断 → 覆盖默认
 		// 固定宽，让 label 自适应内容宽度并 flex:1 1 auto 撑开中间空白，
 		// toggle 和 reset 始终被推至 row 最右紧挨；slider/select 行不受影响
-		labelEl.style.flex = "1 1 auto";
-		labelEl.style.width = "auto";
-		labelEl.style.minWidth = "0";
+		labelEl.addClass("is-label-wide");
 		// 勾选框紧挨重置按钮，移动端窄屏也不会因中间控件被压扁
 		const toggle = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
 		toggle.checked = checked;

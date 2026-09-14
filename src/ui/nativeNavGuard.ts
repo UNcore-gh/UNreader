@@ -30,13 +30,16 @@
  *
  *  ## 三条硬约束
  *
- *  1. **只看 `class` 属性，不看子树**：底栏的隐藏完全由这个类驱动
- *     （官方 CSS `.is-hidden-nav .mobile-navbar { transform: …; opacity: 0 }`），
- *     类在即隐藏，不必观察任何后代节点 —— 观察范围越小越不容易在滚动热路径上被唤醒。
- *  2. **延迟一拍再断言**（`delay`，默认 90ms）：用户点屏幕唤出 chrome 时，官方
- *     `mousedown` 会**先**摘类、插件的 `click` 委托**后**跑三态。若立即补回，用户
- *     看到的会是「底栏冒出来又被按回去」再重新出来。等这一拍结束、按最终态断言，
- *     语义才与用户看到的一致（唤出就让它显示，隐藏才补）。
+ *  1. **只看 `class` 属性，不看子树**：底栏的隐藏由两个 body 类驱动 ——
+ *     本插件自己的 `unreader-nav-hidden`（**视觉闸门**，CSS 带 `!important`）与
+ *     官方的 `is-hidden-nav`（官方语义一致性）。插件类在即底栏不可见，不必观察
+ *     任何后代节点 —— 观察范围越小越不容易在滚动热路径上被唤醒。
+ *  2. **正常路径立即补官方类，延迟一拍只留给降级路径**：插件视觉类还在、只缺
+ *     官方类时，MutationObserver 在**同一微任务**里把官方类补回（早于浏览器绘制，
+ *     所以 mask / 主题 / 官方任何消费者都看不到中间态）。只有插件类本身也缺失
+ *     （旧产物、热重载、外部误删）才等一拍（`delay`，默认 90ms）：用户点屏幕唤出
+ *     chrome 时，官方 `mousedown` 会**先**摘类、插件的 `click` 委托**后**跑三态；
+ *     这段延迟让 click 快路先把最终语义问清楚，避免把用户刚唤出的底栏又按回去。
  *  3. **不自激**：补类本身会再触发一次回调，但那时 `classList` 已是目标态、
  *     `wanted()` 直接返回 false —— 不会写成 addClass/removeClass 的死循环。
  *
@@ -70,8 +73,10 @@
  *  出现再关闭」。
  *
  *  这个类由 readerView 在底栏该藏的**整个生命周期**里持有：官方摘多少次
- *  `is-hidden-nav`，它都还在，CSS 的 `opacity: 0 !important` 保证底栏不会重新画出。
- *  `is-hidden-nav` 仍照旧同步（官方 mask / header / 其它逻辑的一致性兜底），
+ *  `is-hidden-nav`，它都还在，CSS 的 `opacity: 0 !important` 保证底栏不会重新画出；
+ *  同时它还锁住官方那条底部 fade mask（`--view-bottom-fade-mask`）——那是
+ *  `is-hidden-nav` 的**第三个消费点**，之前正是它让「底栏看不见了、底部却仍在闪」。
+ *  `is-hidden-nav` 仍照旧同步（官方 header / 主题 / 其它逻辑的一致性兜底），
  *  但不再是我们的视觉判据。 */
 export const PLUGIN_NAV_HIDDEN_CLASS = "unreader-nav-hidden";
 
@@ -127,6 +132,16 @@ export class NativeNavGuard {
 	/** body 的类变了：只有「该藏而没藏」才排队，且同批变化合并为一次。 */
 	private onBodyClassChange(): void {
 		if (!this.wanted()) return;
+		const body = document.body;
+		// **插件视觉闸门还在、只缺官方类**：立即在同一微任务里补回，绝不跨帧。
+		// MutationObserver 回调发生在浏览器绘制之前，所以官方类不存在的窗口长度是 0 ——
+		// mask、主题规则、未来新增的任何 `is-hidden-nav` 消费点都不会看到中间态。
+		// 这里不调整套 `sync()`：mousedown 每次都会走这条，轻量补一个类即可；
+		// 插件类本身也缺时才进下面的延迟/点击快路（那才需要等 tap 语义落定）。
+		if (body.classList.contains(PLUGIN_NAV_HIDDEN_CLASS)) {
+			if (!body.classList.contains("is-hidden-nav")) body.classList.add("is-hidden-nav");
+			return;
+		}
 		this.armClick();
 		if (this.timer !== null) return;
 		this.timer = window.setTimeout(() => {
@@ -158,9 +173,11 @@ export class NativeNavGuard {
 		this.clickHandler = null;
 	}
 
-	/** 是否处于「该藏而没藏」：类不在 ∧ 视图要求隐藏。
-	 *  类在（无论谁加的、出于什么理由）一律不动 —— 那是官方或 `syncNativeNav`
-	 *  已经达成的目标态，守卫只补不撤。 */
+	/** 是否处于「该藏而没藏」：视图要求隐藏 ∧（插件视觉类或官方类缺失）。
+	 *
+	 *  插件类是**硬目标**：它缺了，底栏会真的可见（哪怕官方类还在，官方 CSS 仍会
+	 *  把它藏住，但视觉契约已经破了一半）；官方类缺了也补，因为它承载官方的
+	 *  mask/header 等一致性语义。两者都在才返回 false，守卫只补不撤。 */
 	private wanted(): boolean {
 		try {
 			if (!this.opts.wantsHidden()) return false;

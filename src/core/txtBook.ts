@@ -140,11 +140,11 @@ function normalizeNewlines(s: string): string {
 
 /** 空白行判定：只含空白（含全角空格 U+3000） */
 function isBlank(line: string): boolean {
-	return !line.trim().replace(/　/g, "").trim()
+	return !line.trim().replace(/\u3000/g, "").trim()
 }
 
 /** 段落收尾标点 —— 用来区分「一行一段」与「硬折行」 */
-const SENT_END = /[。！？…”』」》〉）)\]!?"'.　]$/
+const SENT_END = /[。！？…”』」》〉）)\]!?"'.\u3000]$/
 
 function median(nums: number[]): number {
 	if (!nums.length) return 0
@@ -260,7 +260,7 @@ function escapeHtml(s: string): string {
 /** 段落两端的空白剥掉。中文 txt 常用全角空格 `　　` 做首行缩进，而缩进由主题 CSS 的
  *  `paragraphIndent` 统一给，不剥就会缩进翻倍。 */
 function trimPara(s: string): string {
-	return s.replace(/^[\s　]+/, "").replace(/[\s　]+$/, "")
+	return s.replace(/^[\s\u3000]+/, "").replace(/[\s\u3000]+$/, "")
 }
 
 const SECTION_STYLE =
@@ -300,7 +300,26 @@ function blocksToParas(blocks: Block[]): string[] {
 	return paras
 }
 
-const PARA_SENT_SPLIT = /(?<=[。！？…”』」》〉])/
+/** 句末标点集合（splitAfterSentEnd 用）。与 SENT_END 不同：这里只收「真正的句末」
+ *  标点，逗号/顿号不算，避免把一句话切碎。 */
+const SENT_END_SPLIT_CHARS = "。！？…”』」》〉"
+
+/** 等价于 `text.split(/(?<=[。！？…”』」》〉])/)`：在每个句末标点**之后**断句，
+ *  标点留在前一段。手写扫描替代 lookbehind —— iOS < 16.4 的 Safari/WebView
+ *  不支持 lookbehind（官方上架检查 obsidianmd/regex-lookbehind 会拒）。 */
+function splitAfterSentEnd(text: string): string[] {
+	const out: string[] = []
+	let start = 0
+	for (let i = 0; i < text.length; i++) {
+		if (SENT_END_SPLIT_CHARS.includes(text[i]!)) {
+			out.push(text.slice(start, i + 1))
+			start = i + 1
+		}
+	}
+	if (start === 0) return [text]
+	if (start < text.length) out.push(text.slice(start))
+	return out
+}
 
 /** 单段超长（病态输入：整本一个 txt、通篇没有换行）时按句末标点切成若干段，
  *  切不动就按字数硬切 —— 目的是让单节字符数落在 MAX_SECTION_CHARS 以内。 */
@@ -308,7 +327,7 @@ function splitLongPara(text: string): string[] {
 	if (text.length <= MAX_SECTION_CHARS) return [text]
 	const out: string[] = []
 	let buf = ""
-	for (const piece of text.split(PARA_SENT_SPLIT)) {
+	for (const piece of splitAfterSentEnd(text)) {
 		if (buf.length + piece.length > MAX_SECTION_CHARS && buf) { out.push(buf); buf = "" }
 		if (piece.length > MAX_SECTION_CHARS) {
 			if (buf) { out.push(buf); buf = "" }

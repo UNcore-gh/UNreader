@@ -15,9 +15,11 @@
  *  · **页首**：官方规则 `.is-phone.is-hidden-nav .view-header`（按「手机」门控）。
  *    本插件**不借**官方这条 —— 页首是本视图自己的 UI，给它挂自己的
  *    `unreader-header-hidden` 类，故**三端通用**（桌面 / 平板也要能藏）。
- *  · **底栏**：官方规则 `.is-hidden-nav .mobile-navbar`（**无平台前缀**；另有一条
- *    `body.is-tablet .mobile-navbar { display: none }` —— 平板压根没有底栏）。
- *    该类是 **app 级**（挂 `document.body`），**失活视图写它会污染下一个视图**。
+ *  · **底栏**：官方规则 `.is-hidden-nav .mobile-navbar` 之外，本插件另有
+ *    `.unreader-nav-hidden .mobile-navbar` 作为**硬视觉闸门**（官方
+ *    `restoreNavigation` 会先摘官方类再补，不能让它在这一拍闪出来；详见
+ *    `nativeNavGuard.ts` 的 `PLUGIN_NAV_HIDDEN_CLASS`）。两个类都是 **app 级**
+ *    （挂 `document.body`），**失活视图写它会污染下一个视图**。
  *  · **官方「全屏」(`autoFullScreen`)**：官方自己在 markdown 视图上滚动显隐原生界面
  *    用的开关，与本插件无关 —— 这里**刻意不看它**（历史版本拿它当底栏的门，
  *    结果官方设置与本机平台形态一漂移就只剩半边生效，见 AGENTS.md）。

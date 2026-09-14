@@ -290,6 +290,17 @@ body.is-phone.unreader-nav-hidden .mobile-navbar {
 	pointer-events: none !important;
 }
 
+/* `is-hidden-nav` 还有**第三个消费点**：官方用它把底部 fade mask 从
+   “0.5 透明渐变”切成 1px 硬裁切（`.is-phone.is-hidden-nav { --view-bottom-fade-mask:
+   linear-gradient(to top, #000 0%, #000 1px) }`）。悬浮导航或自动全屏下 `.mod-root`
+   会消费这枚变量。官方 restoreNavigation 摘类时，即便底栏元素被上面的闸门压住了，
+   mask 仍会先松开、90ms 后再被守卫补回 —— 底部整条透明一下，正是用户看到的闪烁。
+   这里让插件类独立持有同一份 mask，官方类怎么摘都不改变渲染。 */
+body.is-phone.unreader-nav-hidden {
+	--view-top-fade-mask: linear-gradient(to bottom, rgba(0, 0, 0, var(--view-top-fade-opacity)) 0%, #000000 var(--safe-area-inset-top));
+	--view-bottom-fade-mask: linear-gradient(to top, #000 0%, #000 1px);
+}
+
 .view-header.unreader-header-hidden {
 	/* 位移量优先读 JS 实测的 `--ur-header-travel`（桌面端 = 页首自身 offsetHeight），
 	   兜底才是原来的公式。为什么需要它：兜底里的 `--view-header-height` 只在
@@ -306,6 +317,15 @@ body.is-phone.unreader-nav-hidden .mobile-navbar {
 	   之下，不加 !important 会被主题的 focused 底色盖回去；隐藏时本就不该画底，
 	   加 !important 只作用于隐藏态（类移除后主题底色原样回来）。 */
 	background-color: transparent !important;
+}
+/* 移动端的隐藏位移固定读官方页首几何，不吃桌面端留下的 `--ur-header-travel`：
+   该行内值是桌面端实测的 `offsetHeight`；窗口从桌面形态跨到 `is-mobile` 时它会
+   残留，而官方摘 `is-hidden-nav` 的那一帧正是我们的 transform 首次接管 ——
+   两套位移不同就会看到页首跳一下。这里覆盖成与官方 `.is-phone.is-hidden-nav
+   .view-header` 完全同源的值；选择器特异性相同、插件表在后，故官方类在场时也用它。 */
+body.is-phone .view-header.unreader-header-hidden,
+body.is-tablet .view-header.unreader-header-hidden {
+	transform: translateY(calc(-1 * (var(--view-header-height, 48px) + var(--view-header-top-offset, 0px))));
 }
 
 /* ---------- v1「把叶子刷成阅读区底色」已**删除**（2026-09-13，第六轮） ----------
@@ -3705,4 +3725,61 @@ body.is-tablet .unreader-search {
 	color: var(--text-accent);
 	font-size: var(--font-ui-small);
 	overflow-wrap: anywhere;
+}
+
+/* ---------- 上架检查配套：原先写在 JS 行内样式里的固定样式改成类 ----------
+   （Obsidian 官方 lint 禁止 `el.style.x = "字面量"` 与内联 style 注入；
+   这些属性都是**静态值**，落进样式表才是规范做法。动态值仍由 JS 写行内，
+   见各文件里以常量入参的 style.setProperty 调用。） */
+
+/* 标注侧边栏头部右侧按钮组 */
+.unreader-toc-header-right {
+	display: flex;
+	align-items: center;
+	gap: 4px;
+}
+
+/* 剪贴板兜底用的离屏 textarea */
+.unreader-copy-bridge {
+	position: fixed;
+	left: -9999px;
+	top: 0;
+	opacity: 0;
+}
+
+/* 外观面板里的 lucide 风格内联 SVG：规避全局 .svg-icon 规则把尺寸/显示压成 0 */
+.unreader-inline-icon {
+	display: block;
+	flex: 0 0 auto;
+}
+
+/* 「配色来源跟随主题」那句说明的间距 */
+.unreader-tag-desc.unreader-color-follow-hint {
+	padding: 2px 12px 6px;
+}
+
+/* checkbox 行：label 自适应内容宽度并把中间空白撑开，toggle/reset 靠右紧挨 */
+.unreader-appearance-label.is-label-wide {
+	flex: 1 1 auto;
+	width: auto;
+	min-width: 0;
+}
+
+/* 测量期临时隐藏（原为行内 visibility:hidden → 量完还原）：
+   必须排在 .is-visible 之后，否则压不住它的 visibility:visible。 */
+.unreader-selection-toolbar.is-measuring,
+.unreader-highlight-popover.is-measuring {
+	visibility: hidden;
+}
+
+/* 选区镜像 span：离屏但可见（复制/测量用），不参与交互 */
+.unreader-clip-mirror {
+	position: fixed;
+	top: 0;
+	left: -9999px;
+	width: 1px;
+	height: 1px;
+	overflow: hidden;
+	background: transparent;
+	pointer-events: none;
 }

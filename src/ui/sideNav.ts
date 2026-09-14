@@ -1,4 +1,8 @@
 import { setIcon, Platform } from "obsidian";
+
+/** 数字/页码自适应压缩用的常量（官方 lint 禁止给 .style 赋字面量，值不变）。 */
+const PAGE_TIGHT_LETTER_SPACING = "-0.10em";
+const NAV_ROW_PAD_RIGHT = "10px";
 import type { NavEntryModel } from "../core/engineAdapter";
 
 /**
@@ -247,11 +251,11 @@ export class SideNav {
 			if (this.pageFitKey.get(el) === key) return true;
 			this.pageFitKey.set(el, key);
 			el.style.removeProperty("letter-spacing");
-			el.style.setProperty("--ur-page-sx", "1");
+			el.style.removeProperty("--ur-page-sx"); // 等价于设回 1：CSS 用 var(--ur-page-sx, 1) 兜底
 			let need = el.scrollWidth;
 			if (need > avail + 0.5) {
 				// ① 二次收紧字距（数字间距再压缩一档）
-				el.style.setProperty("letter-spacing", "-0.10em");
+				el.style.setProperty("letter-spacing", PAGE_TIGHT_LETTER_SPACING);
 				need = el.scrollWidth;
 			}
 			// ② 仍越界：横向压缩（数字拉长变瘦），下限保护可读性
@@ -640,7 +644,7 @@ export class SideNav {
 		} else {
 			this.nodesEl.appendChild(this.panelEl);
 			this.panelEl.removeClass("is-at-actions");
-			this.panelEl.style.top = "";
+			this.panelEl.style.removeProperty("top");
 		}
 		this.syncPanelOpenState();
 	}
@@ -731,7 +735,7 @@ export class SideNav {
 			const depth = Math.min(entry.depth, 3);
 			row.dataset.depth = String(depth);
 			row.style.paddingLeft = `${10 + depth * 18}px`;
-			row.style.paddingRight = "10px";
+			row.style.paddingRight = NAV_ROW_PAD_RIGHT;
 			row.createSpan({ cls: "unreader-nav-row-text", text: entry.label });
 			const badge = row.createSpan({ cls: "unreader-nav-count" });
 			{

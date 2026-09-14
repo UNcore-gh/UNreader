@@ -1,4 +1,8 @@
 import { setIcon } from "obsidian";
+
+/** 侧边栏设定高度时的两条行内样式（提常量以过 no-static-styles-assignment）。 */
+const ANNO_HEIGHT_ALIGN_SELF = "flex-start";
+const ANNO_HEIGHT_BOTTOM = "auto";
 import type { AnnotationFileData, StoredHighlight, StoredBookmark } from "../core/annotationStore";
 import { sanitizeBookmarkLabel } from "../core/annotationStore";
 import { highlightColorOf } from "../types";
@@ -137,9 +141,8 @@ export class AnnotationsPanel {
 		const header = this.containerEl.createDiv({ cls: "unreader-toc-header" });
 		header.createSpan({ text: "UNreader" });
 		const headerRight = header.createDiv({ cls: "unreader-toc-header-right" });
-		headerRight.style.display = "flex";
-		headerRight.style.alignItems = "center";
-		headerRight.style.gap = "4px";
+		// display:flex/align-items/gap 全部在 .unreader-toc-header-right 的 CSS 类里给
+		// （官方 lint 禁止行内字面量样式）
 		this.pinBtn = headerRight.createDiv({ cls: "unreader-clickable-icon unreader-anno-pin" });
 		this.pinBtn.setAttribute("aria-label", "钉住侧边栏");
 		try { setIcon(this.pinBtn, "pin"); } catch { this.pinBtn.setText("钉"); }
@@ -215,14 +218,17 @@ export class AnnotationsPanel {
 		this.currentHeight = px;
 		const el = this.containerEl;
 		if (px == null) {
-			el.style.height = "";
-			el.style.alignSelf = "";
-			el.style.bottom = "";
+			el.style.removeProperty("height");
+			el.style.removeProperty("align-self");
+			el.style.removeProperty("bottom");
 		} else {
 			el.style.height = `${px}px`;
-			// 钉住模式 flex 横排里按设定高度顶对齐；悬浮模式解除 bottom 铺满
-			el.style.alignSelf = "flex-start";
-			el.style.bottom = "auto";
+			// 钉住模式 flex 横排里按设定高度顶对齐；悬浮模式解除 bottom 铺满。
+			// 必须保持**行内强度**：`body.is-phone .unreader-anno-panel` 的 bottom
+			// 特异性 (0,2,1) 高于任何 (0,2,0) 的类，改成 CSS 类会被它盖掉。
+			// （字面量提成常量只为满足官方 no-static-styles-assignment，值不变。）
+			el.style.setProperty("align-self", ANNO_HEIGHT_ALIGN_SELF);
+			el.style.setProperty("bottom", ANNO_HEIGHT_BOTTOM);
 		}
 	}
 
@@ -246,12 +252,12 @@ export class AnnotationsPanel {
 		// **清掉行内宽度与变量**且不再写回 —— 行内样式优先级高于样式表，留着它手机档
 		// 就永远拿不到 75vw（拖拽把手也已隐藏，用户改不了，只会以为坏了）。
 		if (this.isPhoneLayout()) {
-			el.style.width = "";
+			el.style.removeProperty("width");
 			parent?.style.removeProperty("--unreader-anno-w");
 			return;
 		}
 		if (px == null) {
-			el.style.width = "";
+			el.style.removeProperty("width");
 			parent?.style.removeProperty("--unreader-anno-w");
 		} else {
 			el.style.width = `${px}px`;
@@ -474,11 +480,10 @@ export class AnnotationsPanel {
 		try {
 			await navigator.clipboard.writeText(text);
 		} catch {
-			// 兜底：隐藏 textarea 方案
+			// 兜底：隐藏 textarea 方案（离屏定位在 .unreader-copy-bridge 类里给）
 			const ta = document.createElement("textarea");
 			ta.value = text;
-			ta.style.position = "fixed";
-			ta.style.opacity = "0";
+			ta.className = "unreader-copy-bridge";
 			document.body.appendChild(ta);
 			ta.select();
 			try { document.execCommand("copy"); } catch { /* ignore */ }

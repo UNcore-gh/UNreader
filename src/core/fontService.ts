@@ -29,7 +29,7 @@ async function ensureFolder(app: App, path: string): Promise<void> {
  *  去重是为了让「库内选中的文件已在字体夹里 → 直接选中不复制」这条判据可靠：
  *  同一枚字体落两份会让下拉里出现两个同名项，而它们的 id（= 路径）不同。 */
 function uniquePath(app: App, folder: string, base: string, ext: string): string {
-	const clean = base.replace(/[\\/:*?"<>|#^\[\]]/g, "_").slice(0, 80) || "font";
+	const clean = base.replace(/[\\/:*?"<>|#^[\]]/g, "_").slice(0, 80) || "font";
 	let candidate = `${folder}/${clean}.${ext}`;
 	let n = 2;
 	while (app.vault.getAbstractFileByPath(candidate)) {

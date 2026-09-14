@@ -217,7 +217,7 @@ export class HighlightPopover {
 		this.stopWatching();
 		this.commentWrap.hide();
 		this.barRow.removeClass("is-hidden");
-		this.commentInput.style.maxHeight = "";
+		this.commentInput.style.removeProperty("max-height");
 		const bounds = this.boundsResolver?.() ?? this.lastBounds;
 		if (bounds) this.reposition(this.lastAnchorRect, bounds);
 	}
@@ -231,7 +231,7 @@ export class HighlightPopover {
 	}
 
 	private reposition(anchorRect: DOMRect | null, bounds: Bounds): void {
-		this.containerEl.style.visibility = "hidden";
+		this.containerEl.addClass("is-measuring");
 		this.containerEl.addClass("is-visible");
 		void this.containerEl.offsetHeight;
 		let tw = this.containerEl.offsetWidth || 260;
@@ -241,7 +241,7 @@ export class HighlightPopover {
 			th = this.containerEl.offsetHeight || th;
 			tw = this.containerEl.offsetWidth || tw;
 		}
-		this.containerEl.style.visibility = "";
+		this.containerEl.removeClass("is-measuring");
 		const { left, top, origin } = placeFloating(anchorRect, { width: tw, height: th }, bounds, { margin: 8, gap: 8 });
 		this.containerEl.style.left = `${left}px`;
 		this.containerEl.style.top = `${top}px`;
@@ -263,7 +263,7 @@ export class HighlightPopover {
 		this.commentWrap.hide();
 		this.barRow.removeClass("is-hidden");
 		this.commentInput.value = this.target.comment ?? "";
-		this.commentInput.style.maxHeight = "";
+		this.commentInput.style.removeProperty("max-height");
 
 		this.lastAnchorRect = anchorRect;
 		// 有供体就用现测值：侧栏触发 / 展开评论时键盘已经弹起，传入的 bounds 可能已过期
@@ -282,12 +282,12 @@ export class HighlightPopover {
 		this.stopWatching();
 		if (this.commentInput) {
 			this.commentInput.value = "";
-			this.commentInput.style.maxHeight = "";
+			this.commentInput.style.removeProperty("max-height");
 		}
 		this.commentWrap?.hide();
 		this.barRow?.removeClass("is-hidden");
 		this.containerEl.removeClass("is-visible");
-		this.containerEl.style.transformOrigin = "center bottom";
+		this.containerEl.style.removeProperty("transform-origin");
 	}
 
 	get visible(): boolean {

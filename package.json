@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "0.2.6",
+  "version": "0.2.7",
   "description": "UNreader - A beautiful, fully offline e-book reader. EPUB first, plus MOBI/AZW3 and TXT.",
   "main": "main.js",
   "type": "module",
@@ -8,6 +8,7 @@
     "dev": "node esbuild.config.mjs",
     "build": "tsc -noEmit -skipLibCheck && node esbuild.config.mjs production",
     "typecheck": "tsc -noEmit -skipLibCheck",
+    "lint": "eslint .",
     "deploy": "node scripts/deploy.mjs",
     "release": "node scripts/release-sync.mjs patch",
     "release:minor": "node scripts/release-sync.mjs minor",
@@ -58,11 +59,17 @@
   "author": "UNcore",
   "license": "SEE LICENSE IN LICENSE",
   "devDependencies": {
+    "@eslint/js": "^10.0.1",
     "@types/node": "^22.15.17",
     "builtin-modules": "^4.0.0",
     "esbuild": "0.25.5",
+    "eslint": "^10.10.0",
+    "eslint-plugin-obsidianmd": "^0.4.2",
+    "globals": "^17.12.0",
+    "jiti": "^2.7.0",
     "obsidian": "latest",
     "playwright-core": "^1.63.0",
-    "typescript": "^5.8.3"
+    "typescript": "^5.8.3",
+    "typescript-eslint": "^8.70.0"
   }
 }

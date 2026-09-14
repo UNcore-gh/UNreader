@@ -39,7 +39,7 @@ function notesDirFor(): string {
 }
 
 export function annotationFileFor(bookFile: TFile): string {
-	const base = bookFile.basename.replace(/[\\/:*?"<>|#^\[\]]/g, "_");
+	const base = bookFile.basename.replace(/[\\/:*?"<>|#^[\]]/g, "_");
 	return normalizePath(`${notesDirFor()}/${base}.md`);
 }
 

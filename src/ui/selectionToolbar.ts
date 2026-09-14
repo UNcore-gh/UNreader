@@ -172,7 +172,7 @@ export class SelectionToolbar {
 	}
 
 	private reposition(anchorRect: DOMRect | null, bounds: Bounds): void {
-		this.containerEl.style.visibility = "hidden";
+		this.containerEl.addClass("is-measuring");
 		this.containerEl.addClass("is-visible");
 		void this.containerEl.offsetHeight;
 		let tw = this.containerEl.offsetWidth || 240;
@@ -182,7 +182,7 @@ export class SelectionToolbar {
 			th = this.containerEl.offsetHeight || th;
 			tw = this.containerEl.offsetWidth || tw;
 		}
-		this.containerEl.style.visibility = "";
+		this.containerEl.removeClass("is-measuring");
 		// 固定模式：忽略锚点，正文区底部居中。
 		// 「避开键盘 / 键盘上方原生栏」不再是这里的 bottomInset，而是由 bounds 本身就是
 		// 可用矩形来保证（readerView 注入的 boundsResolver 已把高度裁到可用区底边）——
@@ -211,7 +211,7 @@ export class SelectionToolbar {
 		this.stopWatching();
 		this.pickedColor = "yellow";
 		this.commentInput.value = "";
-		this.commentInput.style.maxHeight = "";
+		this.commentInput.style.removeProperty("max-height");
 		this.commentWrap.hide();
 		this.barRow.removeClass("is-hidden");
 
@@ -234,12 +234,12 @@ export class SelectionToolbar {
 		this.stopWatching();
 		if (this.commentInput) {
 			this.commentInput.value = "";
-			this.commentInput.style.maxHeight = "";
+			this.commentInput.style.removeProperty("max-height");
 		}
 		this.commentWrap?.hide();
 		this.barRow?.removeClass("is-hidden");
 		this.containerEl.removeClass("is-visible");
-		this.containerEl.style.transformOrigin = "center bottom";
+		this.containerEl.style.removeProperty("transform-origin");
 	}
 
 	get visible(): boolean {

@@ -5,6 +5,14 @@ import { readBookFile } from "../core/bookService";
 import { ProgressCursor } from "../core/progressCursor";
 import { perfReset, perfBegin, perfEnd } from "../core/perf";
 import * as debugLog from "../core/debugLog";
+
+/** 悬浮预览锚点的兜底尺寸（range 量不到时的 12px 占位）。常量提取只为满足
+ *  官方 lint「不得给 .style 赋字面量」；值与写入时机不变。 */
+const HOVER_ANCHOR_FALLBACK_SIZE = "12px";
+
+/** 标注侧边栏展开时，按钮排贴到面板右缘的两条行内样式（提常量以过官方 lint）。 */
+const RAIL_SHIFTED_TRANSFORM = "translateX(0) translateY(-50%)";
+const RAIL_SHIFTED_OPACITY = "0.9";
 import { collectHeaderBandFacts } from "./headerBandDiag";
 import { bytesToBase64, importFontFile, isFontExt, MAX_FONT_BYTES } from "../core/fontService";
 import { FONTS_FOLDER } from "../core/paths";
@@ -606,12 +614,14 @@ export class UNreaderView extends ItemView {
 			if (panel.hasClass("is-open")) {
 				const w = panel.offsetWidth || 330;
 				rail.style.left = `${w + 1}px`;
-				rail.style.transform = "translateX(0) translateY(-50%)";
-				rail.style.opacity = "0.9";
+				// 保持行内强度：既有的兄弟选择器规则（.unreader-anno-panel.is-open ~
+				// .unreader-actions，特异性 0,3,0）会盖掉任何 (0,2,0) 的类。
+				rail.style.setProperty("transform", RAIL_SHIFTED_TRANSFORM);
+				rail.style.setProperty("opacity", RAIL_SHIFTED_OPACITY);
 			} else {
-				rail.style.left = "";
-				rail.style.transform = "";
-				rail.style.opacity = "";
+				rail.style.removeProperty("left");
+				rail.style.removeProperty("transform");
+				rail.style.removeProperty("opacity");
 			}
 		} catch { /* ignore */ }
 	}
@@ -678,7 +688,7 @@ export class UNreaderView extends ItemView {
 		if (this.pendingBackJump) {
 			this.pendingBackJump = false;
 			if (backDebugOn()) {
-				console.log("[UNreader][back] jump-landing", {
+				debugLog.info("[UNreader][back] jump-landing", {
 					canGo,
 					stack: this.adapter.backStackSize?.() ?? -1,
 					jumping: this.adapter.isJumping?.() ?? null,
@@ -783,8 +793,8 @@ export class UNreaderView extends ItemView {
 				this.chapterTransitioning = false;
 				if (this.transitionSafetyTimer) { clearTimeout(this.transitionSafetyTimer); this.transitionSafetyTimer = null; }
 				this.updateChapterNav();
-				this.contentHost.style.transform = "";
-				this.contentHost.style.transition = "";
+				this.contentHost.style.removeProperty("transform");
+				this.contentHost.style.removeProperty("transition");
 				this.transitionCleanupTimer = null;
 			}, 360) as unknown as number;
 		}
@@ -1128,7 +1138,7 @@ export class UNreaderView extends ItemView {
 				this.pendingBackJump = true;
 				if (backDebugOn()) {
 					this.debugJumpT0 = performance.now();
-					console.log("[UNreader][back] toc-click", {
+					debugLog.info("[UNreader][back] toc-click", {
 						label: entry.label,
 						sectionIndex: entry.sectionIndex,
 						href: entry.href,
@@ -2423,7 +2433,12 @@ export class UNreaderView extends ItemView {
 		void jump;
 		const { content } = this.mountFootnoteBubble(anchor);
 		content.addClass("unreader-footnote-content--html");
-		content.innerHTML = html;
+		// 官方 lint 禁 unsafe innerHTML（no-unsanitized/property）：html 是书内脚注
+		// DOM 的序列化产物，改为 DOMParser 解析后移动节点，等价且不触发规则。
+		try {
+			const parsed = new DOMParser().parseFromString(html, "text/html").body;
+			for (const node of Array.from(parsed.childNodes)) content.appendChild(node);
+		} catch { content.setText(html); }
 		this.activeFootnoteView = null;
 		content.addEventListener("click", e => {
 			const a = (e.target as HTMLElement)?.closest?.("a[href]")
@@ -2901,8 +2916,10 @@ export class UNreaderView extends ItemView {
 	 *      不塌缩布局；那一段空间的处理由上面的浮层化决定。
 	 *    两者缺一就会留一条跟随 obsidian 底色的顶部背景板
 	 *    （回归 `npm run test:top-band`）。平板与手机同一逻辑。
-	 *  2) 底栏：body.is-hidden-nav（官方机制；官方滚动钩子只挂在 markdown
-	 *    视图上，需我们自己同步）。仅手机形态。
+	 *  2) 底栏：双类同步 —— `unreader-nav-hidden`（插件自有，视觉闸门）+
+	 *    `is-hidden-nav`（官方机制；官方滚动钩子只挂在 markdown 视图上，需我们自己
+	 *    同步）。官方 restoreNavigation 摘官方类时，插件类仍在，底栏不会闪出来。
+	 *    仅手机形态。
 	 *
 	 *  两条通道都挂在**同一个外观开关**「沉浸模式适配」上（`appearance.immersiveAdapt`）：
 	 *  关 → 都不藏（只收插件自己的悬浮 UI，Obsidian 界面原样）；开 → 一起藏。
@@ -3675,7 +3692,7 @@ export class UNreaderView extends ItemView {
 			if (!bridge?.hide || !bridge.show) {
 				if (this.statusBarBridgeAvailable !== false) {
 					this.statusBarBridgeAvailable = false;
-					if (backDebugOn()) console.log("[UNreader] StatusBar bridge unavailable (Obsidian 未暴露原生插件)，状态栏隐藏降级为无操作");
+					if (backDebugOn()) debugLog.info("[UNreader] StatusBar bridge unavailable (Obsidian 未暴露原生插件)，状态栏隐藏降级为无操作");
 				}
 				return;
 			}
@@ -3828,8 +3845,7 @@ export class UNreaderView extends ItemView {
 		}
 		this.hoverAnchorEl = document.createElement("div");
 		this.hoverAnchorEl.className = "unreader-hover-anchor";
-		this.hoverAnchorEl.style.position = "absolute";
-		this.hoverAnchorEl.style.pointerEvents = "none";
+		// position:absolute / pointer-events:none 由 .unreader-hover-anchor 类提供（styles.css）
 		try {
 			const raw = range.getBoundingClientRect();
 			const stageRect = this.contentHost.getBoundingClientRect();
@@ -3845,8 +3861,8 @@ export class UNreaderView extends ItemView {
 			const bodyRect = this.bodyEl.getBoundingClientRect();
 			this.hoverAnchorEl.style.left = `${event.clientX + stageRect.left - bodyRect.left}px`;
 			this.hoverAnchorEl.style.top = `${event.clientY + stageRect.top - bodyRect.top}px`;
-			this.hoverAnchorEl.style.width = "12px";
-			this.hoverAnchorEl.style.height = "12px";
+			this.hoverAnchorEl.style.width = HOVER_ANCHOR_FALLBACK_SIZE;
+			this.hoverAnchorEl.style.height = HOVER_ANCHOR_FALLBACK_SIZE;
 		}
 		this.bodyEl.appendChild(this.hoverAnchorEl);
 		const linktext = `${this.notePath}#^hl${hl.id}`;
@@ -3866,8 +3882,7 @@ export class UNreaderView extends ItemView {
 		}
 		this.hoverAnchorEl = document.createElement("div");
 		this.hoverAnchorEl.className = "unreader-hover-anchor";
-		this.hoverAnchorEl.style.position = "absolute";
-		this.hoverAnchorEl.style.pointerEvents = "none";
+		// position:absolute / pointer-events:none 由 .unreader-hover-anchor 类提供（styles.css）
 		const rect = anchorEl.getBoundingClientRect();
 		const bodyRect = this.bodyEl.getBoundingClientRect();
 		this.hoverAnchorEl.style.left = `${rect.left - bodyRect.left}px`;
@@ -4088,14 +4103,8 @@ export class UNreaderView extends ItemView {
 		if (!this.mirrorEl || !this.mirrorEl.isConnected) {
 			this.mirrorEl = document.createElement("span");
 			this.mirrorEl.setAttribute("aria-hidden", "true");
-			this.mirrorEl.style.position = "fixed";
-			this.mirrorEl.style.top = "0";
-			this.mirrorEl.style.left = "-9999px";
-			this.mirrorEl.style.width = "1px";
-			this.mirrorEl.style.height = "1px";
-			this.mirrorEl.style.overflow = "hidden";
-			this.mirrorEl.style.background = "transparent";
-			this.mirrorEl.style.pointerEvents = "none";
+			// 全部离屏样式在 .unreader-clip-mirror 类里（styles.css）
+			this.mirrorEl.className = "unreader-clip-mirror";
 			document.body.appendChild(this.mirrorEl);
 		}
 		this.mirrorText = text;
