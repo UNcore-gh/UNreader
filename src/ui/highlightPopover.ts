@@ -1,5 +1,6 @@
 import { setIcon, Notice } from "obsidian";
 import { HIGHLIGHT_COLORS, highlightColorOf } from "../types";
+import * as debugLog from "../core/debugLog";
 import { placeFloating, type Bounds } from "./floatingPlacement";
 import { subscribeKeyboardGeometry } from "./keyboardInset";
 
@@ -255,6 +256,19 @@ export class HighlightPopover {
 		bounds: Bounds,
 		focusComment = false,
 	): void {
+		// 评论编辑区展开期间，**同一条高亮的选区/定位事件重投**不得重置编辑态
+		// （机理与判据同 `SelectionToolbar.showFor`：重置会 `commentWrap.hide()` =
+		// `display:none` → 输入框 blur → 移动端软键盘刚弹起就被压回去，且已输入文字被清）。
+		// `focusComment` 显式要求（重新）展开编辑区时一律放行 —— 那是调用方的明确意图。
+		if (!focusComment && this.commentOpen && this.target && this.target.id === target.id) {
+			this.target = { ...target };
+			this.lastAnchorRect = anchorRect;
+			const freshBounds = this.boundsResolver?.() ?? bounds;
+			this.lastBounds = freshBounds;
+			this.reposition(anchorRect, freshBounds);
+			debugLog.info("[comment] 高亮浮窗的选区事件重投已让路（评论编辑区保持展开）", String(target.id));
+			return;
+		}
 		this.target = { ...target };
 		if (!this.barRow) this.render();
 		this.syncDots();
@@ -275,6 +289,8 @@ export class HighlightPopover {
 	}
 
 	hide(): void {
+		// 取证同 SelectionToolbar.hide：编辑区还开着时被后台路径收起 = 软键盘被压回去的真凶。
+		if (this.commentOpen) debugLog.info("[comment] hide() 在编辑评论期间收起高亮浮窗 ←", new Error("fold"));
 		this.target = null;
 		this.lastAnchorRect = null;
 		this.lastBounds = null;
@@ -292,5 +308,14 @@ export class HighlightPopover {
 
 	get visible(): boolean {
 		return this.containerEl.hasClass("is-visible");
+	}
+
+	/** 评论编辑区是否展开（其间用户可能正在打字、软键盘可能正弹着）。
+	 *
+	 *  readerView 的「背景活动」路径（relocate / 书页滚动 / 选区被系统收走）据此让路：
+	 *  收起容器会把正在编辑的输入框一起 blur 掉 —— 移动端表现为软键盘弹起又立刻被压回去
+	 *  （用户报的「划线时键盘闪一下就没法标注了」）。 */
+	get isCommentOpen(): boolean {
+		return this.commentOpen;
 	}
 }

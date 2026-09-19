@@ -23,7 +23,7 @@ export interface AppearanceSettings {
 	textColor: string | null       // 浅色文字 hex
 	darkBackgroundColor: string | null // 深色背景
 	darkTextColor: string | null       // 深色文字
-	/** 背景图片（data URI / http URL / 库内路径），null = 纯色背景；深浅共用 */
+	/** 背景图片（shared:image/<文件> / http URL；旧版兼容 data URI / 库内路径），null = 纯色背景；深浅共用 */
 	backgroundImage: string | null
 	/** 背景图片作用范围：shared=深浅共用 backgroundImage；separate=深浅分别用下面两个字段 */
 	bgImageMode: "shared" | "separate"
@@ -43,15 +43,19 @@ export interface AppearanceSettings {
 	showTocRail: boolean
 	/** 是否显示章节进度条（页面顶部的极简细条） */
 	chapterProgress: boolean
-	/** 沉浸模式适配：沉浸（滚动下滑藏工具栏）时是否连 **Obsidian 原生界面**一起收起。
-	 *  开 = 页首（三端）+ 手机端底栏 / 系统状态栏一起藏；关 = 只收本插件自己的悬浮 UI，
-	 *  Obsidian 的界面保持原样。默认值按平台给（移动端开、桌面端关，见 `main.ts` 迁移块）。
-	 *  页首一旦隐藏，内容区顶部整片让出，章节进度条随之上移到屏幕最上面
-	 *  （不再为不存在的页首留位，见 readerView.syncProgressTop）。
-	 *  判据在 `ui/nativeNavPolicy.ts`（纯函数，带真值表回归）。随外观预设保存。
-	 *  旧字段名 `hideHeader`（只藏页首）由 `adoptLegacyAppearance` 迁移。 */
-	immersiveAdapt: boolean
-	/** 打开书籍时自动展开浮动目录面板 */
+	/** 常态模式：工具栏默认参与显示。关闭后默认完全隐藏，但点击正文仍可临时唤出。 */
+	normalModeShowToolbar: boolean
+	/** 常态模式：滚动方向是否自动隐藏/唤出工具层。 */
+	normalModeScrollHide: boolean
+	/** 常态模式滚动隐藏时，是否连 Obsidian 页首/底栏一起接管。 */
+	normalModeHideNativeChrome: boolean
+	/** 全沉浸模式：是否保留浮动目录短轨及其面板。 */
+	fullImmersionShowTocRail: boolean
+	/** 全沉浸模式：是否保留章节进度条。 */
+	fullImmersionShowChapterProgress: boolean
+	/** 全沉浸模式：点击正文时是否临时显示常态工具层与原生界面。 */
+	fullImmersionTapReveal: boolean
+	/** 打开书籍时自动展开浮动目录面板（默认关闭，只打开正文） */
 	autoOpenToc: boolean
 	/** 浮动按钮框/目录条大小倍率（1 = 标准；作用于左缘功能按钮排与右缘章节短横轨） */
 	railScale: number
@@ -81,27 +85,62 @@ export const DEFAULT_APPEARANCE: AppearanceSettings = {
 	glassEnabled: false,
 	glassBlur: 12,
 	glassOpacity: 0.55,
-	showTocRail: true,
+	showTocRail: false,
 	chapterProgress: true,
-	immersiveAdapt: false,
-	autoOpenToc: true,
+	normalModeShowToolbar: true,
+	normalModeScrollHide: true,
+	normalModeHideNativeChrome: true,
+	fullImmersionShowTocRail: false,
+	fullImmersionShowChapterProgress: false,
+	fullImmersionTapReveal: false,
+	autoOpenToc: false,
 	railScale: 1,
 }
 
-/** 旧字段就地迁移：`hideHeader` → `immersiveAdapt`（2026-09-14 改名）。
- *
- *  为什么必须**在合并默认值之前**对原始对象调用：`Object.assign({}, DEFAULT_APPEARANCE, raw)`
- *  总会给出一个布尔值（默认 false），合并后再判 `typeof === "boolean"` 就永远为真 ——
- *  旧快照里 `hideHeader: true` 会被默认值盖掉，用户升级后「沉浸时隐藏页首」静默失灵。
- *  调用方：`main.ts`（设备快照 / data.json 中的外观）、`presetStore`（预设文件）、
- *  `main.ts` 的旧预设迁移。新字段已存在时以新字段为准（用户在新版里改过），旧键一律删除。 */
-export function adoptLegacyAppearance(raw: Record<string, unknown>): void {
-	if (typeof raw.immersiveAdapt === "boolean") {
-		delete raw.hideHeader
-		return
+/** 平台相关的常态模式默认值。移动端/平板优先接管原生界面，桌面保持窗口导航。 */
+export function platformAppearanceDefaults(mobileLike: boolean): Pick<AppearanceSettings,
+	"normalModeScrollHide" | "normalModeHideNativeChrome"> {
+	return {
+		normalModeScrollHide: mobileLike,
+		normalModeHideNativeChrome: mobileLike,
 	}
-	if (typeof raw.hideHeader === "boolean") raw.immersiveAdapt = raw.hideHeader
+}
+
+/** 在合并默认值之前迁移旧外观对象。
+ *
+ *  必须操作原始对象：`Object.assign({}, DEFAULT_APPEARANCE, raw)` 会先给所有新字段
+ *  填上布尔默认值，合并后再看 `typeof` 永远为真，旧 `hideHeader/immersiveAdapt` 就被静默
+ *  盖掉。`normalModeScrollHide` 的旧来源在顶层设置 `hideChromeOnScroll`，由 main.ts 在调用
+ *  本函数前写入 raw；缺失时按调用方传入的平台默认值补齐。新字段已存在时永远以新字段为准。
+ *  旧键一律删除，防止快照或预设继续落盘旧字段。 */
+/** 旧版顶层“滚动隐藏”迁移输入。只有用户显式设置过时才覆盖平台新默认。 */
+export interface LegacyScrollHideSource {
+	value?: unknown
+	explicitlySet?: unknown
+}
+
+export function adoptLegacyAppearance(
+	raw: Record<string, unknown>,
+	defaults: Pick<AppearanceSettings, "normalModeScrollHide" | "normalModeHideNativeChrome">,
+	legacyScroll?: LegacyScrollHideSource,
+): void {
+	const legacyScrollSet = legacyScroll?.explicitlySet === true || raw.hideChromeOnScrollSet === true
+	const legacyScrollValue = typeof legacyScroll?.value === "boolean"
+		? legacyScroll.value
+		: raw.hideChromeOnScroll
+	if (typeof raw.normalModeScrollHide !== "boolean" && legacyScrollSet && typeof legacyScrollValue === "boolean") {
+		raw.normalModeScrollHide = legacyScrollValue
+	}
+	if (typeof raw.normalModeHideNativeChrome !== "boolean") {
+		if (typeof raw.immersiveAdapt === "boolean") raw.normalModeHideNativeChrome = raw.immersiveAdapt
+		else if (typeof raw.hideHeader === "boolean") raw.normalModeHideNativeChrome = raw.hideHeader
+		else raw.normalModeHideNativeChrome = defaults.normalModeHideNativeChrome
+	}
+	if (typeof raw.normalModeScrollHide !== "boolean") raw.normalModeScrollHide = defaults.normalModeScrollHide
+	delete raw.immersiveAdapt
 	delete raw.hideHeader
+	delete raw.hideChromeOnScroll
+	delete raw.hideChromeOnScrollSet
 }
 
 export function normalizeHexColor(input: string | null | undefined, fallback: string): string {
@@ -166,6 +205,102 @@ export interface BookPosition {
 	cfi?: string
 }
 
+export type BookshelfSortMode = "scan" | "recent" | "manual"
+
+/** 书架卡片所需的轻量数据；封面与无封面时的首行文字另行按需加载。 */
+export interface BookshelfEntry {
+	path: string
+	name: string
+	extension: string
+	progress: number
+	updatedAt: number
+	pinned: boolean
+}
+
+/** 当前阅读区的统一内容源。电子书继续使用真实文件路径，RSS 文章/播客使用稳定条目键。 */
+export type ReaderSource =
+	| { kind: "book"; filePath: string }
+	| { kind: "feed-entry"; feedId: string; entryId: string }
+
+export type FeedEntryKind = "article" | "audio"
+export type FeedFilter = "all" | "unread" | "starred"
+
+export interface FeedSubscription {
+	id: string
+	title: string
+	siteUrl: string
+	feedUrl: string
+	description: string
+	addedAt: number
+	updatedAt: number
+	lastFetchedAt: number
+	lastError: string | null
+	etag: string | null
+	lastModified: string | null
+}
+
+export interface FeedEnclosure {
+	url: string
+	type: string
+	length: number | null
+	duration: number | null
+}
+
+/** 每个条目的可同步状态。单独的 updatedAt 让各字段可以按设备做后写胜出。 */
+export interface FeedEntryState {
+	readAt: number | null
+	starredAt: number | null
+	openedAt: number
+	position: BookPosition | null
+	/** 这篇文章是否已有高亮/书签；刷新时用于保护旧快照并等待重定位。 */
+	hasAnnotations?: boolean
+	stateUpdatedAt: number
+}
+
+export interface FeedEntry {
+	id: string
+	feedId: string
+	guid: string
+	kind: FeedEntryKind
+	title: string
+	url: string
+	author: string
+	publishedAt: number
+	updatedAt: number
+	summary: string
+	contentHtml: string
+	contentSource: "feed" | "fulltext"
+	contentHash: string
+	/** 刷新拿到的新正文。已有标注时先暂存，打开文章完成重定位后再提升为当前正文。 */
+	pendingContentHtml?: string
+	pendingContentHash?: string
+	pendingContentSource?: "feed" | "fulltext"
+	enclosure: FeedEnclosure | null
+	state: FeedEntryState
+}
+
+export interface FeedIndexFile {
+	version: 1
+	feeds: FeedSubscription[]
+	updatedAt: number
+}
+
+export interface FeedFileData {
+	version: 1
+	feedId: string
+	entries: FeedEntry[]
+	updatedAt: number
+}
+
+export interface FeedSettings {
+	refreshOnOpen: boolean
+	markReadOnOpen: boolean
+	loadRemoteImages: boolean
+	entryLimit: number
+	imageCacheMb: number
+	mediaCacheMb: number
+}
+
 export interface AppearancePreset {
 	id: string
 	name: string
@@ -176,9 +311,20 @@ export interface AppearancePreset {
 }
 
 export interface UNreaderSettings {
+	/** 书架排序：扫描顺序 / 最近阅读 / 手动。置顶书籍始终排在各自顺序之前。 */
+	bookshelfSortMode: BookshelfSortMode
+	/** 手动排序中的书籍路径；新书未收录时追加到末尾。 */
+	bookshelfManualOrder: string[]
+	/** 置顶书籍路径。 */
+	bookshelfPinned: string[]
 	positions: Record<string, BookPosition>
 	appearance: AppearanceSettings
 	appearancePresets: AppearancePreset[]
+	/** 资料文件夹（库内相对路径，null = 默认库根 `UNreader/`）：**插件数据文件的落点** ——
+	 *  阅读进度 / 外观预设 / 字体 / 共享资源 / 标注笔记都存在这里。
+	 *  切换时由 `core/libraryMigration.ts` 把这五个数据目录整树搬到新根；
+	 *  **书籍不受影响**（书在库里任何位置都能读，永远留在各自原来的文件夹）。 */
+	dataFolder: string | null
 	/** 高亮侧边栏是否钉住（常驻左侧，不再悬浮） */
 	annoPinned: boolean
 	/** 高亮侧边栏手动调节后的高度（px）；未设置 = 跟随默认全高 */
@@ -187,11 +333,6 @@ export interface UNreaderSettings {
 	annoPanelWidth?: number
 	/** 触发钉住按钮显示的最小宽度阈值（px），高于此值才显示“钉住” */
 	pinThreshold: number
-	/** 沉浸模式：开书即隐藏工具栏，下滑隐藏/上滑唤出，点屏幕中间切换显隐（移动端默认开） */
-	hideChromeOnScroll: boolean
-	/** 用户是否显式设置过沉浸模式（未设置时每次启动按平台重设默认值，
-	 *  防止桌面端写入的默认值经同步压住移动端的默认开启） */
-	hideChromeOnScrollSet?: boolean
 	/** 调试日志（诊断用，可开关的可选内存环形缓冲，设置页导出） */
 	debugLog: boolean
 	/** 把标注笔记登记进 Obsidian 的「排除文件」：高亮/书签旁车笔记不再出现在搜索、
@@ -201,17 +342,30 @@ export interface UNreaderSettings {
 	 *  「用户是否显式设置过」标记（那个标记存在是因为它的默认值按平台分叉，
 	 *  桌面端写入的默认值会经同步压住移动端的默认开启）。 */
 	excludeNotesFromSearch: boolean
+	/** RSS/Atom/JSON Feed 阅读设置。 */
+	feeds: FeedSettings
 }
 
 export const DEFAULT_SETTINGS: UNreaderSettings = {
+	bookshelfSortMode: "scan",
+	bookshelfManualOrder: [],
+	bookshelfPinned: [],
 	positions: {},
 	appearance: { ...DEFAULT_APPEARANCE },
 	appearancePresets: [],
+	dataFolder: null,
 	annoPinned: false,
 	pinThreshold: 720,
-	hideChromeOnScroll: false,
 	debugLog: false,
 	excludeNotesFromSearch: true,
+	feeds: {
+		refreshOnOpen: true,
+		markReadOnOpen: true,
+		loadRemoteImages: true,
+		entryLimit: 200,
+		imageCacheMb: 100,
+		mediaCacheMb: 500,
+	},
 }
 
 /** 自定义字体：库内字体文件扫描结果 */

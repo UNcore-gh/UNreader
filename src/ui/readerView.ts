@@ -1,7 +1,9 @@
 import { HoverPopover, ItemView, WorkspaceLeaf, TFile, Notice, setIcon, debounce, ViewStateResult, Platform } from "obsidian";
 import type UNreaderPlugin from "../main";
-import { EngineAdapter, RelocateInfo, RawFoliateView, styleFootnoteView, NavEntryModel, backDebugOn, isMobileLike, FrameSwipeInfo } from "../core/engineAdapter";
-import { readBookFile } from "../core/bookService";
+import { EngineAdapter, RelocateInfo, RawFoliateView, styleFootnoteView, NavEntryModel, backDebugOn, isMobileLike, FrameSwipeInfo, type BookOpenTarget } from "../core/engineAdapter";
+import { createVaultResourceResolver, getBookshelfEntries, isHtmlBookFile, readBookFile, sortBookshelfEntries } from "../core/bookService";
+import { loadBookPreview } from "../core/bookPreview";
+import { makeHtmlBook } from "../core/htmlBook";
 import { ProgressCursor } from "../core/progressCursor";
 import { perfReset, perfBegin, perfEnd } from "../core/perf";
 import * as debugLog from "../core/debugLog";
@@ -14,19 +16,24 @@ const HOVER_ANCHOR_FALLBACK_SIZE = "12px";
 const RAIL_SHIFTED_TRANSFORM = "translateX(0) translateY(-50%)";
 const RAIL_SHIFTED_OPACITY = "0.9";
 import { collectHeaderBandFacts } from "./headerBandDiag";
-import { bytesToBase64, importFontFile, isFontExt, MAX_FONT_BYTES } from "../core/fontService";
-import { FONTS_FOLDER } from "../core/paths";
-import type { AppearanceSettings } from "../types";
+import { importFontFile, isFontExt, MAX_FONT_BYTES } from "../core/fontService";
+import { FONTS_FOLDER, IMAGES_FOLDER } from "../core/paths";
+import type { AppearanceSettings, BookshelfSortMode, BookPosition } from "../types";
+import type { FeedEntry, FeedFilter, ReaderSource } from "../types";
 import { DEFAULT_APPEARANCE, activeTheme } from "../types";
 import { resolveActiveColors } from "../core/engineAdapter";
 import {
 	AnnotationFileData,
 	annotationFileFor,
+	annotationFileForFeed,
 	loadAnnotations,
 	writeAnnotations,
 	sanitizeBookmarkLabel,
 	StoredHighlight,
 } from "../core/annotationStore";
+import { makeFeedBook } from "../core/feedBookFactory";
+import { reconcileFeedAnnotationAnchors } from "../core/feedUtils";
+import { sanitizeArticleHtml } from "../core/articleExtractor";
 import { AppearancePanel } from "./appearancePanel";
 import { PresetNameModal } from "./presetModal";
 import { SelectionToolbar } from "./selectionToolbar";
@@ -37,7 +44,6 @@ import { PageJumpModal } from "./pageJumpModal";
 import { BackgroundImageModal, type BackgroundImagePick } from "./backgroundImageModal";
 import { FontPickModal, type FontPick } from "./fontPickModal";
 import { SideNav } from "./sideNav";
-import { revealChromeClasses } from "./chromeReveal";
 import { NativeNavGuard, PLUGIN_NAV_HIDDEN_CLASS } from "./nativeNavGuard";
 import { hasCoreModal, watchCoreModal, blurIfFocusInside, focusModalPrimary, arbitrateReaderFocus } from "../core/modalFocusGate";
 import { bottomBarHiddenByUs, headerHiddenByUs, type ImmersiveNativeInputs } from "./nativeNavPolicy";
@@ -90,6 +96,7 @@ export class UNreaderView extends ItemView {
 	private highlightPopover!: HighlightPopover;
 	private annotationsPanel!: AnnotationsPanel;
 	private sideNav!: SideNav;
+	private bookOnlyNavControls: HTMLElement[] = [];
 	private hoverRaf = 0;
 	/** Obsidian 官方悬浮预览 */
 	hoverPopover: HoverPopover | null = null;
@@ -97,6 +104,13 @@ export class UNreaderView extends ItemView {
 	private hoveredId: number | null = null;
 
 	file: TFile | null = null;
+	private feedRef: { feedId: string; entryId: string } | null = null;
+	private currentFeedEntry: FeedEntry | null = null;
+	/** 当前正文用于高亮迁移的版本；有 pending 时指向待提交的新版本。 */
+	private activeFeedContentHash: string | null = null;
+	private feedFilter: FeedFilter = "all";
+	private feedSourceFilter: string | null = null;
+	private feedAutoRefreshDone = false;
 	private loadedPath: string | null = null;
 	private loadingToken = 0;
 	/** 正在开书恢复上次阅读位置（见 loadBook 的 is-restoring / whenRestored）。
@@ -155,9 +169,16 @@ export class UNreaderView extends ItemView {
 	private pinThreshold = 720;
 	private pinResizeObserver: ResizeObserver | null = null;
 	private pinBtn: HTMLElement | null = null;
-	private immersiveBtn: HTMLElement | null = null;
+	private fullImmersionBtn: HTMLElement | null = null;
+	private fullImmersionExitEl: HTMLElement | null = null;
+	/** 全沉浸中的临时“点按唤出”态；只属于当前会话，不写设置。 */
+	private fullImmersionRevealed = false;
+	/** 会话级状态，不写设置：切书/关闭视图清理，标签页失活只释放原生导航。 */
+	private fullImmersion = false;
 	/** 功能轨上四个「开关型」按钮：各自对应的面板/浮层开着时常亮（见 syncRailButtons） */
 	private railTocBtn: HTMLElement | null = null;
+	private railShelfBtn: HTMLElement | null = null;
+	private railFeedsBtn: HTMLElement | null = null;
 	private railAnnoBtn: HTMLElement | null = null;
 	private railAppearanceBtn: HTMLElement | null = null;
 	private railSearchBtn: HTMLElement | null = null;
@@ -215,13 +236,13 @@ export class UNreaderView extends ItemView {
 	constructor(leaf: WorkspaceLeaf, plugin: UNreaderPlugin) {
 		super(leaf);
 		this.plugin = plugin;
-		this.savePositionDebounced = debounce((path: string, info: RelocateInfo) => {
+		this.savePositionDebounced = debounce((key: string, info: RelocateInfo) => {
 			if (!info.cfi) return;
-			this.plugin.savePosition(path, {
+			this.saveSourcePosition(key, {
 				anchor: info.cfi,
 				fraction: info.fraction,
 				updatedAt: Date.now(),
-			});
+			}, false);
 		}, 800, true);
 		this.navigation = true;
 	}
@@ -231,17 +252,20 @@ export class UNreaderView extends ItemView {
 	}
 
 	getDisplayText(): string {
-		return this.file?.basename ?? "UNreader";
+		return this.currentFeedEntry?.title || this.file?.basename || "UNreader";
 	}
 
 	getIcon(): string {
-		return "book-open";
+		return this.isFeedSource() ? "rss" : "book-open";
 	}
 
 	/** 开放接口：书内当前选区（三方插件经插件对象调用，见 main.ts getReaderSelection）。
 	 * 返回最近一次有效选区（点掉选区/切换章节时清除）；阅读器无选区返回 null。 */
 	getSelectionForExternal(): ReaderSelectionInfo | null {
-		if (!this.file) return null;
+		const source = this.getReaderSource();
+		if (!source) return null;
+		const sourcePath = source.kind === "book" ? source.filePath : `feed://${source.feedId}/${source.entryId}`;
+		const sourceName = source.kind === "book" ? this.file?.name ?? source.filePath : this.currentFeedEntry?.title ?? "订阅文章";
 		// 脚注气泡内的选区优先：与正文选区同等递出，三方插件行为一致
 		const bubbleText = this.footnoteBubbleSelection();
 		if (bubbleText) {
@@ -249,8 +273,8 @@ export class UNreaderView extends ItemView {
 				text: bubbleText,
 				cfi: null,
 				at: Date.now(),
-				bookPath: this.file.path,
-				bookName: this.file.name,
+					bookPath: sourcePath,
+					bookName: sourceName,
 				chapter: this.lastRelocate?.sectionLabel ?? null,
 			};
 		}
@@ -262,8 +286,8 @@ export class UNreaderView extends ItemView {
 				text: ps.text,
 				cfi: ps.cfi,
 				at: ps.at,
-				bookPath: this.file.path,
-				bookName: this.file.name,
+					bookPath: sourcePath,
+					bookName: sourceName,
 				chapter: ps.cfi ? this.adapter.getChapterLabelForCfi(ps.cfi) : null,
 			};
 		}
@@ -275,8 +299,8 @@ export class UNreaderView extends ItemView {
 				text: le.text,
 				cfi: le.cfi,
 				at: le.at,
-				bookPath: this.file.path,
-				bookName: this.file.name,
+					bookPath: sourcePath,
+					bookName: sourceName,
 				chapter: le.cfi ? this.adapter.getChapterLabelForCfi(le.cfi) : null,
 			};
 		}
@@ -301,10 +325,22 @@ export class UNreaderView extends ItemView {
 	}
 
 	async setState(state: unknown, result: ViewStateResult): Promise<void> {
-		const filePath = (state as { file?: unknown })?.file;
-		if (typeof filePath === "string" && filePath !== this.file?.path) {
-			const file = this.app.vault.getFileByPath(filePath);
-			if (file instanceof TFile) this.file = file;
+		const nextState = state as { file?: unknown; source?: unknown };
+		const source = nextState.source;
+		const filePath = nextState.file;
+		const incomingSource: ReaderSource | null = source && typeof source === "object" && (source as { kind?: unknown }).kind === "feed-entry"
+			? {
+				kind: "feed-entry",
+				feedId: String((source as { feedId?: unknown }).feedId ?? ""),
+				entryId: String((source as { entryId?: unknown }).entryId ?? ""),
+			}
+			: typeof filePath === "string"
+				? { kind: "book", filePath }
+				: null;
+		const nextKey = incomingSource ? this.sourceKey(incomingSource) : null;
+		if (incomingSource && nextKey !== this.currentSourceKey()) {
+			if (this.fullImmersion) this.exitFullImmersion({ restoreChrome: false });
+			this.applyReaderSource(incomingSource);
 		}
 		await super.setState(state, result);
 		if (this.chromeReady) {
@@ -316,7 +352,51 @@ export class UNreaderView extends ItemView {
 	}
 
 	getState(): Record<string, unknown> {
-		return { ...super.getState(), file: this.file?.path ?? null };
+		const source = this.getReaderSource();
+		return source?.kind === "feed-entry"
+			? { ...super.getState(), source }
+			: { ...super.getState(), file: this.file?.path ?? null };
+	}
+
+	private getReaderSource(): ReaderSource | null {
+		if (this.feedRef) return { kind: "feed-entry", feedId: this.feedRef.feedId, entryId: this.feedRef.entryId };
+		return this.file ? { kind: "book", filePath: this.file.path } : null;
+	}
+
+	private sourceKey(source: ReaderSource | null = this.getReaderSource()): string | null {
+		if (!source) return null;
+		return source.kind === "book" ? `book:${source.filePath}` : `feed:${source.feedId}:${source.entryId}`;
+	}
+
+	private currentSourceKey(): string | null {
+		return this.sourceKey();
+	}
+
+	private applyReaderSource(source: ReaderSource): void {
+		if (source.kind === "book") {
+			this.feedRef = null;
+			this.currentFeedEntry = null;
+			this.activeFeedContentHash = null;
+			const file = this.app.vault.getFileByPath(source.filePath);
+			this.file = file instanceof TFile ? file : null;
+			return;
+		}
+		this.file = null;
+		this.feedRef = { feedId: source.feedId, entryId: source.entryId };
+		this.currentFeedEntry = null;
+		this.activeFeedContentHash = null;
+	}
+
+	private isFeedSource(): boolean {
+		return this.feedRef != null;
+	}
+
+	/** 当前书是不是本地 HTML（core/htmlBook.ts 那条通道）。
+	 *  只有「外链点击怎么走」在用它 —— HTML 与 feed 一样：正文里的 http(s) 链接
+	 *  必须交还系统浏览器/`shell.openExternal`，不能让章节 iframe 自己导航过去
+	 *  （srcdoc 无 sandbox，导航会真的发生，而阅读器没有地址栏也没有返回入口）。 */
+	private isHtmlSource(): boolean {
+		return isHtmlBookFile(this.file);
 	}
 
 	async onOpen(): Promise<void> {
@@ -369,6 +449,7 @@ export class UNreaderView extends ItemView {
 		});
 		this.nativeNavGuard.start();
 		this.installNavForensics();
+		this.installCommentFocusForensics();
 
 		// 模态框（命令面板/快速切换/设置/任意插件弹窗）**出现的那一刻**，把阅读器手上的
 		// 键盘焦点交出去。这是问题的另一半：`focusContent()` 那道门只管「下次来抢」，
@@ -413,6 +494,11 @@ export class UNreaderView extends ItemView {
 		this.registerDomEvent(window, "keydown", (e: KeyboardEvent) => {
 			const ev = e as KeyboardEvent & { __unreaderForwarded?: boolean; __unreaderHandled?: boolean };
 			if (ev.__unreaderForwarded || ev.__unreaderHandled) return;
+			if (e.key === "Escape" && this.fullImmersion) {
+				e.preventDefault();
+				this.exitFullImmersion();
+				return;
+			}
 			// 只接翻页/跳章键：其余按键放行给 Obsidian keymap 处理原始事件，
 			// 避免经 handleKey 二次转发造成命令双触发
 			const navKeys = ["ArrowLeft", "ArrowRight", "ArrowUp", "ArrowDown", "PageUp", "PageDown", " ", "[", "]", "BracketLeft", "BracketRight"];
@@ -440,8 +526,14 @@ export class UNreaderView extends ItemView {
 		// —— 用户下次打开就回到几屏之前（报障原话「偶尔进度丢失」）。桌面端同样覆盖
 		// 「关窗口 / 系统休眠 / 强退」这些拿不到优雅收场的路径。
 		this.registerDomEvent(document, "visibilitychange", () => {
-			if (document.visibilityState === "hidden") this.flushPosition(true);
-			else this.scheduleLoad();
+			if (document.visibilityState === "hidden") {
+				this.flushPosition(true);
+				// app 级底栏/状态栏控制不跨后台生命周期持有；回到前台再按当前全沉浸/常态状态重放。
+				this.releaseNativeNav();
+			} else {
+				this.scheduleLoad();
+				this.syncNativeNav("visible");
+			}
 		});
 		this.registerDomEvent(window, "pagehide", () => this.flushPosition(true));
 		// 焦点/点击进入阅读器（含书页 iframe 边界）时，把本视图登记为最近阅读视图，
@@ -457,7 +549,11 @@ export class UNreaderView extends ItemView {
 				// 后台标签页启动时不解析整本书；切到它时才真正开书。
 				this.scheduleLoad();
 			}
-			else this.releaseNativeNav();
+			else {
+				// 全沉浸是会话态，切到其他视图即结束；返回本叶时从常态重新开始。
+				if (this.fullImmersion) this.exitFullImmersion();
+				this.releaseNativeNav();
+			}
 		}));
 		// 同一 leaf 内切换标签页（阅读器 → 其他插件视图）**不触发 active-leaf-change**
 		// ——activeLeaf 对象没变，只是 leaf 上的 view 换了。此时残留的全局
@@ -466,7 +562,10 @@ export class UNreaderView extends ItemView {
 		// 会同时把顶栏和底栏藏掉，表现为兄弟插件「一进去就是沉浸模式」。
 		// 这里补一条 layout-change 通道兜住同 leaf 换 view 的失活场景。
 		this.registerEvent(this.app.workspace.on("layout-change", () => {
-			if (!this.isSelfActive()) this.releaseNativeNav();
+			if (!this.isSelfActive()) {
+				if (this.fullImmersion) this.exitFullImmersion();
+				this.releaseNativeNav();
+			}
 			else this.scheduleLoad();
 		}));
 		// 「外观 → 全屏」切换时立即重估原生导航隐藏（关掉全屏必须马上还原，
@@ -506,6 +605,8 @@ export class UNreaderView extends ItemView {
 
 	/** 标签页切回/布局变化时驱动连续模式填充：隐藏期间 scroll 事件不触发，填充链会停摆 */
 	onResize(): void {
+		// 折叠屏/分屏/横竖屏跨过 is-phone / is-tablet 门槛时，立即重算原生界面接管策略。
+		this.syncNativeNav("resize");
 		this.adapter.notifyVisible();
 		this.scheduleLoad();
 		// 尺寸变化会改变页首几何（横竖屏、分栏、iPad 分屏），进度条让位需重测
@@ -516,6 +617,8 @@ export class UNreaderView extends ItemView {
 
 	async onClose(): Promise<void> {
 		this.plugin.forgetActiveReader(this);
+		// 全沉浸是会话态：视图消失时先摘插件类，再释放两条 app 级原生导航控制。
+		this.clearFullImmersion();
 		// 先停自愈守卫再释放：否则 releaseNativeNav 摘类会被守卫判成「外部摘类」，
 		// 在本视图正在关闭、isSelfActive 尚未翻转的窗口里又补回这个 app 级类
 		this.nativeNavGuard?.stop();
@@ -583,25 +686,157 @@ export class UNreaderView extends ItemView {
 
 
 	toggleAnnotations(): void {
+		this.toggleSidePanel("annotations");
+	}
+
+	/** 工具栏/命令入口：打开书籍侧边栏；已在该模式时再点关闭。 */
+	toggleBookshelf(): void {
+		this.toggleSidePanel("bookshelf");
+	}
+
+	/** 工具栏/命令入口：打开订阅侧边栏；已在该模式时再点关闭。 */
+	toggleFeeds(): void {
+		this.toggleSidePanel("feeds");
+	}
+
+	refreshFeedsPanel(): void {
+		this.annotationsPanel?.refreshFeeds();
+	}
+
+	getCurrentFeedSource(): { feedId: string; entryId: string } | null {
+		return this.feedRef ? { ...this.feedRef } : null;
+	}
+
+	showEmptyState(): void {
+		this.loadedPath = null;
+		this.feedRef = null;
+		this.currentFeedEntry = null;
+		this.activeFeedContentHash = null;
+		this.showEmpty();
+	}
+
+	private async openFeedEntry(feedId: string, entryId: string): Promise<void> {
+		if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId && this.adapter.hasBook()) {
+			this.annotationsPanel.show();
+			this.annotationsPanel.refreshFeeds();
+			this.adapter.focusContent();
+			return;
+		}
+		this.applyReaderSource({ kind: "feed-entry", feedId, entryId });
+		this.scheduleLoad();
+	}
+
+	private async refreshFeeds(): Promise<void> {
+		try {
+			new Notice("正在刷新订阅…");
+			const results = await this.plugin.feedService.refreshAll(true);
+			const failed = results.filter(result => result.error).length;
+			new Notice(failed ? `刷新完成，${failed} 个订阅失败` : "订阅已刷新");
+			this.annotationsPanel.refreshFeeds();
+		} catch (error) {
+			new Notice(`刷新失败：${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private async toggleFeedStar(feedId: string, entryId: string): Promise<void> {
+		const entry = this.plugin.feedStore.getEntry(feedId, entryId);
+		if (!entry) return;
+		await this.plugin.feedStore.updateEntryState(feedId, entryId, {
+			starredAt: entry.state.starredAt ? null : Date.now(),
+		});
+		this.annotationsPanel.refreshFeeds();
+	}
+
+	private async toggleFeedRead(feedId: string, entryId: string): Promise<void> {
+		const entry = this.plugin.feedStore.getEntry(feedId, entryId);
+		if (!entry) return;
+		await this.plugin.feedStore.updateEntryState(feedId, entryId, {
+			readAt: entry.state.readAt == null ? Date.now() : null,
+		});
+		this.annotationsPanel.refreshFeeds();
+	}
+
+	private async fetchFeedFulltext(feedId: string, entryId: string): Promise<void> {
+		try {
+			new Notice("正在抓取网页全文…");
+			const entry = await this.plugin.feedService.fetchFulltext(feedId, entryId);
+			if (!entry) throw new Error("文章不存在");
+			new Notice("全文已缓存");
+			this.annotationsPanel.refreshFeeds();
+			if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId) this.scheduleLoad();
+		} catch (error) {
+			new Notice(`全文抓取失败：${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private toggleSidePanel(mode: "annotations" | "bookshelf" | "feeds"): void {
 		// 面板是**贴顶 / 贴底铺满的不透明抽屉**，开合前把两条原生 chrome 的让位量
 		// （--ur-top-inset / --ur-bottom-inset）重测一遍：页首与底栏随时会被收走或收起
 		// （官方全屏 / 悬浮导航 / 键盘弹起 / 沉浸模式），上一次同步可能是几分钟前的几何。
 		this.syncProgressTop();
-		// 两面板可共存：不再主动关闭外观面板（外观面板会自动向右避让）
-		this.annotationsPanel.render(this.annotations);
-		const willOpen = !this.annotationsPanel.isOpen();
-		this.annotationsPanel.toggle();
-		if (willOpen && !this.pinned) {
-			// 悬浮态打开后，若鼠标不在面板内，短暂延迟后可自动关闭（由 mouseleave 驱动，此处仅清理旧计时）
-			this.cancelAnnoAutoClose();
-		} else if (!willOpen) {
-			this.cancelAnnoAutoClose();
+		const hide = this.annotationsPanel.isOpen() && this.annotationsPanel.getMode() === mode;
+		if (hide) {
+			this.annotationsPanel.hide();
+		} else {
+			// 两面板可共存：不再主动关闭外观面板（外观面板会自动向右避让）
+			if (mode === "annotations") this.annotationsPanel.render(this.annotations);
+			this.annotationsPanel.setMode(mode);
+			this.annotationsPanel.show();
+			if (mode === "feeds" && !this.feedAutoRefreshDone && this.plugin.settings.feeds.refreshOnOpen !== false) {
+				this.feedAutoRefreshDone = true;
+				queueMicrotask(() => { void this.refreshFeeds(); });
+			}
 		}
+		if (hide) this.cancelAnnoAutoClose();
 		// 标注侧边栏显隐会移动按钮轨，外观面板若已打开需重新对齐
 		this.alignAppearancePanel();
 		this.alignActionsRail();
 		// 侧边栏开合改变正文宽度 → 文字重排，驱动高亮矩形重定位（布局变化不触发 onResize）
 		this.adapter.notifyVisible();
+	}
+
+	private setBookshelfSortMode(mode: BookshelfSortMode): void {
+		if (mode !== "scan" && mode !== "recent" && mode !== "manual") return;
+		this.plugin.settings.bookshelfSortMode = mode;
+		void this.plugin.persistData();
+		this.annotationsPanel.setMode("bookshelf");
+	}
+
+	private reorderBookshelf(paths: string[]): void {
+		const seen = new Set<string>();
+		this.plugin.settings.bookshelfManualOrder = paths.filter(path => {
+			if (!path || seen.has(path)) return false;
+			seen.add(path);
+			return true;
+		});
+		this.plugin.settings.bookshelfSortMode = "manual";
+		void this.plugin.persistData();
+		this.annotationsPanel.setMode("bookshelf");
+	}
+
+	private toggleBookPin(path: string): void {
+		const pinned = new Set(this.plugin.settings.bookshelfPinned);
+		if (pinned.has(path)) pinned.delete(path);
+		else pinned.add(path);
+		this.plugin.settings.bookshelfPinned = [...pinned];
+		void this.plugin.persistData();
+		this.annotationsPanel.setMode("bookshelf");
+	}
+
+	private async openBookFromShelf(path: string): Promise<void> {
+		const file = this.app.vault.getFileByPath(path);
+		if (!(file instanceof TFile)) {
+			new Notice(`找不到书籍：${path}`);
+			return;
+		}
+		this.annotationsPanel.setMode("annotations");
+		if (this.file?.path === path) {
+			this.annotationsPanel.show();
+			this.adapter.focusContent();
+			return;
+		}
+		await this.plugin.openBook(file);
+		this.annotationsPanel.setMode("annotations");
 	}
 
 	/** 按钮排紧贴标注面板右缘：读取面板实际宽度设置 left（CSS 变量在面板宽度
@@ -635,7 +870,7 @@ export class UNreaderView extends ItemView {
 		this.syncOuterAppearance();
 	}
 
-	toggleAppearance(): void {
+	toggleAppearance(section: "normal" | "full" | null = null): void {
 		const willOpen = !this.appearancePanel.isOpen();
 		// 钉住模式下两面板共存；仅悬浮态关闭标注侧边栏避免遮挡
 		if (willOpen && this.annotationsPanel.isOpen() && !this.pinned) this.annotationsPanel.hide();
@@ -646,10 +881,10 @@ export class UNreaderView extends ItemView {
 			void this.plugin.whenDataReady()
 				.then(() => this.plugin.presetStore.reload())
 				.then(() => {
-					if (this.appearancePanel.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+					if (this.appearancePanel.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance, section);
 				}).catch(() => {});
 		}
-		this.appearancePanel.toggle(this.plugin.settings.appearance);
+		this.appearancePanel.toggle(this.plugin.settings.appearance, section);
 	}
 
 
@@ -1029,8 +1264,10 @@ export class UNreaderView extends ItemView {
 	 *  `loadGateBusy` 是单飞行闸门；`loadReqSeq` 让「开书期间又 setState 换书」不会
 	 *  丢请求，也不会让两个 loadBook 并发写同一棵 DOM。 */
 	private scheduleLoad(): void {
-		if (!this.file) return;
-		if (this.loadedPath === this.file.path && this.adapter.hasBook()) return;
+		const source = this.getReaderSource();
+		if (!source) return;
+		const key = this.sourceKey(source);
+		if (key && this.loadedPath === key && this.adapter.hasBook()) return;
 		this.loadReqSeq++;
 		if (this.loadGateBusy) return;
 		this.loadGateBusy = true;
@@ -1046,7 +1283,7 @@ export class UNreaderView extends ItemView {
 					else await Promise.resolve();
 					if (!this.containerEl.isConnected) return;
 					// 布局刚结束时 active tab / 可见性才稳定；隐藏的后台阅读标签留到切页。
-					if (this.file && this.isReaderVisible()) await this.tryLoad();
+					if (this.getReaderSource() && this.isReaderVisible()) await this.tryLoad();
 				}
 			} catch (e) {
 				console.error("[UNreader] scheduled load failed", e);
@@ -1057,15 +1294,18 @@ export class UNreaderView extends ItemView {
 	}
 
 	private async tryLoad(): Promise<void> {
-		if (!this.chromeReady || !this.file) return;
-		if (this.loadedPath === this.file.path && this.adapter.hasBook()) return;
+		const source = this.getReaderSource();
+		if (!this.chromeReady || !source) return;
+		const key = this.sourceKey(source);
+		if (key && this.loadedPath === key && this.adapter.hasBook()) return;
 		await this.loadBook();
 	}
 
 	private async loadBook(): Promise<void> {
-		const file = this.file;
-		if (!file) return;
+		const source = this.getReaderSource();
+		if (!source) return;
 		const token = ++this.loadingToken;
+		const sourceKey = this.sourceKey(source)!;
 
 		this.showLoading();
 		// 恢复定位期间容器**有布局但不绘制**：恢复落点全靠 offsetTop /
@@ -1073,8 +1313,9 @@ export class UNreaderView extends ItemView {
 		// 是 display:none（几何全为 0 → 落点退化成书首）。隐藏由 styles.css 的
 		// is-restoring 负责（visibility:hidden 保留布局），落定后再由 has-book 揭示。
 		this.restoring = true;
-		this.cursor.reset(file.path);
+		this.cursor.reset(sourceKey);
 		this.rootEl.addClass("is-restoring");
+		this.rootEl.toggleClass("is-feed-source", source.kind === "feed-entry");
 		perfReset();
 		perfBegin("loadBook");
 		try {
@@ -1083,16 +1324,64 @@ export class UNreaderView extends ItemView {
 			// whenDataReady 也挂在这里：进度/预设库初始化已被移出插件启用路径
 			// （见 main.ts 的 dataReady），但下面 getPosition 需要它，放在并行组里
 			// 与读整包重叠，实际不产生额外等待。
-			this.notePath = annotationFileFor(file);
-			const [, blobFile, annotations] = await Promise.all([
-				this.plugin.refreshCustomFonts().catch(() => undefined),
-				readBookFile(this.app, file),
-				loadAnnotations(this.app.vault, this.notePath, file.path),
-				this.plugin.whenDataReady(),
-				// 钉住预设的恢复也在这里发生：它内部会等 whenDataReady，但 loadBook 已经
-				// 由 scheduleLoad 安排在 layout ready 之后，不再和 Obsidian 的布局互相等待。
-				this.applyDevicePreset().then(() => this.syncOuterAppearance()),
-			]);
+			let target: BookOpenTarget;
+			let annotations: AnnotationFileData;
+			let saved: BookPosition | undefined;
+			if (source.kind === "book") {
+				const file = this.file;
+				if (!file) throw new Error("书籍文件不存在");
+				this.notePath = annotationFileFor(file);
+				saved = this.plugin.getPosition(file.path);
+				const [, blobFile, loadedAnnotations] = await Promise.all([
+					this.plugin.refreshCustomFonts().catch(() => undefined),
+					readBookFile(this.app, file),
+					loadAnnotations(this.app.vault, this.notePath, file.path),
+					this.plugin.whenDataReady(),
+					this.applyDevicePreset().then(() => this.syncOuterAppearance()),
+				]);
+				// 本地 HTML 与 TXT 一样是「我们先合成 book、再交给 foliate」的形态：
+				// 净化 + 相对资源改写都在 makeHtmlBook 里做完（srcdoc 章节没有 base URL，
+				// 资源 URL 必须烧进 HTML —— 见 core/htmlBook.ts 文件头）。
+				target = isHtmlBookFile(file)
+					? await makeHtmlBook(blobFile, { resolveResource: createVaultResourceResolver(this.app, file.path) })
+					: blobFile;
+				annotations = loadedAnnotations;
+			} else {
+				await this.plugin.whenDataReady();
+				await Promise.all([
+					this.plugin.refreshCustomFonts().catch(() => undefined),
+					this.applyDevicePreset().then(() => this.syncOuterAppearance()),
+				]);
+				const entry = this.plugin.feedStore.getEntry(source.feedId, source.entryId);
+				if (!entry) throw new Error("订阅文章已不存在，可能已被刷新清理");
+				const feed = this.plugin.feedStore.getFeed(entry.feedId);
+				const openedAt = Date.now();
+				await this.plugin.feedStore.updateEntryState(entry.feedId, entry.id, {
+					openedAt,
+					readAt: entry.state.readAt ?? (this.plugin.settings.feeds.markReadOnOpen !== false ? openedAt : null),
+				});
+				this.currentFeedEntry = this.plugin.feedStore.getEntry(entry.feedId, entry.id) ?? entry;
+				saved = this.currentFeedEntry.state.position ?? undefined;
+				this.notePath = annotationFileForFeed(entry.feedId, entry.id, entry.title);
+				annotations = await loadAnnotations(this.app.vault, this.notePath, entry.url || entry.title);
+				const pendingHash = this.currentFeedEntry.pendingContentHash;
+				const contentHtml = pendingHash && this.currentFeedEntry.pendingContentHtml != null
+					? this.currentFeedEntry.pendingContentHtml
+					: this.currentFeedEntry.contentHtml;
+				this.activeFeedContentHash = pendingHash || this.currentFeedEntry.contentHash;
+				const sanitized = sanitizeArticleHtml(
+					contentHtml || `<p>${this.currentFeedEntry.summary}</p>`,
+					this.currentFeedEntry.url,
+					this.plugin.settings.feeds.loadRemoteImages !== false,
+				);
+				const prepared = await this.plugin.feedMediaStore.prepareArticleHtml(
+					sanitized,
+					this.currentFeedEntry.url,
+					this.plugin.settings.feeds.loadRemoteImages !== false && this.plugin.settings.feeds.imageCacheMb > 0,
+				);
+				this.currentFeedEntry = { ...this.currentFeedEntry, contentHtml: prepared };
+				target = makeFeedBook(this.currentFeedEntry, feed);
+			}
 			if (token !== this.loadingToken) return;
 			this.annotations = annotations;
 
@@ -1120,12 +1409,11 @@ export class UNreaderView extends ItemView {
 				onNavDerived: () => this.renderNavPanel(),
 			});
 
-			const saved = this.plugin.getPosition(file.path);
 			// 取证一行：出「进度丢了」的报障时，先看这里是「无记录」还是「记了但落点不对」
 			// ——两者是完全不同的故障面（前者查存储，后者查锚点解析/恢复）
-			debugLog.info("[progress] open", file.path,
+			debugLog.info("[progress] open", sourceKey,
 				saved ? `restore ${saved.anchor.slice(0, 32)} @${saved.updatedAt} ${saved.fraction.toFixed(3)}` : "无记录（从书首打开）");
-			const meta = await this.adapter.load(blobFile, saved?.anchor || undefined, this.plugin.settings.appearance);
+			await this.adapter.load(target, saved?.anchor || undefined, this.plugin.settings.appearance);
 			// **开书即在上次阅读位置**：等恢复落点确定再揭示正文。旧流程在这里就往下走、
 			// 立刻加 `has-book` 显示正文，而恢复落地要等目标章渲染 + 收敛循环（数百 ms 起），
 			// 用户看到的就是「先开在书首、再跳到上次位置」。等待有上限（见 adapter.restoreGateMs），
@@ -1161,11 +1449,16 @@ export class UNreaderView extends ItemView {
 				autoOpenedToc = true;
 			}
 			this.adapter.restoreHighlights(this.annotations.highlights);
+			if (this.isFeedSource()) await this.reconcileFeedAnnotations();
 			this.annotationsPanel.render(this.annotations);
+			if (this.isFeedSource()) {
+				this.sideNav.closePanel();
+				this.annotationsPanel.refreshFeeds();
+			}
 			void this.refreshSideNavCounts();
 			this.updateChapterNav();
 
-			this.loadedPath = file.path;
+			this.loadedPath = sourceKey;
 			this.plugin.noteActiveReader(this);
 			// 加载完成后再驱动一次填充/重定位：移动端（尤其手机竖屏）加载期间布局
 			// 未稳定、resize 事件可能不触发，填充链需要这里兜底一次
@@ -1195,34 +1488,27 @@ export class UNreaderView extends ItemView {
 					this.appearancePanel.open(this.plugin.settings.appearance);
 				}).catch(() => {});
 			}
-			// 沉浸模式：开书默认隐藏工具栏（含 Obsidian 原生导航），点屏幕中间唤出
+			// 常态默认态只由「显示工具栏」决定；滑动隐藏只影响后续滚动。
 			this.immersiveGraceUntil = Date.now() + 1500;
-			if (this.plugin.settings.hideChromeOnScroll !== false && !this.pinned) {
+			if (!this.pinned && this.plugin.settings.appearance.normalModeShowToolbar === false) {
 				if (autoOpenedToc) {
-					// **刚自动打开的目录面板不能被这一步立刻关掉**（2026-09-13 修）：
-					// 原来这里无条件 `closePanel()` —— 面板在上面开了、紧接着又被关，
-					// 净效果为零，用户报「自动打开目录面板这个开关看不到任何区别」。
-					// 而且沉浸模式下面板挂在章节轨内部，`chrome-hidden` 会把它变成
-					// invisible + pointer-events:none（点了也没反应），所以这里不能只是
-					// 「不关」——要**亮出工具栏**（复用点按唤出那套 `chrome-revealed`），
-					// 面板才真的可见可点。用户一下滑阅读就照旧收起：`immersiveGraceUntil`
-					// 挡住的正是这段宽限期，之后的滚动方向处理会正常收 chrome 并关面板。
+					// 自动打开的目录面板不能在下一步立刻关掉；临时亮出工具层，待用户滚动再交给常态逻辑。
 					this.rootEl.addClass("chrome-revealed");
 					this.rootEl.removeClass("chrome-hidden");
-					this.syncNativeNav("open-toc");
 				} else {
 					this.sideNav?.closePanel();
 					this.rootEl.addClass("chrome-hidden");
-					this.syncNativeNav("open");
+					this.rootEl.removeClass("chrome-revealed");
 				}
 			} else {
-				// 非沉浸（或侧边栏钉住，此时不隐藏只是不生效）：开书从「半隐藏待悬停」
-				// 常态起步，清掉上一本书点按留下的临时完整滑出态
+				this.rootEl.removeClass("chrome-hidden");
 				this.rootEl.removeClass("chrome-revealed");
 			}
+			this.syncNativeNav("open");
 		} catch (e) {
 			console.error("[UNreader] failed to open book", e);
-			new Notice(`无法打开《${file.basename}》：${e instanceof Error ? e.message : String(e)}`);
+			const label = this.currentFeedEntry?.title || this.file?.basename || "内容";
+			new Notice(`无法打开《${label}》：${e instanceof Error ? e.message : String(e)}`);
 			this.showEmpty();
 			try { this.adapter.destroy(); } catch { /* ignore */ }
 		}
@@ -1231,30 +1517,52 @@ export class UNreaderView extends ItemView {
 	/** 重建目录面板条目：开书时首次调用；后台派生标题解析完成（onNavDerived）后
 	 *  再调用一次补全未入目录章节的条目。页码列一并重算。 */
 	private renderNavPanel(): void {
+		if (this.isFeedSource()) return;
 		const jump = this.navJump;
 		if (!jump) return;
 		this.sideNav.renderEntries(this.adapter.getNavEntries(), jump);
 		this.sideNav.setTocPages(this.adapter.getTocStartPages());
 	}
 
+	/** 正文评论编辑区（选中工具条 / 高亮浮窗）正在展开 —— 用户可能正打字、软键盘正弹着。
+	 *
+	 *  **展开期间所有「背景活动」路径都必须让路**（relocate / 书页滚动 / 系统收走选区）：
+	 *  它们都不是「用户要放弃这次标注」的信号，却都会 hide() 掉承载输入框的容器 ——
+	 *  容器一 display:none，输入框立刻 blur，移动端软键盘刚弹起就被压回去；
+	 *  并且 `pendingSelection` 一旦被清，「保存」会报「无法定位选区」。
+	 *  唯一的关闭入口是**用户显式动作**：取消 / 关闭 / Esc / 点正文空白 /
+	 *  点别处高亮 / 进入全沉浸。 */
+	private isEditingComment(): boolean {
+		return (this.selectionToolbar?.isCommentOpen ?? false) || (this.highlightPopover?.isCommentOpen ?? false);
+	}
+
 	private handleRelocate(info: RelocateInfo): void {
 		this.lastRelocate = info;
 		this.sideNav.setActive(info.tocId);
 		this.refreshBackVisibility(info);
-		this.selectionToolbar.hide();
-		this.highlightPopover.hide();
+		// 评论编辑区展开期间**不许收浮层**（见 isEditingComment）：
+		// 移动端键盘弹起会让官方收缩 `.app-container` → 本视图 onResize / stage 的
+		// ResizeObserver → `adapter.notifyVisible()` → 本函数。若无条件 hide()，
+		// 编辑区被 display:none 摘掉 → 输入框 blur → 软键盘刚弹起就被压回去；
+		// 即便键盘侥幸留住，下面清掉的 `pendingSelection` 也会让「保存」报
+		// 「无法定位选区」（applyHighlightWithComment 靠它取 CFI）。
+		if (!this.isEditingComment()) {
+			this.selectionToolbar.hide();
+			this.highlightPopover.hide();
+			this.pendingSelection = null;
+			this.lastExcerpt = null;
+			this.clearMirrorSelection();
+		}
 		this.dismissHover();
-		this.pendingSelection = null;
-		this.lastExcerpt = null;
-		this.clearMirrorSelection();
 		if (this.footnoteBackdrop) this.closeFootnotePopup();
 		// 恢复落定前不落盘：此刻视口还在书首（或占位估算落点），写进去等于把
 		// 用户的阅读位置冲掉。恢复期结束后的第一次 relocate 会把真实位置补上。
 		// 去抖写之外还有一条**关闭/退出时**的立即写（flushPosition），它读的是
 		// cursor —— 所以「可落盘的位置」必须在这一处统一登记，否则两条路会分叉。
-		if (this.file && !this.restoring) {
-			this.cursor.note(this.file.path, info.cfi, info.fraction, Date.now(), true);
-			this.savePositionDebounced(this.file.path, info);
+		const sourceKey = this.currentSourceKey();
+		if (sourceKey && !this.restoring) {
+			this.cursor.note(sourceKey, info.cfi, info.fraction, Date.now(), true);
+			this.savePositionDebounced(sourceKey, info);
 		}
 		this.updateChapterProgress(info.sectionFraction);
 		this.updateChapterNav();
@@ -1280,52 +1588,46 @@ export class UNreaderView extends ItemView {
 		// 接上之后：关掉它，顶部整条进度条消失 —— 一眼可见。
 		this.progressEl?.toggleClass("is-off", !on);
 		if (on) this.updateChapterProgress(this.lastRelocate?.sectionFraction ?? 0);
+		this.syncFullImmersionPresentation();
 	}
 
 	/** 浮动目录条（右缘章节短横轨）显隐：随外观/预设；目录面板仍可由按钮/命令唤起 */
 	applyTocRailSetting(): void {
 		this.sideNav?.setRailVisible(this.plugin.settings.appearance.showTocRail !== false);
+		this.syncFullImmersionPresentation();
 	}
 
-	/** 沉浸态下把工具栏亮出来，使挂在章节轨内部的面板真可见、真可点。
-	 *  `why` 只进诊断日志（与点按唤出同一机制；用户一下滑阅读就照旧收起）。
-	 *
-	 *  **为什么必须单独做这一步**：目录面板在 rail 锚点下是 `.unreader-nav-nodes`
-	 *  的子节点，而沉浸态（`.chrome-hidden`）给该容器写了 `opacity:0 !
-	 *  pointer-events:none !`，并**专门为面板另补了一条显式 `pointer-events:none`**
-	 *  —— `pointer-events` 可继承，「父级 none 不继承阻断」是错的直觉：子元素自己写
-	 *  `auto` 就能重新被命中，所以父级那条规则拦不住它（见 styles.css 那段
-	 *  「隐形区域吞点按」注释）。于是「面板 open 了」与「用户看得见」是**两件事**。
-	 *  任何只 `setPanel(true)` 而不亮 chrome 的路径，在沉浸态下的净效果都是零。
-	 *  工具栏按钮那条路天然没这个坑：要够得到按钮，chrome 必然已经亮着。
-	 *
-	 *  类切换本体抽在 `revealChromeClasses`（纯 DOM，回归夹具直打）；这里只负责
-	 *  在**真的翻转了**之后同步原生导航 —— 没翻转就别白跑一趟。 */
-	private revealChromeForPanel(why: string): void {
-		if (revealChromeClasses(this.rootEl)) this.syncNativeNav(why);
+	/** 全沉浸例外只改变呈现类；是否进入全沉浸仍由 fullImmersion 单一状态决定。 */
+	private syncFullImmersionPresentation(): void {
+		const root = this.rootEl;
+		if (!root) return;
+		const a = this.plugin.settings.appearance;
+		if (this.fullImmersionRevealed && a.fullImmersionTapReveal !== true) {
+			this.fullImmersionRevealed = false;
+			root.removeClass("full-immersion-revealed");
+			root.addClass("chrome-hidden");
+			root.removeClass("chrome-revealed");
+		}
+		root.toggleClass("full-immersion-show-toc",
+			this.fullImmersion && a.showTocRail === true && a.fullImmersionShowTocRail === true);
+		root.toggleClass("full-immersion-show-progress",
+			this.fullImmersion && a.chapterProgress !== false && a.fullImmersionShowChapterProgress === true);
+		this.fullImmersionExitEl?.toggleClass("is-visible", this.fullImmersion);
 	}
 
-	/** 打开目录面板（若可开）。`why` 只进诊断日志。
+	/** 打开目录面板（若可开）。浮动目录独立于工具层，不通过命令改写 chrome 显隐。
 	 *  开书路径里的自动打开走的是同一套判断（见 openBook 的 autoOpenedToc 分支）。 */
-	openTocIfPossible(why: string): void {
+	openTocIfPossible(_why: string): void {
+		if (this.isFeedSource()) return;
 		if ((this.sideNav?.clickableCount() ?? 0) <= 0) return;
 		if (!this.adapter?.hasBook()) return;
 		this.sideNav?.ensurePanelOpen();
-		this.revealChromeForPanel("toc-" + why);
 	}
 
 	/** 供命令/快捷键切换浮动目录面板（各平台一致，同移动端工具栏按钮）。
-	 *
-	 *  ⚠️ **与工具栏按钮不等价**（2026-09-14 修「命令执行了但没效果」）：
-	 *  按钮只可能在 chrome 已经亮着的时候被够到，命令却是在 chrome 已收起
-	 *  （沉浸态下滑阅读后，`handleScrollActivity` 刚 `closePanel()` + `chrome-hidden`）
-	 *  的状态下被调用的 —— 此时 `togglePanel()` 只把面板置为 open，面板依旧被
-	 *  `.chrome-hidden` 压成不可见 + `pointer-events:none`。用户能观察到的只有
-	 *  「命令面板关了」，于是报「执行了但没效果」（是多次都不行，不是仅首次）。
-	 *  面板落在**打开**态时补一次亮 chrome；落在关闭态则保持现状，交回滚动/点按收起。 */
+	 *  目录有自己的显隐规则；命令只切面板，不再顺带唤出工具层。 */
 	toggleTocPanel(): void {
 		this.sideNav?.togglePanel();
-		if (this.sideNav?.isPanelOpen()) this.revealChromeForPanel("toc-command");
 	}
 
 	private updateChapterProgress(fraction: number): void {
@@ -1346,11 +1648,23 @@ export class UNreaderView extends ItemView {
 	 *  `immediate=true` 走 `saveNow` 直接写盘（去抖链在这一刻等于丢），慢一步的
 	 *  `beforeunload`/`onunload` 里再补一层（见 main.onunload 的 forceFlushPosition）。 */
 	flushPosition(immediate = false): void {
-		const path = this.file?.path;
-		if (!path) return;
-		const pos = this.cursor.take(path);
+		const key = this.currentSourceKey();
+		if (!key) return;
+		const pos = this.cursor.take(key);
 		if (!pos) return;
-		this.plugin.savePosition(path, pos, immediate);
+		this.saveSourcePosition(key, pos, immediate);
+	}
+
+	private saveSourcePosition(key: string, position: BookPosition, immediate: boolean): void {
+		if (!key.startsWith("feed:")) {
+			this.plugin.savePosition(key.slice("book:".length), position, immediate);
+			return;
+		}
+		const [, feedId, entryId] = key.split(":");
+		if (!feedId || !entryId) return;
+		void this.plugin.feedStore.updateEntryState(feedId, entryId, { position }).then(() => {
+			this.annotationsPanel?.refreshFeeds();
+		}).catch(() => undefined);
 	}
 
 	/** 供 main.onunload 调用：插件卸载时把当前阅读位置立刻写盘 */
@@ -1496,7 +1810,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	private syncNativeHeader(): void {
-		const t = this.file?.basename ?? "";
+		const t = this.currentFeedEntry?.title || this.file?.basename || "";
 		this.titleText = t;
 		// 使用 queueMicrotask 异步更新，避免在 setState/layout 期间同步触发导致回环卡死
 		queueMicrotask(() => {
@@ -1562,6 +1876,51 @@ export class UNreaderView extends ItemView {
 			onTogglePin: () => this.togglePinned(),
 			// 面板开合（含被外部关闭）→ 功能轨「标注列表」按钮高亮跟随
 			onOpenChange: () => this.syncRailButtons(),
+			onModeChange: () => this.syncRailButtons(),
+			getBookshelfEntries: () => sortBookshelfEntries(
+				getBookshelfEntries(this.plugin),
+				this.plugin.settings.bookshelfSortMode,
+				this.plugin.settings.bookshelfManualOrder,
+			),
+			getBookshelfSortMode: () => this.plugin.settings.bookshelfSortMode,
+			getCurrentBookPath: () => this.file?.path ?? null,
+			onBookshelfSortModeChange: mode => this.setBookshelfSortMode(mode),
+			onBookshelfReorder: paths => this.reorderBookshelf(paths),
+			onToggleBookPin: path => this.toggleBookPin(path),
+			onOpenBook: path => void this.openBookFromShelf(path),
+			loadBookPreview: path => {
+				const file = this.app.vault.getFileByPath(path);
+				if (!(file instanceof TFile)) return Promise.resolve({ coverUrl: null, excerpt: null, title: null, author: null });
+				return loadBookPreview(this.app, file);
+			},
+			getFeeds: () => this.plugin.feedStore.listFeeds(),
+			getFeedEntries: () => this.plugin.feedStore.listEntries(),
+			getFeedFilter: () => this.feedFilter,
+			getFeedSourceFilter: () => this.feedSourceFilter,
+			getCurrentFeedEntry: () => this.feedRef ? { ...this.feedRef } : null,
+			onFeedFilterChange: filter => { this.feedFilter = filter; },
+			onFeedSourceFilterChange: feedId => { this.feedSourceFilter = feedId; },
+				onOpenFeedEntry: (feedId, entryId) => void this.openFeedEntry(feedId, entryId),
+				onToggleFeedRead: (feedId, entryId) => void this.toggleFeedRead(feedId, entryId),
+				onToggleFeedStar: (feedId, entryId) => void this.toggleFeedStar(feedId, entryId),
+			onRefreshFeeds: () => void this.refreshFeeds(),
+			onAddFeed: () => this.plugin.promptAddFeed(),
+			onImportOpml: () => this.plugin.importOpmlFromFile(),
+			onExportOpml: () => this.plugin.exportOpmlToVault(),
+			onRenameFeed: (feedId, title) => this.plugin.renameFeed(feedId, title),
+			onDeleteFeed: feedId => void this.plugin.deleteFeed(feedId),
+			onFetchFulltext: (feedId, entryId) => void this.fetchFeedFulltext(feedId, entryId),
+			onOpenOriginal: url => this.openExternalUrl(url),
+				onDownloadPodcast: (feedId, entryId) => this.plugin.downloadPodcast(feedId, entryId),
+				onPodcastProgress: (feedId, entryId, seconds, duration) => {
+				const fraction = duration > 0 ? Math.max(0, Math.min(1, seconds / duration)) : 0;
+				void this.plugin.feedStore.updateEntryState(feedId, entryId, {
+					position: { anchor: `audio:${seconds.toFixed(2)}`, fraction, updatedAt: Date.now() },
+					}).then(() => this.annotationsPanel?.refreshFeeds()).catch(() => undefined);
+				},
+				onResolvePodcastUrl: url => this.plugin.feedMediaStore.playableUrl(url),
+				isPodcastDownloaded: url => this.plugin.feedMediaStore.isCached(url),
+			onCheckPodcastDownloaded: url => this.plugin.feedMediaStore.has(url),
 			onHeightChange: px => {
 				// 侧边栏高度手动调节：持久化（null = 恢复默认全高）
 				if (px == null) delete this.plugin.settings.annoPanelHeight;
@@ -1624,7 +1983,11 @@ export class UNreaderView extends ItemView {
 			onOpenChange: () => this.syncRailButtons(),
 			onPickImage: field => this.pickBackgroundImage(field),
 			onPickImageSystem: field => this.pickSystemImage(field),
-			getImageName: field => this.bgImageNames.get(field) ?? null,
+			getImageName: field => {
+				const ref = ((this.plugin.settings.appearance as unknown as Record<string, unknown>)[field] as string | null) ?? null;
+				if (!ref) return null;
+				return this.plugin.resourceStore.nameFor(ref) ?? this.bgImageNames.get(field) ?? null;
+			},
 			getCustomFonts: () => this.plugin.getCustomFonts().map(f => ({ id: f.id, label: f.label })),
 			onPickFont: () => this.pickLibraryFont(),
 			onPickFontSystem: () => this.pickSystemFont(),
@@ -1661,7 +2024,7 @@ export class UNreaderView extends ItemView {
 		this.emptyEl.createDiv({ cls: "unreader-empty-title", text: "UNreader" });
 		this.emptyEl.createDiv({
 			cls: "unreader-empty-desc",
-			text: "把 EPUB / MOBI / AZW3 / TXT 放进库内任意位置（例如 UNreader/Books/），点击文件即可开始阅读。",
+			text: "把 EPUB / MOBI / AZW3 / TXT / HTML 放进库内任意位置，点击文件即可开始阅读。",
 		});
 		const browseBtn = this.emptyEl.createEl("button", { text: "浏览书籍", cls: "mod-cta" });
 		browseBtn.addEventListener("click", () => {
@@ -1669,34 +2032,49 @@ export class UNreaderView extends ItemView {
 		});
 
 						this.sideNav = new SideNav();
-		this.sideNav.addIconButton("chevron-up", "上一章", () => this.goPrevChapter());
-		this.sideNav.addIconButton("chevron-left", "上一页", () => void this.adapter.prev());
+		this.bookOnlyNavControls.push(this.sideNav.addIconButton("chevron-up", "上一章", () => this.goPrevChapter()));
+		this.bookOnlyNavControls.push(this.sideNav.addIconButton("chevron-left", "上一页", () => void this.adapter.prev()));
 		// 页码显示在上一页/下一页按钮之间，点击弹出页码跳转面板
-		this.sideNav.addPageDisplay(() => this.openPageJumpModal());
-		this.sideNav.addIconButton("chevron-right", "下一页", () => void this.adapter.next());
+		this.bookOnlyNavControls.push(this.sideNav.addPageDisplay(() => this.openPageJumpModal()));
+		this.bookOnlyNavControls.push(this.sideNav.addIconButton("chevron-right", "下一页", () => void this.adapter.next()));
 		// 右下角浮动页码（桌面端，章节轨旁）：点击弹出页码跳转面板（与按钮排页码共用，移动端已随章节轨隐藏）
 		this.sideNav.setPageClickHandler(() => this.openPageJumpModal());
-		this.sideNav.addIconButton("chevron-down", "下一章", () => this.goNextChapter());
+		this.bookOnlyNavControls.push(this.sideNav.addIconButton("chevron-down", "下一章", () => this.goNextChapter()));
 		this.sideNav.addSeparator();
 		// 浮动目录：各平台统一由该按钮开/关面板（面板出现在按钮旁边）
 		this.railTocBtn = this.sideNav.addIconButton("list", "目录", () => this.sideNav.togglePanel("actions"));
+		this.railTocBtn.addClass("is-book-only-control");
 		this.sideNav.setTocTrigger(this.railTocBtn);
 		// 目录面板开合（hover 展开 / 按钮唤出 / 行点击 / 点外面关闭）都在面板内部收口后回调到这里
 		this.sideNav.onPanelOpenChange = () => this.syncRailButtons();
+		this.railShelfBtn = this.sideNav.addIconButton("library", "书籍侧边栏", () => this.toggleBookshelf());
+		this.railFeedsBtn = this.sideNav.addIconButton("rss", "订阅", () => this.toggleFeeds());
 		this.railAnnoBtn = this.sideNav.addIconButton("highlighter", "标注列表", () => this.toggleAnnotations());
 		this.sideNav.addIconButton("bookmark", "添加书签", () => this.openBookmarkModal());
 		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", "阅读外观", () => this.toggleAppearance());
 		this.railSearchBtn = this.sideNav.addIconButton("search", "搜索正文", () => this.toggleSearch());
 		this.sideNav.addSeparator();
-		// 沉浸模式开关：与设置页「沉浸模式」一致，按钮高亮表示已开启
-		this.immersiveBtn = this.sideNav.addIconButton("focus", "沉浸模式", () => this.toggleImmersiveMode());
-		this.syncImmersiveButton();
+		// 全沉浸入口保留在工具栏；点按唤出后同一枚 scan 按钮可直接退出。
+		this.fullImmersionBtn = this.sideNav.addIconButton("scan", "全沉浸模式", () => this.toggleFullImmersion());
 		this.syncRailButtons();
 		this.sideNav.addIconButton("settings", "打开设置", () => this.openPluginSettings());
 		this.sideNav.setBackHandler(() => this.goBack());
 		body.appendChild(this.sideNav.actionsEl);
 		body.appendChild(this.sideNav.backEl);
 		body.appendChild(this.sideNav.navEl);
+		// 全沉浸退出按钮：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏；
+		// 尺寸与图标跟随工具栏按钮倍率；安全区由 CSS 保证，事件不进入正文点按状态机。
+		this.fullImmersionExitEl = this.rootEl.createEl("button", {
+			cls: "unreader-full-immersion-exit",
+			attr: { type: "button", "aria-label": "退出全沉浸" },
+		});
+		setIcon(this.fullImmersionExitEl, "scan");
+		this.fullImmersionExitEl.addEventListener("pointerdown", e => e.stopPropagation());
+		this.fullImmersionExitEl.addEventListener("click", e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.exitFullImmersion();
+		});
 
 		// 章节进度外观开关：sideNav 此时才建好（进度显示在章节轨的当前章短横内部）
 		this.applyChapterProgressSetting();
@@ -1710,7 +2088,7 @@ export class UNreaderView extends ItemView {
 			if (!target) return;
 			if (target.closest(
 				".unreader-actions, .unreader-nav, .unreader-back-btn, .unreader-anno-panel, " +
-				".unreader-appearance-panel, .unreader-selection-toolbar, .unreader-highlight-popover, " +
+				".unreader-appearance-panel, .unreader-full-immersion-exit, .unreader-selection-toolbar, .unreader-highlight-popover, " +
 				".unreader-bookmark-inline, .unreader-chapter-hint, " +
 				"input, textarea, select, button",
 			)) return;
@@ -1726,12 +2104,17 @@ export class UNreaderView extends ItemView {
 			// 点击在工具条内部则不处理
 			if (this.selectionToolbar?.containerEl.contains(target) || this.highlightPopover?.containerEl.contains(target)) return;
 			// 点击在侧边栏、目录、笔记面板等常驻 UI 上也不自动关闭（避免误触）
-			if (target.closest(".unreader-anno-panel, .unreader-toc-panel, .unreader-appearance-panel, .unreader-actions, .unreader-nav")) return;
+			if (target.closest(".unreader-anno-panel, .unreader-toc-panel, .unreader-appearance-panel, .unreader-full-immersion-exit, .unreader-actions, .unreader-nav")) return;
 			this.dismissFloatingOnBlankClick();
 		});
 		// Esc 直接关闭所有浮层
 		body.addEventListener("keydown", (e: KeyboardEvent) => {
 			if (e.key === "Escape") {
+				if (this.fullImmersion) {
+					e.preventDefault();
+					this.exitFullImmersion();
+					return;
+				}
 				if (this.selectionToolbar?.visible) this.selectionToolbar.hide();
 				if (this.highlightPopover?.visible) this.highlightPopover.hide();
 				
@@ -1757,6 +2140,7 @@ export class UNreaderView extends ItemView {
 	private showEmpty(): void {
 		this.loadingToken++;
 		this.rootEl?.removeClass("has-book");
+		this.rootEl?.removeClass("is-feed-source");
 		this.endRestoring();
 		this.rootEl?.addClass("is-empty");
 		this.emptyEl?.show();
@@ -1944,14 +2328,14 @@ export class UNreaderView extends ItemView {
 		this.devicePresetRetryTimer = window.setTimeout(() => void tick(), 1000);
 	}
 
-	/** 把当前外观实时写回本机生效的预设（预设持有自己完整的配置，含背景图随预设存储） */
+	/** 把当前外观实时写回本机生效的预设（预设保存完整配置，背景图只保存共享引用） */
 	private writeBackToActivePreset(): void {
 		const activeId = this.getDevicePresetId();
 		if (!activeId) return;
 		const preset = this.plugin.presetStore.get(activeId);
 		if (!preset) return;
 		preset.appearance = { ...this.plugin.settings.appearance };
-		// 背景图同步物化进预设文件夹（去抖写盘），原图删除后预设仍可用
+		// 共享图片本体不复制；旧版 data:/路径引用只由迁移流程收纳一次
 		this.plugin.presetStore.upsert(preset);
 	}
 
@@ -1960,6 +2344,21 @@ export class UNreaderView extends ItemView {
 
 	private applyAppearancePatch(patch: Partial<AppearanceSettings>): void {
 		Object.assign(this.plugin.settings.appearance, patch);
+		// 显隐口径被改（含「接管原生界面」开关本身）：先清掉滚动留下的原生隐藏态，
+		// 末尾的 syncOuterAppearance → syncNativeNav("appearance") 会按新设置重估。
+		if ("normalModeScrollHide" in patch || "normalModeHideNativeChrome" in patch || "normalModeShowToolbar" in patch) {
+			this.nativeScrollHidden = false;
+		}
+		if ("normalModeShowToolbar" in patch && !this.fullImmersion && !this.pinned) {
+			if (patch.normalModeShowToolbar === false) {
+				this.rootEl?.addClass("chrome-hidden");
+				this.rootEl?.removeClass("chrome-revealed");
+			} else {
+				this.rootEl?.removeClass("chrome-hidden");
+				this.rootEl?.removeClass("chrome-revealed");
+			}
+		}
+		this.syncFullImmersionPresentation();
 		// 「自动打开目录面板」拨到「开」时**当场生效**（不只是下次开书）：
 		// 这个开关的字面语义是「打开一本书时自动展开目录面板」—— 只在**开书那一刻**动作，
 		// 于是在一本已经打开的书上拨它，用户什么都看不到（原话「试了一下什么变化都看不到」）。
@@ -1989,23 +2388,34 @@ export class UNreaderView extends ItemView {
 		this.syncOuterAppearance();
 	}
 
-	/** 从库中选择图片作为阅读背景（转为 data URI，规避 iframe CSP 限制）。
-	 *  field 指定写入哪个字段：共用图 / 浅色图 / 深色图 */
+	/** 从库中选择共享图片或其他库内图片；选定后统一复制进共享资源目录。 */
 	private pickBackgroundImage(field: "backgroundImage" | "backgroundImageLight" | "backgroundImageDark"): void {
-		const picks: BackgroundImagePick[] = this.app.vault
+		const shared: BackgroundImagePick[] = this.plugin.resourceStore.list("image")
+			.filter(r => r.enabled)
+			.map(r => ({
+				name: r.name,
+				ext: (r.path.split(".").pop() ?? "png").toLowerCase(),
+				ref: r.id,
+				read: async () => {
+					const file = this.app.vault.getAbstractFileByPath(r.path);
+					return file instanceof TFile ? this.app.vault.readBinary(file) : new ArrayBuffer(0);
+				},
+			}));
+		const library: BackgroundImagePick[] = this.app.vault
 			.getFiles()
 			.filter(f => /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(f.name))
+			.filter(f => !f.path.startsWith(`${IMAGES_FOLDER}/`))
 			.sort((a, b) => a.path.localeCompare(b.path))
 			.map(f => ({
 				name: f.basename,
 				ext: f.extension.toLowerCase(),
 				read: () => this.app.vault.readBinary(f),
 			}));
-		new BackgroundImageModal(this.app, picks, pick => this.applyBackgroundImage(pick, field)).open();
+		new BackgroundImageModal(this.app, [...shared, ...library], pick => this.applyBackgroundImage(pick, field)).open();
 	}
 
 	/** 从系统文件选择器挑选背景图片：选定后与库内来源走同一应用流程
-	 *  （复制进预设文件夹、从文件夹引用，原图删除后预设仍可用） */
+	 *  （复制进共享图片目录，预设与设备只引用它） */
 	private pickSystemImage(field: "backgroundImage" | "backgroundImageLight" | "backgroundImageDark"): void {
 		// 清理上次取消对话框留下的隐藏 input
 		this.contentEl.querySelectorAll("input.unreader-bg-file-input").forEach(el => el.remove());
@@ -2031,14 +2441,20 @@ export class UNreaderView extends ItemView {
 	/** 读取并应用背景图片（库内/系统统一入口）；超过 2MB 拒绝 */
 	private async applyBackgroundImage(pick: BackgroundImagePick, field: "backgroundImage" | "backgroundImageLight" | "backgroundImageDark"): Promise<void> {
 		try {
-			const buf = await pick.read();
-			if (buf.byteLength > 2 * 1024 * 1024) {
-				new Notice("图片超过 2MB，请选择较小的图片");
+			let ref = pick.ref ?? null;
+			if (!ref) {
+				const buf = await pick.read();
+				if (buf.byteLength > 2 * 1024 * 1024) {
+					new Notice("图片超过 2MB，请选择较小的图片");
+					return;
+				}
+				ref = await this.plugin.resourceStore.importImage({ name: pick.name, ext: pick.ext, buf });
+			}
+			if (!ref) {
+				new Notice("背景图片导入失败");
 				return;
 			}
-			const mime = pick.ext === "svg" ? "image/svg+xml" : `image/${pick.ext.replace(/^jpg$/, "jpeg")}`;
-			const dataUri = `data:${mime};base64,${bytesToBase64(new Uint8Array(buf))}`;
-			(this.plugin.settings.appearance as unknown as Record<string, unknown>)[field] = dataUri;
+			(this.plugin.settings.appearance as unknown as Record<string, unknown>)[field] = ref;
 			this.writeBackToActivePreset();
 			this.plugin.scheduleSave();
 			this.adapter.applyAppearance(this.plugin.settings.appearance);
@@ -2226,7 +2642,7 @@ export class UNreaderView extends ItemView {
 		const preset = this.plugin.presetStore.get(id);
 		if (!preset) return;
 		const merged = Object.assign({}, DEFAULT_APPEARANCE, preset.appearance);
-		// 预设内引用的背景图从预设文件夹解析为 data URI（原图已复制进文件夹，删除原位不影响）
+		// 旧版 preset: 背景图仍从预设文件夹解析；shared: 引用由 ResourceStore 统一解析
 		await this.plugin.presetStore.resolveImages(merged, preset);
 		Object.assign(this.plugin.settings.appearance, merged);
 		// 预设引用的字体可能本机还没建出 blob（他端同步过来的新预设）：先确保就绪，
@@ -2239,6 +2655,13 @@ export class UNreaderView extends ItemView {
 		this.setDevicePresetId(id);
 		this.plugin.scheduleSave();
 		this.adapter.applyAppearance(this.plugin.settings.appearance);
+		// 预设/外观整体替换 = 用户主动改口径：先清掉滚动留下的原生隐藏态，
+		// 并先落 chrome-hidden 再同步 —— 原顺序会让 syncNativeNav 读到切换前的旧态。
+		this.nativeScrollHidden = false;
+		if (!this.fullImmersion && !this.pinned) {
+			this.rootEl?.toggleClass("chrome-hidden", this.plugin.settings.appearance.normalModeShowToolbar === false);
+			this.rootEl?.removeClass("chrome-revealed");
+		}
 		this.syncOuterAppearance();
 		// 若面板打开，同步其当前值（延后到 change 事件链外重开，
 		// 避免下拉框在自身 change 处理中被销毁重建导致后续无法选择）
@@ -2480,9 +2903,32 @@ export class UNreaderView extends ItemView {
 
 	/* ---------------- annotations: shared helpers ---------------- */
 
+	/** Feed 正文刷新后先按原文迁移高亮，再提交待处理快照；找不到的高亮只标记失效。 */
+	private async reconcileFeedAnnotations(): Promise<void> {
+		const entry = this.currentFeedEntry;
+		const hash = this.activeFeedContentHash;
+		if (!entry || !hash) return;
+		const changed = reconcileFeedAnnotationAnchors(this.annotations, hash, this.adapter);
+		const hasAnnotations = this.annotations.highlights.length > 0 || this.annotations.bookmarks.length > 0;
+		if (hasAnnotations !== (entry.state.hasAnnotations === true)) {
+			await this.plugin.feedStore.updateEntryState(entry.feedId, entry.id, { hasAnnotations });
+		}
+		if (changed) await this.persistAnnotations();
+		if (entry.pendingContentHash === hash && entry.pendingContentHtml != null) {
+			await this.plugin.feedStore.commitPendingContent(entry.feedId, entry.id, hash);
+			this.currentFeedEntry = this.plugin.feedStore.getEntry(entry.feedId, entry.id) ?? this.currentFeedEntry;
+		}
+	}
+
 	private async persistAnnotations(): Promise<boolean> {
 		try {
-			await writeAnnotations(this.app.vault, this.notePath, this.file?.path ?? "", this.annotations);
+			const link = this.currentFeedEntry?.url || this.currentFeedEntry?.title || this.file?.path || "";
+			await writeAnnotations(this.app.vault, this.notePath, link, this.annotations);
+			if (this.currentFeedEntry) {
+				await this.plugin.feedStore.updateEntryState(this.currentFeedEntry.feedId, this.currentFeedEntry.id, {
+					hasAnnotations: this.annotations.highlights.length > 0 || this.annotations.bookmarks.length > 0,
+				});
+			}
 			return true;
 		} catch (e) {
 			console.error("[UNreader] save annotations failed", e);
@@ -2519,6 +2965,7 @@ export class UNreaderView extends ItemView {
 			color: colorName,
 			anchor: sel.cfi,
 			text: sel.text.slice(0, 500),
+			contentHash: this.activeFeedContentHash ?? this.currentFeedEntry?.contentHash,
 		};
 		this.adapter.addHighlight(sel.cfi, colorName, item.text);
 		this.annotations.highlights.push(item);
@@ -2540,6 +2987,7 @@ export class UNreaderView extends ItemView {
 			anchor: sel.cfi,
 			text: text.slice(0, 500),
 			comment,
+			contentHash: this.activeFeedContentHash ?? this.currentFeedEntry?.contentHash,
 		};
 		this.adapter.addHighlight(sel.cfi, colorName, item.text);
 		this.annotations.highlights.push(item);
@@ -2588,7 +3036,7 @@ export class UNreaderView extends ItemView {
 			new Notice("请先开始阅读");
 			return;
 		}
-		const defaultLabel = this.lastRelocate.sectionLabel || "";
+		const defaultLabel = this.lastRelocate.sectionLabel || this.currentFeedEntry?.title || "";
 		new BookmarkModal(this.app, label => {
 			const anchor = this.lastRelocate!.cfi;
 			this.annotations.bookmarks.push({
@@ -2596,6 +3044,7 @@ export class UNreaderView extends ItemView {
 				anchor,
 				// 与重命名同一条安全化通道：章节标题里也可能带 `|`，同样会切错笔记分列
 				label: sanitizeBookmarkLabel(label) || sanitizeBookmarkLabel(defaultLabel) || "书签",
+				contentHash: this.activeFeedContentHash ?? this.currentFeedEntry?.contentHash,
 			});
 			void this.persistAnnotations().then(ok => {
 				if (ok) {
@@ -2675,29 +3124,34 @@ export class UNreaderView extends ItemView {
 		return !!(this.appearancePanel?.isOpen() || this.sideNav?.isPanelOpen() || annoBlocking);
 	}
 
-	/** 滚动方向 → 隐藏/唤出悬浮工具栏（与 Obsidian 移动端 markdown 阅读一致：
-	 *  下滑隐藏，上滑唤出）。仅沉浸模式开启时生效。 */
+	/** 滚动方向 → 常态隐藏/唤出（下滑隐藏、上滑唤出）。全沉浸完全冻结。
+	 *
+	 *  两个开关各管一段、互不连坐（本轮修——用户报「滑动隐藏的设计没有涵盖到
+	 *  移动端，原生界面还是按自己那套隐现」）：
+	 *   · 「滑动自动隐藏」管**插件工具层**（`chrome-hidden`）；
+	 *   · 「接管原生界面」管 **Obsidian 页首/底栏**（`nativeScrollHidden`）。
+	 *  只开后者时，工具栏保持常显、原生界面照样随滚动让位；
+	 *  两个都关时滚动什么都不做。 */
 	private handleScrollActivity(direction: "up" | "down"): void {
-		if (this.plugin.settings.hideChromeOnScroll === false) {
-			// 非沉浸模式：点按滑出的功能轨是「临时亮出」，用户一旦继续往下阅读
-			// 就说明它挡路了 → 收回半隐藏待悬停态（与沉浸模式「下滑隐藏」同一心智；
-			// 向上滚动多为回看/唤出意图，保持不动）
-			if (direction === "down") this.rootEl?.removeClass("chrome-revealed");
-			return;
-		}
+		if (this.fullImmersion) return;
+		const appearance = this.plugin.settings.appearance;
+		const scrollHide = appearance.normalModeScrollHide !== false;
+		const takeOverNative = appearance.normalModeHideNativeChrome === true;
+		if (!scrollHide && !takeOverNative) return;
 		if (this.hasFloatingPanelOpen()) return;
 		if (direction === "down") {
 			// 开书宽限期：首次开书/切书后布局稳定会产生一阵非用户滚动，
 			// 此时用户点按唤出 chrome 会被这阵滚动立刻压回去（表现为唤不出）
 			if (Date.now() < this.immersiveGraceUntil) return;
-			// 隐藏 chrome 时同步收起目录面板：面板挂在章节轨内部，藏起来后
-			// 用户看不见它，留着的"打开态"只会持续吞点按/挡门控
-			this.sideNav?.closePanel();
-			this.rootEl?.addClass("chrome-hidden");
-			// 滚动隐藏后复位点按唤出的全展开态
-			this.rootEl?.removeClass("chrome-revealed");
+			if (scrollHide) {
+				this.rootEl?.addClass("chrome-hidden");
+				// 滚动隐藏后复位点按唤出的全展开态
+				this.rootEl?.removeClass("chrome-revealed");
+			}
+			if (takeOverNative) this.nativeScrollHidden = true;
 		} else {
-			this.rootEl?.removeClass("chrome-hidden");
+			if (scrollHide) this.rootEl?.removeClass("chrome-hidden");
+			if (takeOverNative) this.nativeScrollHidden = false;
 		}
 		this.syncNativeNav(direction === "down" ? "scroll-down" : "scroll-up");
 	}
@@ -2767,6 +3221,11 @@ export class UNreaderView extends ItemView {
 	private nativeNavGuard: NativeNavGuard | null = null;
 	/** 顶栏当前隐藏状态（滚动事件高频调用 syncNativeNav，避免重复挂摘类打断过渡动画） */
 	private headerHiddenState: boolean | null = null;
+	/** 滚动方向驱动的**原生界面**隐藏态（与工具层 `chrome-hidden` 解耦）：
+	 *  「接管原生界面」开时，下滑把 Obsidian 页首/底栏收走、上滑放回；
+	 *  工具层是否跟着动由「滑动自动隐藏」单独决定。点按、换书、失活、
+	 *  外观/预设变更、进出全沉浸一律复位 —— 它是会话内的瞬时态，不是设置。 */
+	private nativeScrollHidden = false;
 	/** 已写入的「页首空隙」高度（px，叶子 + 根两处共用同一份状态）。
 	 *  存一份是为了**只在真正变化时写**：v4 的负 margin 会改变 `root` 的顶边，而
 	 *  `syncProgressTop` 每帧都要量 `root` 顶边算进度条让位 —— 写入后必须让测量看到
@@ -2799,12 +3258,16 @@ export class UNreaderView extends ItemView {
 		}
 	}
 
-	/** 沉浸态的四条输入事实 —— **唯一来源**，`syncNativeNav` 与 `NativeNavGuard`
+	/** 沉浸态的五条输入事实 —— **唯一来源**，`syncNativeNav` 与 `NativeNavGuard`
 	 *  都读它（守卫闭包直接调 `nativeNavWanted()`），杜绝「写类」与「补类」两处判据漂移。 */
 	private immersiveNativeInputs(): ImmersiveNativeInputs {
+		const fullImmersionHidden = this.fullImmersion && !this.fullImmersionRevealed;
 		return {
-			adapt: this.plugin.settings.appearance.immersiveAdapt === true,
-			chromeHidden: this.rootEl?.hasClass("chrome-hidden") ?? false,
+			normalModeHideNativeChrome: this.plugin.settings.appearance.normalModeHideNativeChrome === true,
+			fullImmersion: fullImmersionHidden,
+			chromeHidden: this.fullImmersion ? !this.fullImmersionRevealed : (this.rootEl?.hasClass("chrome-hidden") ?? false),
+			// 滚动方向单独驱动的原生隐藏态：与工具层解耦（见 `nativeScrollHidden` 字段）
+			nativeScrollHidden: this.nativeScrollHidden,
 			phoneLike: this.phoneLike(),
 			selfActive: this.isSelfActive(),
 		};
@@ -2869,6 +3332,43 @@ export class UNreaderView extends ItemView {
 		} catch { /* 取证失败不影响功能 */ }
 	}
 
+	/** 评论编辑期间的「焦点被抢 / 焦点掉到 body」取证（`debugLog` 关闭时零成本）。
+	 *
+	 *  为什么除了 `hide()` 那条取证还要这一条：`hide()` 只覆盖**第一种**失焦形态
+	 *  ——「容器被收起 → 输入框被动失焦」。真机上还有第二种：**焦点被别的元素主动
+	 *  抢走**（`focusContent()` / 浏览器焦点恢复 / 别的插件 / 将来的新写入点），
+	 *  以及第三种：**焦点掉到 body**（`blur()` 没有接收方）。三者都会收掉软键盘，
+	 *  但只有第一种会留下 `hide()` 记录 —— 第二、三种在日志里原本是完全静默的。
+	 *
+	 *  这里记的是「谁拿走了焦点」+ **调用栈**：抢焦点的那次 `focus()` 就在栈里，
+	 *  真机日志可直接指认写入点，不必再逐条路径猜。 */
+	private installCommentFocusForensics(): void {
+		try {
+			const inFloating = (t: EventTarget | null): boolean =>
+				this.selectionToolbar?.containerEl.contains(t as Node | null) === true
+				|| this.highlightPopover?.containerEl.contains(t as Node | null) === true;
+			document.addEventListener("focusin", e => {
+				if (!debugLog.isDebugEnabled()) return;
+				if (!this.isEditingComment()) return;
+				const t = e.target as HTMLElement | null;
+				if (inFloating(t)) return;
+				const cls = t && typeof t.className === "string" ? t.className : "";
+				debugLog.info("[comment] 编辑评论期间焦点被抢走 →",
+					t ? `${t.tagName}.${cls}`.slice(0, 60) : "null", new Error("steal"));
+			}, true);
+			document.addEventListener("focusout", e => {
+				if (!debugLog.isDebugEnabled()) return;
+				if (!this.isEditingComment()) return;
+				const t = e.target as HTMLElement | null;
+				if (!t || !inFloating(t)) return;
+				// 没有接收方 = 焦点掉到 body：Android 上就是「软键盘被收起」那一下。
+				// 有接收方的那一形态由上面的 focusin 记录，不在这里重复。
+				if (e.relatedTarget) return;
+				debugLog.info("[comment] 编辑评论期间输入框失去焦点且没有接收方（焦点落到 body）", new Error("blur"));
+			}, true);
+		} catch { /* 取证失败不影响功能 */ }
+	}
+
 	/** 给本视图的页首元素挂**插件自有类** `unreader-view-header`（幂等）。
 	 *
 	 *  ## 为什么不能只靠 `.workspace-leaf-content[data-type="unreader-view"] .view-header`
@@ -2921,18 +3421,25 @@ export class UNreaderView extends ItemView {
 	 *    同步）。官方 restoreNavigation 摘官方类时，插件类仍在，底栏不会闪出来。
 	 *    仅手机形态。
 	 *
-	 *  两条通道都挂在**同一个外观开关**「沉浸模式适配」上（`appearance.immersiveAdapt`）：
-	 *  关 → 都不藏（只收插件自己的悬浮 UI，Obsidian 界面原样）；开 → 一起藏。
+	 *  两条通道由三组状态共同驱动：
+	 *   · 「接管原生界面」开关 —— 总闸。关 = 一概不碰；
+	 *   · 工具层隐藏态（`chrome-hidden`：「滑动自动隐藏」/点按/默认隐藏）；
+	 *   · **滚动方向态**（`nativeScrollHidden`）—— 与工具层解耦：只开「接管原生界面」
+	 *     时，滚动照样收放原生界面，工具栏保持常显（用户报障「滑动隐藏没有涵盖到
+	 *     移动端」的修复点）。
+	 *  目标态为显示时，若官方的 `is-hidden-nav` / 被摘出 DOM 的底栏元素还在，
+	 *  本函数负责放回（唯一权威）。
+	 *  全沉浸始终接管，退出后恢复。
 	 *  判据本体见 `ui/nativeNavPolicy.ts`（含这条不变量的真值表回归），
 	 *  这里只负责把结果落到 DOM。
 	 *
 	 *  `why` 只进诊断日志（设置 → 诊断 → 调试日志）：底栏反复闪 = 这个类在
 	 *  add/remove 之间来回，而能写它的路径有六七条（滚动方向/点按/自愈守卫/
 	 *  切 leaf/换外观/开书）。真机取到一次复现日志即可指认是谁在翻，不必再猜
-	 *  ——日志同时带上四条判据的实测值，`[nav] 判据` 一行就能看出是哪一条挡住的。 */
+	 *  ——日志同时带上五条判据的实测值，`[nav] 判据` 一行就能看出是哪一条挡住的。 */
 	private syncNativeNav(why = "-"): void {
 		try {
-			// 判据的**唯一来源**：四条输入事实一次性读出（页首与底栏共用同一份事实，
+			// 判据的**唯一来源**：五条输入事实一次性读出（页首与底栏共用同一份事实，
 			// 保证「要藏一起藏」）。
 			const inputs = this.immersiveNativeInputs();
 			// 顶栏：元素级类，只作用于本视图自己的 view-header。
@@ -2974,11 +3481,16 @@ export class UNreaderView extends ItemView {
 				// 页首显隐会让进度条让位量变化；动画期间几何还在半路，等过渡结束补测一次
 				this.scheduleProgressTopResync();
 			}
-			// 系统状态栏（时间/电量）随沉浸模式显隐（仅手机形态；平板保留系统时间，
-			// 桥缺失即无操作）。与页首同一个开关、同一个状态，不另立判据。
-			if (inputs.phoneLike && headerHidden !== this.statusBarHiddenState) {
-				this.statusBarHiddenState = headerHidden;
-				this.setSystemStatusBarVisible(!headerHidden);
+			// 系统状态栏（时间/电量）随原生页首接管显隐（仅手机形态；平板保留系统时间）。
+			// 桥可用性必须回写：不可用时安全区仍在，进度条不能钻到系统状态栏底下。
+			if (inputs.phoneLike) {
+				if (this.statusBarBridgeAvailable === null || headerHidden !== this.statusBarDesiredHiddenState) {
+					this.statusBarDesiredHiddenState = headerHidden;
+					this.statusBarBridgeUsable = this.setSystemStatusBarVisible(!headerHidden);
+					this.statusBarHiddenState = headerHidden && this.statusBarBridgeUsable;
+				} else {
+					this.statusBarBridgeUsable = this.statusBarBridgeAvailable === true;
+				}
 			}
 			// 底栏（app 级 mobile-navbar）只有**手机形态**才有：平板（官方
 			// `body.is-tablet .mobile-navbar { display:none }`）与桌面压根没有这个东西，
@@ -2989,6 +3501,7 @@ export class UNreaderView extends ItemView {
 			// 走到这一行，无条件 removeClass 是没必要的 DOM 写入。
 			if (!inputs.phoneLike) {
 				if (this.nativeNavManaged || this.statusBarHiddenState) this.releaseNativeNav();
+				else this.statusBarDesiredHiddenState = null;
 				return;
 			}
 			// 失活的视图绝不向全局 body 写 is-hidden-nav（app 级类，一旦在延迟
@@ -3025,15 +3538,27 @@ export class UNreaderView extends ItemView {
 					// （候选家具四个都长得像，只有真机 rect/像素能指认，见 bottomBandDiag 文件头）
 					scheduleBottomBandDiag(`is-hidden-nav + (${why})`);
 				}
-			} else if (this.nativeNavManaged || body.hasClass(PLUGIN_NAV_HIDDEN_CLASS)) {
-				// `|| body.hasClass(plugin)` 是必要的：插件类是自己挂的，哪怕
-				// `nativeNavManaged` 字段因热重载/异常丢失，也不能把它留在 body 上
-				// 锁死底栏。官方类同理，只在我们确实管过这个视图时一起摘。
-				body.removeClass(PLUGIN_NAV_HIDDEN_CLASS);
-				body.removeClass("is-hidden-nav");
-				this.nativeNavManaged = false;
-				debugLog.info("[nav] unreader-nav-hidden - / is-hidden-nav -", why);
-				scheduleBottomBandDiag(`is-hidden-nav - (${why})`);
+			} else {
+				// 目标态 = 显示。「接管原生界面」开着时本视图就是原生的**唯一权威**：
+				// 官方恢复路径只会「显示」，而官方那条 markdown 滚动钩子（以及其它视图）
+				// 留下的 `is-hidden-nav`、被官方 `hide()` 摘出 DOM 的底栏元素，必须由
+				// 我们在这一拍放回 —— 否则用户看到的就是「原生界面还在按自己那套隐现」
+				// （本轮报障原话：「移动端全屏模式下的这种原生隐藏显示依然存在」）。
+				const owned = inputs.normalModeHideNativeChrome === true;
+				const touched = this.nativeNavManaged
+					|| body.hasClass(PLUGIN_NAV_HIDDEN_CLASS)
+					|| (owned && body.hasClass("is-hidden-nav"));
+				if (touched) {
+					// `|| body.hasClass(plugin)` 是必要的：插件类是自己挂的，哪怕
+					// `nativeNavManaged` 字段因热重载/异常丢失，也不能把它留在 body 上
+					// 锁死底栏；官方类在「我们管过」或「接管开着（目标态显示）」时一起摘。
+					body.removeClass(PLUGIN_NAV_HIDDEN_CLASS);
+					body.removeClass("is-hidden-nav");
+					this.nativeNavManaged = false;
+					debugLog.info("[nav] unreader-nav-hidden - / is-hidden-nav -", why);
+					scheduleBottomBandDiag(`is-hidden-nav - (${why})`);
+				}
+				if (owned) this.reattachNativeNavbarIfNeeded();
 			}
 		} catch { /* ignore */ } finally {
 			// 页首/底栏显隐后同步进度条让位（含官方「悬浮导航」等造成的
@@ -3048,7 +3573,26 @@ export class UNreaderView extends ItemView {
 	 *  这一行直接指出是哪一条挡住的（开关没开 / 非沉浸态 / 非手机形态 / 视图失活）。
 	 *  真机取证靠它，不必再让用户猜「是不是官方全屏没开」。 */
 	private nativeNavChain(i: ImmersiveNativeInputs): string {
-		return `判据 adapt=${i.adapt} chrome-hidden=${i.chromeHidden} phone=${i.phoneLike} self=${i.selfActive}`;
+		return `判据 native=${i.normalModeHideNativeChrome} full=${i.fullImmersion} chrome-hidden=${i.chromeHidden} native-scroll=${i.nativeScrollHidden} phone=${i.phoneLike} self=${i.selfActive}`;
+	}
+
+	/** 官方底栏元素被 `hide()` 摘出 DOM 时，在「接管原生界面 + 目标态为显示」下挂回。
+	 *
+	 *  官方 `show()` 自带两道闸门（`mobileToolbar.isVisible` / `mobileSoftKeyboardVisible`
+	 *  时拒绝挂回），所以键盘、手机编辑工具条这两类**合法**的底栏隐藏不会被顶开；
+	 *  这里只补「目标态明明是显示、元素却不在」的那半拍残留（官方 mousedown/切 leaf
+	 *  只会补类不会补元素，官方滚动钩子又只在 markdown 视图上跑）。 */
+	private reattachNativeNavbarIfNeeded(): void {
+		try {
+			const nav = (this.app as unknown as {
+				mobileNavbar?: { containerEl?: HTMLElement; show?: () => void };
+			}).mobileNavbar;
+			const el = nav?.containerEl;
+			if (nav && typeof nav.show === "function" && el instanceof HTMLElement && !el.isConnected) {
+				nav.show();
+				debugLog.info("[nav] 官方底栏挂回（接管原生，目标态=显示）");
+			}
+		} catch { /* 官方接口缺失/形态漂移：静默降级为不挂回 */ }
 	}
 
 	/** 进度条顶部让位（px）：页首对内容区顶边的实际占用高度。
@@ -3406,10 +3950,9 @@ export class UNreaderView extends ItemView {
 				// （`setSystemStatusBarVisible(!headerHidden)`，手机端），那一段本来就是空的，
 				// 继续为它留位没有意义。用户报「手机端非悬浮导航下、沉浸模式（页首消失）时
 				// 进度条应该出现在屏幕最上面，就像悬浮导航模式下的沉浸态一样」。
-				// 现在两路统一收敛到 0：页首既然整片让出，屏幕上沿就没有任何东西要躲。
-				// （官方把页首收走、或页首本就不在 DOM 的情况不走这条 —— 那种情形我们
-				// 并不知道系统状态栏是否还在，仍按平台退回安全区，见下面那条分支。）
-				target = 0;
+				// 页首由我们接管，但系统状态栏桥不可用时它仍在屏幕顶部；此时保留安全区，
+				// 不把进度条放进刘海/状态栏，也不阻止全沉浸继续工作。
+				target = phoneLike && this.statusBarBridgeUsable === false ? safeTop : 0;
 			} else if (desktopLayout) {
 				// **桌面端用布局值 `gap`，不读页首 rect**（2026-09-13 修「进度条与页首不同步」）：
 				// 页首在桌面端只做 transform 隐藏、**不改布局位置**，所以它的**布局**下缘
@@ -3641,6 +4184,8 @@ export class UNreaderView extends ItemView {
 	 *  该类一旦残留，markdown 的官方恢复逻辑不会摘掉它，底栏将永远消失） */
 	private releaseNativeNav(): void {
 		this.nativeNavManaged = false;
+		// 滚动态是会话内瞬时态，释放时一并复位（下一次滚动重新建立）
+		this.nativeScrollHidden = false;
 		// 同一份判据的另一半：底栏「让位」类一并无条件撤销（app 级类残留会污染下一个视图）
 		this.releaseNavFloat();
 		try {
@@ -3648,6 +4193,7 @@ export class UNreaderView extends ItemView {
 			document.body.removeClass(PLUGIN_NAV_HIDDEN_CLASS);
 			document.body.removeClass("is-hidden-nav");
 		} catch { /* ignore */ }
+		this.statusBarDesiredHiddenState = null;
 		if (this.statusBarHiddenState) {
 			this.statusBarHiddenState = false;
 			this.setSystemStatusBarVisible(true);
@@ -3678,14 +4224,18 @@ export class UNreaderView extends ItemView {
 	private statusBarHiddenState = false;
 	/** StatusBar 原生桥可用性缓存（null=未探测；false=Obsidian 未暴露，不再重试打日志） */
 	private statusBarBridgeAvailable: boolean | null = null;
+	/** 宿主状态栏当前的实际目标态；桥不可用时保持安全区，不假装系统栏已经消失。 */
+	private statusBarDesiredHiddenState: boolean | null = null;
+	/** 最近一次原生桥调用是否真正可用，供进度条安全区降级判断。 */
+	private statusBarBridgeUsable = true;
 
 	/** 隐藏/恢复系统状态栏（时间、电量等 OS 级 UI）——仅移动端，尽力而为。
 	 *  OS 状态栏不在 WebView 内，只能经 Obsidian App（Capacitor）暴露的原生桥：
 	 *  window.Capacitor.Plugins.StatusBar。Obsidian 官方未打包该插件时桥缺失，
 	 *  静默降级（iOS WKWebView 无公开 API，官方不暴露则两端都无解）。 */
-	private setSystemStatusBarVisible(visible: boolean): void {
+	private setSystemStatusBarVisible(visible: boolean): boolean {
 		try {
-			if (!(Platform.isMobile || Platform.isIosApp || Platform.isAndroidApp)) return;
+			if (!(Platform.isMobile || Platform.isIosApp || Platform.isAndroidApp)) return true;
 			const bridge = (window as unknown as {
 				Capacitor?: { Plugins?: { StatusBar?: { hide?: (opts?: { animation?: string }) => Promise<unknown>; show?: () => Promise<unknown> } } };
 			}).Capacitor?.Plugins?.StatusBar;
@@ -3694,7 +4244,7 @@ export class UNreaderView extends ItemView {
 					this.statusBarBridgeAvailable = false;
 					if (backDebugOn()) debugLog.info("[UNreader] StatusBar bridge unavailable (Obsidian 未暴露原生插件)，状态栏隐藏降级为无操作");
 				}
-				return;
+				return false;
 			}
 			this.statusBarBridgeAvailable = true;
 			// 隐藏时强制无动画：桥默认 FADE 淡出，表现为状态栏渐进式慢一拍消失；
@@ -3703,7 +4253,11 @@ export class UNreaderView extends ItemView {
 				? bridge.show()
 				: bridge.hide({ animation: "NONE" })
 			)?.catch?.(() => { /* ignore */ });
-		} catch { /* ignore */ }
+			return true;
+		} catch {
+			this.statusBarBridgeAvailable = false;
+			return false;
+		}
 	}
 
 	/** 立即恢复被滚动隐藏的工具栏（关闭该设置时调用） */
@@ -3716,32 +4270,77 @@ export class UNreaderView extends ItemView {
 		try { this.adapter.endScrollActivity(); } catch { /* ignore */ }
 	}
 
-	/** 切换沉浸模式（工具栏按钮）：与设置页「沉浸模式」开关等效。
-	 *  开启时立即隐藏工具栏（侧边栏钉住时仅生效不隐藏），关闭时立即恢复。 */
-	toggleImmersiveMode(): void {
-		const enable = this.plugin.settings.hideChromeOnScroll === false;
-		this.plugin.settings.hideChromeOnScroll = enable;
-		this.plugin.settings.hideChromeOnScrollSet = true;
-		this.plugin.scheduleSave();
-		if (enable && !this.pinned) {
-			this.rootEl?.addClass("chrome-hidden");
-			this.rootEl?.removeClass("chrome-revealed");
-			// **开启分支必须同步**（本轮修）：关闭分支走 restoreChrome()（内含同步），
-			// 而开启分支原来只改了 chrome-hidden 就返回 —— 于是「点沉浸模式」这一刻
-			// 页首**并没有跟着隐藏**（类只在 syncNativeNav 里挂），要等下一次滚动/点按
-			// 触发的同步才补上。用户看到的就是「点了沉浸没反应，滑一下才生效」；
-			// 更要紧的是**页首的隐藏与空隙的覆盖都在这一个同步里**，少跑一次就多一次
-			// 「两者不同步」的机会窗口。
-			this.syncNativeNav("immersive-toggle");
-		} else {
-			this.restoreChrome();
-		}
-		this.syncImmersiveButton();
+	/** 进入会话级全沉浸：关闭所有浮层，冻结 chrome 状态机，仅保留明确例外。 */
+	private enterFullImmersion(): void {
+		if (this.fullImmersion) return;
+		this.fullImmersion = true;
+		this.fullImmersionRevealed = false;
+		this.sideNav?.closePanel();
+		if (this.appearancePanel?.isOpen()) this.appearancePanel?.close();
+		if (this.annotationsPanel?.isOpen()) this.annotationsPanel?.hide();
+		if (this.searchOpen) this.toggleSearch(false);
+		this.selectionToolbar?.hide();
+		if (this.footnoteBackdrop) this.closeFootnotePopup();
+		this.highlightPopover?.hide();
+		this.dismissHover();
+		this.rootEl?.addClass("is-full-immersion");
+		this.rootEl?.removeClass("full-immersion-revealed");
+		this.rootEl?.addClass("chrome-hidden");
+		this.rootEl?.removeClass("chrome-revealed");
+		this.syncFullImmersionPresentation();
+		this.syncNativeNav("full-immersion-enter");
 	}
 
-	/** 同步沉浸模式按钮高亮态 */
-	private syncImmersiveButton(): void {
-		this.immersiveBtn?.toggleClass("is-active", this.plugin.settings.hideChromeOnScroll !== false);
+	/** 退出全沉浸并恢复常态工具层；换书/关视图时可只清理状态，不抢跑导航恢复。 */
+	private exitFullImmersion(opts: { restoreChrome?: boolean } = {}): void {
+		if (!this.fullImmersion) return;
+		this.clearFullImmersion();
+		if (opts.restoreChrome === false) {
+			this.syncNativeNav("full-immersion-exit");
+			return;
+		}
+		// 用户刚退出时必须看得见界面；下一次滚动再按常态设置重新收拢。
+		this.rootEl?.removeClass("chrome-hidden");
+		this.rootEl?.addClass("chrome-revealed");
+		this.syncNativeNav("full-immersion-exit");
+	}
+
+	/** 全沉浸中的点按唤出/收起；只切会话类，不改变 fullImmersion 本身。 */
+	private setFullImmersionRevealed(revealed: boolean): void {
+		if (!this.fullImmersion || this.fullImmersionRevealed === revealed) return;
+		this.fullImmersionRevealed = revealed;
+		const root = this.rootEl;
+		if (root) {
+			root.toggleClass("full-immersion-revealed", revealed);
+			if (revealed) {
+				root.removeClass("chrome-hidden");
+				root.addClass("chrome-revealed");
+			} else {
+				root.addClass("chrome-hidden");
+				root.removeClass("chrome-revealed");
+			}
+		}
+		this.syncNativeNav(revealed ? "full-immersion-reveal" : "full-immersion-hide");
+	}
+
+	/** 清理本视图的全沉浸类；app 级导航由调用链后续的 releaseNativeNav 统一释放。 */
+	private clearFullImmersion(): void {
+		this.fullImmersion = false;
+		this.fullImmersionRevealed = false;
+		// 全沉浸期间冻结的滚动态不要带出会话：退出后先按常态全显示，
+		// 下一次滚动重新按「接管原生界面」收放。
+		this.nativeScrollHidden = false;
+		this.rootEl?.removeClass("is-full-immersion");
+		this.rootEl?.removeClass("full-immersion-revealed");
+		this.rootEl?.removeClass("full-immersion-show-toc");
+		this.rootEl?.removeClass("full-immersion-show-progress");
+		this.syncFullImmersionPresentation();
+	}
+
+	/** 供命令面板/快捷键使用；进入与退出共用同一条路径。 */
+	toggleFullImmersion(): void {
+		if (this.fullImmersion) this.exitFullImmersion();
+		else this.enterFullImmersion();
 	}
 
 	/**
@@ -3756,7 +4355,12 @@ export class UNreaderView extends ItemView {
 	 */
 	private syncRailButtons(): void {
 		this.railTocBtn?.toggleClass("is-active", !!this.sideNav?.isPanelOpen());
-		this.railAnnoBtn?.toggleClass("is-active", !!this.annotationsPanel?.isOpen());
+		const panelOpen = !!this.annotationsPanel?.isOpen();
+		const shelfMode = this.annotationsPanel?.getMode() === "bookshelf";
+		const feedsMode = this.annotationsPanel?.getMode() === "feeds";
+		this.railShelfBtn?.toggleClass("is-active", panelOpen && shelfMode);
+		this.railFeedsBtn?.toggleClass("is-active", panelOpen && feedsMode);
+		this.railAnnoBtn?.toggleClass("is-active", panelOpen && !shelfMode && !feedsMode);
 		this.railAppearanceBtn?.toggleClass("is-active", !!this.appearancePanel?.isOpen());
 		this.railSearchBtn?.toggleClass("is-active", this.searchOpen);
 	}
@@ -3774,14 +4378,26 @@ export class UNreaderView extends ItemView {
 	/** 点按屏幕：快速开/关悬浮工具栏。翻页由滑动完成，点按不触发翻页——
 	 *  点按翻页移除后，「中间 1/3 才有效」的比例分区失去存在理由，其唯一遗留
 	 *  效果就是两侧死区（点了解释「只有一块区域能切换」的根源）。
-	 *  沉浸模式（hideChromeOnScroll 开）三态循环：
+	 *  常态滚动隐藏（normalModeScrollHide 开）三态循环：
 	 *  全隐藏 → 唤出所有元素且工具栏完整滑出；可见但工具栏半隐藏（待悬停态，
 	 *  触屏无 hover 必须靠点按展开）→ 只把工具栏完整滑出，其余元素保持显示；
 	 *  工具栏已完整展示（展开/钉住）→ 全部隐藏。
 	 *  非沉浸模式：复用同一条点按通道，但只切左缘功能轨「完整滑出 ↔ 收回半隐藏」，
 	 *  不动其它 chrome（它们本来就是常显的）——即「快速开/关工具栏」。 */
 	private handleTapZone(_ratio: number): void {
-		const immersive = this.plugin.settings.hideChromeOnScroll !== false;
+		// 全沉浸的滚动状态机始终冻结；点按只在设置允许时临时唤出常态界面。
+		if (this.fullImmersion) {
+			if (this.hasFloatingPanelOpen()) {
+				const hadPanel = this.hasFloatingPanelOpen();
+				this.sideNav?.closePanel();
+				if (!this.pinned && this.annotationsPanel?.isOpen()) this.annotationsPanel.hide();
+				if (hadPanel) return;
+			}
+			if (this.plugin.settings.appearance.fullImmersionTapReveal === true) {
+				this.setFullImmersionRevealed(!this.fullImmersionRevealed);
+			}
+			return;
+		}
 		if (this.hasFloatingPanelOpen()) {
 			// 面板可能被沉浸模式藏成不可见（如目录面板随章节轨 opacity:0），
 			// 用户看不见也关不掉——点按必须先强制收面板，否则永久死锁。
@@ -3789,15 +4405,13 @@ export class UNreaderView extends ItemView {
 			this.sideNav?.closePanel();
 			if (this.appearancePanel?.isOpen()) this.appearancePanel.close();
 			if (!this.pinned && this.annotationsPanel?.isOpen()) this.annotationsPanel.hide();
-			// 非沉浸模式：清障即止，本次点按不再顺手切换工具栏（要下一次点按才切），
-			// 否则「点一下 = 关面板 + 收/放工具栏」两个动作叠加，用户看不出因果
-			if (!immersive || this.hasFloatingPanelOpen()) return;
-		}
-		if (!immersive) {
-			this.toggleActionsReveal();
+			// 先清障即止；工具栏由下一次点按按三态切换，两个动作不叠加。
 			return;
 		}
 		const root = this.rootEl;
+		// 点按接管：滚动留给原生的隐藏态交回这一拍的三态翻转（唤出即放回、
+		// 收起即跟随）。否则「滚出来的原生隐藏态」会锁死到下一次滚动才解除。
+		this.nativeScrollHidden = false;
 		if (!root) return;
 		const hidden = root.hasClass("chrome-hidden");
 		const revealed = root.hasClass("chrome-revealed");
@@ -3819,23 +4433,6 @@ export class UNreaderView extends ItemView {
 		this.syncNativeNav("tap");
 	}
 
-	/** 非沉浸模式点按：左缘功能轨「完整滑出 ↔ 收回半隐藏（待悬停态）」二态切换。
-	 *  直接复用 chrome-revealed —— 该类的 CSS 只作用于功能轨，且非沉浸态下没有
-	 *  chrome-hidden 参与，语义正好退化为「只滑出工具栏」。
-	 *  已钉住（用户显式常显）时点按语义为「关闭」：先取消钉住再收回滑出态——
-	 *  钉住态被 CSS 的 :not(.is-pinned) 排除在 chrome-revealed 之外，不取消钉住
-	 *  就是「点了没反应」。 */
-	private toggleActionsReveal(): void {
-		const root = this.rootEl;
-		const nav = this.sideNav;
-		if (!root || !nav) return;
-		if (nav.isActionsFullyShown()) {
-			nav.setActionsPinned(false);
-			root.removeClass("chrome-revealed");
-			return;
-		}
-		root.toggleClass("chrome-revealed", !root.hasClass("chrome-revealed"));
-	}
 
 	private showNativeHover(event: MouseEvent, hl: StoredHighlight, range: Range): void {
 		if (!this.notePath) return;
@@ -4043,6 +4640,16 @@ export class UNreaderView extends ItemView {
 			this.dismissFloatingOnBlankClick();
 		});
 		doc.addEventListener("click", e => {
+			if (this.isFeedSource() || this.isHtmlSource()) {
+				const target = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>("a[href]") : null;
+				const href = target?.href ?? "";
+				if (/^https?:/i.test(href)) {
+					e.preventDefault();
+					e.stopPropagation();
+					this.openExternalUrl(href);
+					return;
+				}
+			}
 			const hit = this.adapter.getHighlightAt((e as MouseEvent).clientX, (e as MouseEvent).clientY);
 			if (hit && this.annotations.highlights.some(h => h.anchor === hit.anchor)) {
 				this.handleAnnotationClick(e as MouseEvent);
@@ -4065,12 +4672,25 @@ export class UNreaderView extends ItemView {
 			setTimeout(() => this.captureSelection(doc, index), 0);
 		});
 		doc.addEventListener("scroll", () => {
-			this.selectionToolbar.hide();
-			
+			// 编辑评论时不让路：键盘弹起会让容器滚动被 clamp，书页跟着「滚动」一次，
+			// 那不是用户要放弃标注（同 isEditingComment）。
+			if (!this.isEditingComment()) this.selectionToolbar.hide();
 			this.dismissHover();
 		}, { passive: true });
 		// 选区变化 → 同步到主文档（三方插件「选中后快捷键」能读到，与 markdown 一致）
 		doc.addEventListener("selectionchange", () => this.mirrorSelectionFrom(doc));
+	}
+
+	private openExternalUrl(url: string): void {
+		if (!/^https?:/i.test(url)) return;
+		if (Platform.isDesktopApp) {
+			try {
+				const { shell } = require("electron") as { shell: { openExternal: (value: string) => Promise<void> } };
+				void shell.openExternal(url);
+				return;
+			} catch { /* 回退浏览器 */ }
+		}
+		window.open(url, "_blank", "noopener,noreferrer");
 	}
 
 	/* ---------------- 主文档选区镜像 ---------------- */
@@ -4125,9 +4745,46 @@ export class UNreaderView extends ItemView {
 		}
 	}
 
-	/** 把主文档选区设到镜像元素上。 */
+	/** 宿主文档的键盘焦点是否正落在**文本输入**里（我们自己的评论/重命名输入框，
+	 *  或库内任意别的输入框）。判据与 `isEditableTarget` 同一口径。
+	 *
+	 *  ## 为什么镜像保活必须先问这一句（2026-09-19 第三轮；上一轮的 hide()/showFor
+	 *  两处守卫已部署到真机、故障仍在，这条才是真机上的实际触发路径）
+	 *
+	 *  保活的写入原语是 `assertMirrorSelection()`：把宿主 document 的选区改成
+	 *  **离屏镜像 span 上的一段非塌陷选区**，由 `startMirrorKeepalive` **每 150ms**
+	 *  重做一次。焦点在输入框里时这一步有两个后果（Chromium 实测，回归见
+	 *  `npm run test:comment-mirror`）：
+	 *
+	 *   ① **输入框自己的插入点被重置回 0**（`selectionStart/End` → `0-0`）——
+	 *      用户正在打的评论光标每 150ms 跳一次，输入法的合成串反复作废；
+	 *   ② 宿主文档里出现一段**非可编辑**选区 —— Android WebView 据此进入「文本
+	 *      选择」模式（弹系统选区菜单），而系统的文本选择模式一出现就**收掉软键盘**。
+	 *
+	 *  合起来正是用户报的「划线时键盘会出现、闪一下后又被压下来，无法正常标注」：
+	 *  划线建立了镜像保活 → 点评论 → `commentInput.focus()` 拉起键盘 → **≤150ms 后
+	 *  最近一次保活 tick 把它压回去**。这与「容器/浮层被 hide()」是完全不同的两条路，
+	 *  所以上一轮那两个守卫救不了它。
+	 *
+	 *  判据为什么可以这么宽（任何输入框，而不只是我们自己的）：焦点在文本输入里时，
+	 *  宿主 document 的选区**属于那个输入框**（插入点、选区、输入法合成串都在其中），
+	 *  镜像再去改写它就是抢别人的选区。镜像的用途是「把书里的选区暴露给三方插件」，
+	 *  用户此刻在打字，两件事互不相干。
+	 *
+	 *  反向的出口面同样重要（回归里钉着）：焦点在**书页 iframe** 上时
+	 *  `document.activeElement` 是 `<iframe>` 元素 —— 不是输入框 → 保活照常工作，
+	 *  三方插件「选中文字 → 附件 +」的能力一点没少。 */
+	private hostTextInputFocused(): boolean {
+		return this.isEditableTarget(document.activeElement);
+	}
+
+	/** 把主文档选区设到镜像元素上。
+	 *
+	 *  **焦点在文本输入里时一律不写**（见 `hostTextInputFocused`）—— 这是本函数的
+	 *  唯一出口判据：写进去会把用户的插入点冲掉、并在移动端把软键盘压回去。 */
 	private assertMirrorSelection(): void {
 		if (!this.mirrorEl?.isConnected) return;
+		if (this.hostTextInputFocused()) return;
 		try {
 			const range = document.createRange();
 			range.selectNodeContents(this.mirrorEl);
@@ -4163,6 +4820,11 @@ export class UNreaderView extends ItemView {
 				this.stopMirrorKeepalive();
 				return;
 			}
+			// 用户正在输入框里打字（评论 / 重命名 / 任意宿主输入）：保活**整轮让路**，
+			// 连 `window.getSelection()` 都不读 —— 写进去会冲掉插入点、并在 Android 上
+			// 用一段非可编辑选区把软键盘压回去（见 hostTextInputFocused）。
+			// 只跳过这一轮、不停表：焦点回到书页后镜像立刻恢复正常。
+			if (this.hostTextInputFocused()) return;
 			const hostSel = window.getSelection();
 			// 用户正在我们自己的界面里选字（脚注气泡/侧栏/面板）：别抢选区，
 			// 否则气泡里的文字永远选不中（150ms 内被抢回镜像元素）
@@ -4274,6 +4936,11 @@ export class UNreaderView extends ItemView {
 		if (this.appearancePanel.isOpen() || this.footnoteBackdrop || this.highlightPopover.visible) return;
 		const sel = doc.getSelection();
 		if (!sel || sel.isCollapsed) {
+			// 编辑评论期间**不算「选区没了」**：键盘弹起 / 焦点移进宿主输入框时，
+			// 系统会收掉书页 iframe 里的选区，但用户并没有放弃这次标注 ——
+			// 这里若照旧 hide() + 清 pendingSelection，软键盘会立刻被压回去、
+			// 保存也会报「无法定位选区」。
+			if (this.isEditingComment()) return;
 			if (this.selectionToolbar.visible) this.selectionToolbar.hide();
 			this.pendingSelection = null;
 			this.lastExcerpt = null;
@@ -4282,6 +4949,7 @@ export class UNreaderView extends ItemView {
 		}
 		const text = sel.toString().replace(/\s+/g, " ").trim();
 		if (!text) {
+			if (this.isEditingComment()) return;
 			this.selectionToolbar.hide();
 			this.lastExcerpt = null;
 			this.clearMirrorSelection();
@@ -4501,6 +5169,8 @@ export class UNreaderView extends ItemView {
 	/** 连续模式下的宿主文档选区 → 工具条（固定定位：正文区底部居中，不跟随选区） */
 	private handleContinuousSelection(info: { text: string; cfi: string | null; rect: DOMRect }): void {
 		if (!info.text) {
+			// 编辑评论期间同 captureSelection：选区被系统收走 ≠ 用户放弃标注
+			if (this.isEditingComment()) return;
 			if (this.selectionToolbar.visible) this.selectionToolbar.hide();
 			this.pendingSelection = null;
 			this.lastExcerpt = null;

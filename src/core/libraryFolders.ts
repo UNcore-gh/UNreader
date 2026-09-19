@@ -5,7 +5,7 @@
  *
  * 原先 `main.ts` 的 `ensureLibraryFolders` 是「不存在就 `vault.createFolder`」。一旦用户或
  * 同步客户端把 `UNreader/` 改名成 `UNreader 2/`，插件就会按常量重建一个**空**的
- * `UNreader/{Books,Fonts}`，于是进度库、预设库、旁车笔记全部读到空 —— 用户看到的是
+ * `UNreader/Data/…` 骨架，于是进度库、预设库、旁车笔记全部读到空 —— 用户看到的是
  * 「我的阅读进度 / 预设 / 高亮全没了」（书其实还能读，因为书籍不限位置，见
  * `bookService.getBookFiles`）。这是**静默**灾难：用户不会想到只是文件夹换了个名字。
  *
@@ -17,7 +17,7 @@
  *
  * ### ① 健康判据不能只看「目录里有没有东西」
  *
- * `ensureLibraryFolders` 会凭空建出 `UNreader/` + `Books/` + `Fonts/`。初版把
+ * `ensureLibraryFolders` 会凭空建出 `UNreader/Data/` + 六个数据子目录。初版把
  * 「常量路径下存在 `Books|Fonts|Presets|Progress|Notes` 之一」当健康判据，于是**空壳自己
  * 就带着两个证据，heal 每次启动都在第一行早退，用户的进度/预设/高亮永久搁浅**。
  * 而且这个空壳一定会落盘：`refreshCustomFonts`（`onLayoutReady` 后）会调
@@ -33,8 +33,8 @@
  * 笔记目录，这名字完全可能）就会被判成我们的、**被 `vault.rename` 改名成 `UNreader`**
  * —— 用户数据被搬走且插件命名空间被占，是不可逆的用户可见事故。
  *
- * 所以：候选必须**内容级**命中（见 `hasOurContent`），且 `Books`/`Fonts` 单独出现
- * 不足以构成候选。
+ * 所以：候选必须**内容级**命中（见 `hasOurContent`）；只看得到目录名的空壳
+ * （`Books`/`Fonts` 空文件夹）不构成任何证据。
  *
  * ### ③ 并列即放弃，不要赌
  *
@@ -82,27 +82,40 @@
  */
 import { App, Notice, TFolder } from "obsidian";
 import * as debugLog from "./debugLog";
-import { BOOKS_FOLDER, FONTS_FOLDER, NOTES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, UNREADER_ROOT } from "./paths";
+import { BOOKS_DIR_NAME, DATA_DIR_NAME, DEFAULT_ROOT, FEEDS_FOLDER, FONTS_FOLDER, IMAGES_FOLDER, NOTES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, RESOURCES_FOLDER, UNREADER_ROOT } from "./paths";
 
 /** 子目录**名字**（相对 `UNREADER_ROOT`）。paths 里是完整路径，这里只要末段 */
 function nameOf(path: string): string {
 	return path.split("/").pop() ?? path;
 }
 
-/** 「该搬什么」：只搬插件内部数据，**Books 刻意不在列**（理由见文件头） */
-const MOVABLE: string[] = [FONTS_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER].map(nameOf);
-
-const ROOT_LOWER = UNREADER_ROOT.toLowerCase();
+/** 「该搬什么」（旧版平铺布局下的子目录名）：只搬插件内部数据，**Books 刻意不在列**
+ *  （理由见文件头）。每次调用读 `paths.ts` 的**活绑定** —— 数据根可配置（`setLibraryRoot`），
+ *  在模块顶层缓存这份清单，换根之后就会拿着旧目录名去找。 */
+function movableNames(): string[] {
+	return [FONTS_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER, RESOURCES_FOLDER, FEEDS_FOLDER].map(nameOf);
+}
 
 /** 进度文件名形如 `<书名清洗>-<djb2 8 位 hex>.json`（见 progressStore.fileNameFor） */
 const PROGRESS_RE = /-[0-9a-f]{8}\.json$/i;
-const BOOK_EXT = /\.(epub|mobi|azw3|txt)$/i;
+const BOOK_EXT = /\.(epub|mobi|azw3|txt|html?)$/i;
 const FONT_EXT = /\.(ttf|otf|woff2?)$/i;
 
-/** 名字像不像被改名后的我们：`UNreader 2` / `UNreader-1` / `UNreader (1)` / `UNreader 副本` / `unreader_backup` */
+/** 名字像不像被改名后的我们：默认根下的 `UNreader 2` / `UNreader-1` / `unreader_backup`，
+ *  用户自选根下的 `配置 2` / `配置-旧` —— 判据是**当前数据根的名字**，所以换根之后
+ *  仍然成立（数据根可配置，见 core/paths.ts）。 */
 function looksRenamed(name: string): boolean {
 	const n = name.trim().toLowerCase();
-	return n !== ROOT_LOWER && n.startsWith(ROOT_LOWER);
+	const base = (UNREADER_ROOT.split("/").pop() ?? "").trim().toLowerCase();
+	if (!base) return false;
+	return n !== base && n.startsWith(base);
+}
+
+/** 数据根的**父目录**（`UNreader` → 库根；`配置/阅读` → `配置`）。
+ *  自愈只扫这一层：藏在更深处的同名目录更可能是用户自己的东西。 */
+function parentPathOfRoot(): string {
+	const slash = UNREADER_ROOT.lastIndexOf("/");
+	return slash > 0 ? UNREADER_ROOT.slice(0, slash) : "";
 }
 
 async function listFiles(app: App, path: string): Promise<string[]> {
@@ -126,13 +139,23 @@ async function listFolders(app: App, path: string): Promise<string[]> {
 /**
  * 这个目录里**有没有我们的数据**。看内容、不看目录名 —— 理由见文件头 ②。
  *
- * 五个子目录任一命中即可：进度 JSON 的 hash 文件名、预设的 `preset.json`、旁车笔记的
+ * 六个子目录任一命中即可：进度 JSON 的 hash 文件名、预设的 `preset.json`、旁车笔记的
  * `## 高亮`/`## 书签` 段、书籍扩展名、字体扩展名。这些都是插件自己产出的形态，
  * 用户碰巧撞上的概率极低，而「目录名恰好叫 Notes」的概率不低。
  */
 async function hasOurContent(app: App, folder: TFolder): Promise<boolean> {
-	const has = (name: string): boolean => folder.children.some(c => c instanceof TFolder && c.name === name);
-	const at = (name: string): string => `${folder.path}/${name}`;
+	// 新旧两种落点都查：`<候选>/Data/<子目录>`（现行）与 `<候选>/<子目录>`（旧版平铺）——
+	// 改名事故可能发生在任一版本上，判据必须都认。
+	return (await hasOurContentAt(app, folder.path))
+		|| (await hasOurContentAt(app, `${folder.path}/${DATA_DIR_NAME}`));
+}
+
+/** 单个落点（`base`）下的内容判据。 */
+async function hasOurContentAt(app: App, base: string): Promise<boolean> {
+	const childNames = new Set<string>();
+	for (const path of await listFolders(app, base)) childNames.add(nameOf(path));
+	const has = (name: string): boolean => childNames.has(name);
+	const at = (name: string): string => `${base}/${name}`;
 
 	if (has(nameOf(PROGRESS_FOLDER))) {
 		if ((await listFiles(app, at(nameOf(PROGRESS_FOLDER)))).some(f => PROGRESS_RE.test(f))) return true;
@@ -153,11 +176,21 @@ async function hasOurContent(app: App, folder: TFolder): Promise<boolean> {
 			} catch { /* 单份读不到不影响判据 */ }
 		}
 	}
-	if (has(nameOf(BOOKS_FOLDER))) {
-		if ((await listFiles(app, at(nameOf(BOOKS_FOLDER)))).some(f => BOOK_EXT.test(f))) return true;
+	if (has(BOOKS_DIR_NAME)) {
+		if ((await listFiles(app, at(BOOKS_DIR_NAME))).some(f => BOOK_EXT.test(f))) return true;
 	}
 	if (has(nameOf(FONTS_FOLDER))) {
 		if ((await listFiles(app, at(nameOf(FONTS_FOLDER)))).some(f => FONT_EXT.test(f))) return true;
+	}
+	if (has(nameOf(RESOURCES_FOLDER))) {
+		const resourcesDir = at(nameOf(RESOURCES_FOLDER));
+		if ((await listFiles(app, resourcesDir)).some(f => /\/resources\.json$/i.test(f))) return true;
+		const imagesDir = `${resourcesDir}/${nameOf(IMAGES_FOLDER)}`;
+		if ((await listFiles(app, imagesDir)).some(f => /\.(png|jpe?g|webp|gif|bmp|svg)$/i.test(f))) return true;
+	}
+	if (has(nameOf(FEEDS_FOLDER))) {
+		const files = await listFiles(app, at(nameOf(FEEDS_FOLDER)));
+		if (files.some(f => /\/index\.json$/i.test(f) || /\/[0-9a-f-]+\.json$/i.test(f))) return true;
 	}
 	return false;
 }
@@ -167,26 +200,53 @@ export interface LibraryHealResult {
 	recovered: string[]
 }
 
+/** 「自选数据根还空着，数据却留在默认根 `UNreader/`」时提醒用户。**只提示，不搬。**
+ *
+ *  触发场景：数据落点随 `data.json` 跨端同步，A 设备迁走了数据，B 设备还没迁 ——
+ *  B 会按新根建一个空目录，用户看到的是「进度 / 预设 / 高亮全没了」。这与「数据真的
+ *  没了」在界面上**完全无法区分**，所以必须有提示。
+ *
+ *  为什么不顺手搬过来：数据到底该去哪是用户的决定（设置页点「迁移并切换」才是明确
+ *  授权），而且两个位置都可能有数据时搬错方向的代价不可逆。 */
+async function warnIfDataLeftBehind(app: App): Promise<void> {
+	// 默认根配置下**第一行就返回**：绝大多数会话走这条，必须保持纯读、零副作用。
+	if (UNREADER_ROOT === DEFAULT_ROOT) return;
+	const fallback = app.vault.getAbstractFileByPath(DEFAULT_ROOT);
+	if (!(fallback instanceof TFolder)) return;
+	const current = app.vault.getAbstractFileByPath(UNREADER_ROOT);
+	if (current instanceof TFolder && (await hasOurContent(app, current))) return;
+	if (!(await hasOurContent(app, fallback))) return;
+	new Notice(`UNreader：数据文件夹「${UNREADER_ROOT}」里没有插件数据，而默认位置「${DEFAULT_ROOT}」里还有一份（可能是另一台设备迁移过、本机还没迁）。请到「设置 → UNreader → 数据 → 数据文件夹」重新选择并迁移，或把数据文件夹改回默认位置。`);
+}
+
 /** 检测并把被改名/挪走的插件数据搬回 `UNreader/`。数据齐全时是纯读，零写入。 */
 export async function healLibraryFolders(app: App): Promise<LibraryHealResult> {
 	const result: LibraryHealResult = { recovered: [] };
 	try {
-		const root = app.vault.getRoot();
-		const target = root.children.find(c => c.path === UNREADER_ROOT);
+		// 只在数据根的**直接父目录**里找被改名的兄弟目录（默认根 = 库根，见 parentPathOfRoot）。
+		// 数据根可以是用户自选的嵌套路径，所以父目录也要跟着算，不能写死 vault.getRoot()。
+		const parentPath = parentPathOfRoot();
+		const parent = parentPath ? app.vault.getAbstractFileByPath(parentPath) : app.vault.getRoot();
+		if (!(parent instanceof TFolder)) return result;
+		const target = parent.children.find(c => c.path === UNREADER_ROOT);
 		const targetFolder = target instanceof TFolder ? target : null;
 
 		// 只看名字够像的兄弟目录（廉价的同步预筛），再对它们做内容判定
-		const suspects = root.children.filter(
+		const suspects = parent.children.filter(
 			(c): c is TFolder => c instanceof TFolder && looksRenamed(c.name),
 		);
-		// **纯读路径**：库根没有任何像被改名的兄弟目录 → 什么都不做（绝大多数会话走这条）
-		if (suspects.length === 0) return result;
 
 		const candidates: TFolder[] = [];
 		for (const folder of suspects) {
 			if (await hasOurContent(app, folder)) candidates.push(folder);
 		}
-		if (candidates.length === 0) return result;
+		// **纯读路径**：没有任何「被改名的我们」→ 什么都不搬（绝大多数会话走这条；
+		// `suspects` 为空时下面这个循环体一次都不执行，代价为零）。这里仍要处理另一种
+		// 同样静默的事故：自选数据根空着、数据还留在默认根（见 warnIfDataLeftBehind）。
+		if (candidates.length === 0) {
+			await warnIfDataLeftBehind(app);
+			return result;
+		}
 
 		// **并列即放弃**（见文件头 ③）：两个都像，就说明我们不知道哪个对
 		if (candidates.length > 1) {
@@ -197,19 +257,42 @@ export async function healLibraryFolders(app: App): Promise<LibraryHealResult> {
 		}
 
 		const source = candidates[0]!;
-		const movable = source.children.filter(
-			(c): c is TFolder => c instanceof TFolder && MOVABLE.includes(c.name),
-		);
-		if (movable.length === 0) return result;
+		const flexible = movableNames();
+		const movable: TFolder[] = [];
+		let dataChild: TFolder | null = null;
+		for (const child of source.children) {
+			if (!(child instanceof TFolder)) continue;
+			if (child.name === DATA_DIR_NAME) {
+				// `Data` 这名字太泛化：必须是**内容级**确认才搬（用户自己的 `Data/` 不许碰）
+				if (await hasOurContentAt(app, child.path)) dataChild = child;
+				continue;
+			}
+			if (flexible.includes(child.name)) movable.push(child);
+		}
+		if (movable.length === 0 && !dataChild) return result;
 
 		if (!targetFolder) {
 			try { await app.vault.createFolder(UNREADER_ROOT); } catch { /* 并发下已存在 */ }
 		}
 
+		const targetData = `${UNREADER_ROOT}/${DATA_DIR_NAME}`;
 		const skipped: string[] = [];
+		// 现行布局被改名时内容全在整棵 `Data/` 里 —— 先把它整体搬回（目标已有 `Data/`
+		// 就整个跳过，两份不合并）。
+		if (dataChild) {
+			if (await app.vault.adapter.exists(targetData)) {
+				skipped.push(DATA_DIR_NAME);
+			} else {
+				await app.vault.rename(dataChild, targetData);
+				result.recovered.push(`${dataChild.path} → ${targetData}`);
+			}
+		}
+		// 旧版平铺的子目录逐个收进 `Data/`；目标已有同名子目录就跳过（两份来源不明的数据不合并）。
+		if (movable.length > 0) {
+			try { await app.vault.createFolder(targetData); } catch { /* 已存在（或并发） */ }
+		}
 		for (const child of movable) {
-			const dest = `${UNREADER_ROOT}/${child.name}`;
-			// **不覆盖**：目标已有同名子目录就跳过（两份来源不明的数据不合并）
+			const dest = `${targetData}/${child.name}`;
 			if (await app.vault.adapter.exists(dest)) { skipped.push(child.name); continue; }
 			// **必须用 `vault.rename` 而不是 `adapter.rename`** —— 后者只在文件系统层落位、
 			// 靠官方 watcher 异步补登记，而紧随其后的 `ProgressStore.init` 走

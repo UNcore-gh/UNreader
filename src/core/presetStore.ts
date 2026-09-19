@@ -1,5 +1,5 @@
-import { TFile, TFolder, Vault } from "obsidian"
-import { AppearancePreset, AppearanceSettings, DEFAULT_APPEARANCE, adoptLegacyAppearance } from "../types"
+import { Platform, TFile, TFolder, Vault } from "obsidian"
+import { AppearancePreset, AppearanceSettings, DEFAULT_APPEARANCE, adoptLegacyAppearance, platformAppearanceDefaults } from "../types"
 
 /** 单个预设文件的磁盘格式 */
 interface PresetFile {
@@ -12,10 +12,9 @@ interface PresetFile {
 
 /**
  * 外观预设文件化持久化（多端同步）：
- * 每个预设一个文件夹（UNreader/Presets/<预设名>/），内含 preset.json 与
- * 复制进来的背景图片。图片随预设一起存储，原位置图片被删除后预设依然可用；
- * 文件随 Obsidian Sync / iCloud 自然同步到各端。
- * 背景 in preset.json 里以 "preset:background.<ext>" 引用文件夹内图片。
+ * 每个预设一个文件夹（UNreader/Data/Presets/<预设名>/），内含 preset.json；
+ * 新版背景图只保存 `shared:image/<文件>` 引用，资源本体由 ResourceStore 统一管理。
+ * 旧版预设内的 "preset:background.<ext>" 仍可读取，并由 main 的迁移流程收纳为共享资源。
  */
 export class PresetStore {
 	/** id → 预设（内存缓存，启动时从库内加载） */
@@ -28,7 +27,7 @@ export class PresetStore {
 	 *  往 UNreader/ 写文件是库里的结构性事件，会触发官方文件列表重算该子树 ——
 	 *  移动端抽屉隐藏窗口里的那次重算会把条目永久打上 hidden（见 explorerHeal.ts）。 */
 	private writtenSigs = new Map<string, string>()
-	/** 已物化图片的记忆：dir → 字段 → 源引用与目标文件名（避免每次写回都重新复制同一张图） */
+	/** 旧版预设内图片的记忆：dir → 字段 → 源引用与目标文件名（避免重复复制） */
 	private materialized = new Map<string, Map<string, { source: string; file: string }>>()
 
 	/** 外观中的背景图字段 → 预设文件夹内文件名（不含扩展名） */
@@ -62,7 +61,9 @@ export class PresetStore {
 			// id 必须跨端确定（按预设名派生）：两台设备各自迁移同一个旧预设时，
 			// 随机 id 会写进同一个文件夹互相覆盖，导致另一端钉住的 id 失配
 			const rawLegacy = { ...(p.appearance as unknown as Record<string, unknown>) }
-			adoptLegacyAppearance(rawLegacy)
+			adoptLegacyAppearance(rawLegacy, platformAppearanceDefaults(
+				Platform.isMobile || Platform.isIosApp || Platform.isAndroidApp,
+			))
 			const migrated: AppearancePreset & { dir: string } = {
 				id: p.id || `legacy-${PresetStore.dirNameFor(p.name)}`,
 				name: p.name,
@@ -103,10 +104,11 @@ export class PresetStore {
 					if (!parsed || typeof parsed.name !== "string" || !parsed.appearance) continue
 					// id 缺失时按文件夹名派生确定 id（不能随机：随机 id 只进内存
 					// 不落盘，每次重扫都变，本机钉住会永久失配）
-					// 旧字段迁移在合并默认值之前（`hideHeader` → `immersiveAdapt`，
-					// 否则默认 false 会盖掉旧预设里的 true）
+					// 旧字段迁移在合并默认值之前；缺失的平台相关常态项按当前设备形态补充。
 					const rawAppearance = { ...(parsed.appearance as unknown as Record<string, unknown>) }
-					adoptLegacyAppearance(rawAppearance)
+					adoptLegacyAppearance(rawAppearance, platformAppearanceDefaults(
+						Platform.isMobile || Platform.isIosApp || Platform.isAndroidApp,
+					))
 					const preset: AppearancePreset & { dir: string } = {
 						id: typeof parsed.id === "string" && parsed.id ? parsed.id : `dir-${child.name}`,
 						name: parsed.name,
@@ -130,7 +132,7 @@ export class PresetStore {
 		}
 	}
 
-	list(): AppearancePreset[] {
+	list(): (AppearancePreset & { dir: string })[] {
 		return [...this.cache.values()].sort((a, b) => a.createdAt - b.createdAt)
 	}
 
@@ -215,7 +217,7 @@ export class PresetStore {
 		}
 	}
 
-	/** 预设内各背景图字段（preset:background.xxx）→ data URI；其他引用原样返回 */
+	/** 旧版预设内背景图（preset:background.xxx）→ data URI；shared:/远程引用原样返回 */
 	async resolveImages(appearance: AppearanceSettings, preset: AppearancePreset & { dir?: string }): Promise<void> {
 		const dir = (preset as AppearancePreset & { dir?: string }).dir ?? PresetStore.dirNameFor(preset.name)
 		for (const field of PresetStore.IMAGE_FIELDS) {
@@ -238,13 +240,13 @@ export class PresetStore {
 		}
 	}
 
-	/** 把外观里各背景图字段复制进预设文件夹并改写为内部引用
-	 *  （原图删除后预设仍可用）；同一张图不重复复制 */
+	/** 仅迁移旧版 data:/库内路径背景图到预设文件夹；shared: 全局引用不再复制副本 */
 	private async materializeImage(preset: AppearancePreset & { dir: string }): Promise<void> {
 		const a = preset.appearance
 		for (const field of PresetStore.IMAGE_FIELDS) {
 			const ref = ((a as unknown as Record<string, unknown>)[field] as string ?? "").trim()
-			if (!ref || ref.startsWith("preset:") || /^https?:\/\//i.test(ref)) continue
+			// `shared:` 是全局资源引用，不复制进任何单个预设；只迁移旧版 preset:/data:/路径引用。
+			if (!ref || ref.startsWith("preset:") || ref.startsWith("shared:") || /^https?:\/\//i.test(ref)) continue
 			const done = this.materialized.get(preset.dir)?.get(field)
 			if (done && done.source === ref) {
 				;(a as unknown as Record<string, unknown>)[field] = `preset:${done.file}`

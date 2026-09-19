@@ -23,6 +23,7 @@ import { info as debugInfo, warn as debugWarn } from "./debugLog";
 import { isTxtFile, makeTxtBook } from "./txtBook";
 import { hasCoreModal, focusModalPrimary } from "./modalFocusGate";
 import { OBSIDIAN_IFRAME_DOM_COMPAT_JS } from "./iframeDomCompat";
+import { isResourceEnabled, resolveResourceReference } from "./resourceStore";
 
 /* —— 一次性测量探针/引擎宿主层的固定样式：官方 lint 禁止 `el.style.x = "字面量"`，
    统一收敛成模块常量后按变量赋值（值与注入时机逐字节不变，只是不再触发规则）。 —— */
@@ -87,8 +88,7 @@ export interface ResolvedAppearance extends AppearanceSettings {
 
 /** 自定义字体注册表：plugin 扫描字体文件夹后注入，供 resolveAppearance 生成
  *  @font-face 规则并把自定义字体 id 解析为对应 family 名。
- *  src 用 base64 data URI（fontService.fontToDataUri），直接内联进 CSS，
- *  规避 iframe/CSP/blob 加载不确定性，保证 iOS/Android WebView 都能加载。 */
+ *  src 由 main 的字体扫描注入为 blob URL，避免大体量字体以 base64 重复膨胀每章 CSS。 */
 const customFontRegistry = new Map<string, { label: string; src: string; format: string }>()
 
 /** 阅读器**当前正在使用**的自定义字体 id 集合。由 applyAppearance 写入（那是
@@ -249,9 +249,11 @@ export function resolveAppearance(a: AppearanceSettings): ResolvedAppearance {
 	// 注意判据是「id 存在」而非「解析成功」：注册表尚未填充时 @font-face 也生成
 	// 不出来（遍历注册表），两者天然一致；main.refreshCustomFonts 完成后会
 	// refreshAppearance() 重新走一遍本函数。
-	const customFamily = (a.fontFamily && resolveFontFamily(a.fontFamily)) || ""
+	// 停用的资源不参与解析，即使它仍是当前配置值；删除后的悬空引用也走同一降级路径。
 	const ruleIds = new Set<string>()
-	if (a.fontFamily) ruleIds.add(a.fontFamily)
+	const fontId = isResourceEnabled(a.fontFamily) ? a.fontFamily : null
+	const customFamily = (fontId && resolveFontFamily(fontId)) || ""
+	if (fontId) ruleIds.add(fontId)
 	return {
 		fontFamily: customFamily || v_themeFont(style),
 		fontSize: a.fontSize ?? num(style.getPropertyValue("--font-text-size"), 16),
@@ -273,7 +275,7 @@ export function resolveAppearance(a: AppearanceSettings): ResolvedAppearance {
 		textColor: fg,
 		darkBackgroundColor: (a as AppearanceSettings).darkBackgroundColor ?? "#1e1e1e",
 		darkTextColor: (a as AppearanceSettings).darkTextColor ?? "#d4d4d4",
-		backgroundImage: activeBackgroundImage(a),
+		backgroundImage: resolveResourceReference(activeBackgroundImage(a)),
 		imageBlur: (a as AppearanceSettings).imageBlur ?? 0,
 		glassEnabled: !!(a as AppearanceSettings).glassEnabled,
 		glassBlur: (a as AppearanceSettings).glassBlur ?? 12,
@@ -456,12 +458,14 @@ interface FoliateBook {
 	sections?: { resolveHref?: (href: string) => unknown; id?: string }[]
 }
 
-/** 我们自己造的「合成 book」（TXT，见 core/txtBook.ts）。形状对齐 vendor/foliate-js/fb2.js
- *  的产物，`view.open()` 的三条鸭子判据（字符串 / 有 `arrayBuffer` / `isDirectory`）
- *  一条都不命中 → 原样赋给 `view.book`，不会走 makeBook。
+/** 我们自己造的「合成 book」：TXT（core/txtBook.ts）、feed 文章
+ *  （core/feedBookFactory.ts）、本地 HTML（core/htmlBook.ts）三者共用同一形状。
+ *  对齐 vendor/foliate-js/fb2.js 的产物，`view.open()` 的三条鸭子判据（字符串 /
+ *  有 `arrayBuffer` / `isDirectory`）一条都不命中 → 原样赋给 `view.book`，不走 makeBook。
  *  这里只声明 engineAdapter 真正读到的字段，别照抄成完整契约。 */
 export interface SyntheticBook {
 	readonly __unreaderTxt?: true
+	readonly __unreaderFeed?: true
 	metadata?: Record<string, unknown>
 	toc?: TocItem[]
 	sections?: {
@@ -634,6 +638,21 @@ export function isMobileLike(): boolean {
 	}
 }
 
+/** 只有手机形态才使用固定小边距。iPad 虽然属于移动端，但屏幕仍可能很宽，
+ *  正文布局应与桌面采用同一档：窗口变窄时先释放侧边距，再压缩正文宽度。 */
+export function isPhoneLike(): boolean {
+	try {
+		const body = document.body;
+		if (body?.hasClass("is-tablet")) return false;
+		if (body?.hasClass("is-phone")) return true;
+	} catch { /* ignore */ }
+	try {
+		return Platform.isPhone === true;
+	} catch {
+		return false;
+	}
+}
+
 /** srcdoc 专用序列化：必须用 HTML 序列化器（innerHTML），不能用 XMLSerializer。
  *  XML 序列化会把 <style> 文本里的 >、& 转义成 &gt;/&amp;，而 srcdoc 按 HTML
  *  解析时 <style> 是 raw text（不解码实体）→ 书内含子选择器/转义符的 CSS 规则
@@ -750,7 +769,7 @@ html::after {
 
 	// 边距：连续（上下滚动）模式，左右留白直接采用用户设定值。
 	// 最小 8px 下限，桌面额外限制 25% 防止过小窗口下挤没正文
-	const mobile = isMobileLike();
+	const mobile = isPhoneLike();
 	const calcPad = (m: number): string => {
 		if (mobile) return `max(8px, ${m}px)`
 		return `max(0px, min(${m}px, 25%))`
@@ -1069,9 +1088,10 @@ export class EngineAdapter {
 	 * 当前 book 格式（load() 完成后由 detectFormat 设置）：
 	 *   - "epub"：EPUB 走 book.loadText(secId) + rewriteResourcesLocal
 	 *   - "mobi"：MOBI/AZW3 走 sec.load()（已含资源改写）+ 跳过 rewriteResourcesLocal
-	 *   - "txt" ：TXT 由 core/txtBook.ts 合成 book（形状与 MOBI 同构），走 sec.load()
+	 *   - "txt" ：合成书（TXT / feed 文章 / 本地 HTML，见 SyntheticBook）走 sec.load()
 	 *  区分依据：book.sections[0].id 类型（number = MOBI/TXT，string = EPUB），
-	 *  再按合成书的 `__unreaderTxt` 标记把 TXT 从 MOBI 里分出来。
+	 *  再按合成书的 `__unreaderTxt` 标记把合成书从 MOBI 里分出来（这个标记的语义是
+	 *  「我们造的合成书」，不是「这个文件是 txt」）。
 	 *
 	 *  ⚠️ `"mobi" | "txt"` 的**共同语义**是「章节由 foliate（或我们）预先生成，
 	 *  section 是数字下标、没有真实 CFI」。凡是只关心这层语义的分支，判据应写成
@@ -1080,10 +1100,11 @@ export class EngineAdapter {
 	 *  注：PDF 已整体移除（见 git 历史 / 记忆日志），不再作为受支持格式
 	 */
 	private bookFormat: "epub" | "mobi" | "txt" = "epub"
-	/** 本次开书若走 TXT 合成书，这里持有它以便 destroy() 回收章节的 blob URL。
-	 *  只回收 TXT —— 不去调 EPUB/MOBI 的 book.destroy（那会 revoke 书内资源 URL，
-	 *  影响面远超本特性所需）。 */
-	private txtBook: SyntheticBook | null = null
+	/** 本次开书若走合成书（TXT / feed 文章 / 本地 HTML），这里持有它以便 destroy()
+	 *  回收章节的 blob URL。三种来源的产物形状完全一致（见 SyntheticBook），回收策略
+	 *  也一样；**只回收合成书** —— 不去调 EPUB/MOBI 的 book.destroy（那会 revoke
+	 *  书内资源 URL，影响面远超本特性所需）。 */
+	private syntheticBook: SyntheticBook | null = null
 	private tocIdBySection = new Map<number, number>()
 	private sortedTocSections: number[] = []
 	/** 由外层 readerView 同步的 Cmd/Ctrl 按下状态，用于 Cmd+点击直接跳转 */
@@ -1382,7 +1403,7 @@ export class EngineAdapter {
 	}
 
 
-	private async loadContinuous(file: File, lastLocation: string | undefined, appearance: AppearanceSettings): Promise<BookMetadata> {
+	private async loadContinuous(target: BookOpenTarget, lastLocation: string | undefined, appearance: AppearanceSettings): Promise<BookMetadata> {
 		const el = this.el
 		if (!el) throw new Error("Engine not mounted")
 		this.highlights.clear()
@@ -1390,7 +1411,7 @@ export class EngineAdapter {
 		this.sortedTocSections = []
 		this.restorePending = null
 		perfBegin("open")
-		await this.openBook(el, file)
+		await this.openBook(el, target)
 		// 解析完成后判别格式：EPUB / MOBI 的 book 接口差异（loadText、loadBlob、sec.id 类型）
 		// foliate-js view 没有直接暴露 format 字段，靠 sections[0].id 类型推断
 		this.bookFormat = this.detectFormat(el.book)
@@ -1473,12 +1494,24 @@ export class EngineAdapter {
 	 *  `view.open()` 的三条鸭子判据（字符串 / `arrayBuffer` / `isDirectory`）不命中
 	 *  → 原样赋给 `view.book`，不走 makeBook（见 txtBook.ts 文件头）。
 	 */
-	private openBook(el: RawFoliateView, file: File): Promise<void> {
-		if (!isTxtFile(file)) return this.openWithTimeout(el, () => el.open(file))
+	private openBook(el: RawFoliateView, bookOrFile: BookOpenTarget): Promise<void> {
+		if (!(bookOrFile instanceof Blob)) {
+			// 合成书：TXT 由本适配器造、feed 文章与本地 HTML 由 readerView 造（见
+			// core/feedBookFactory.ts / core/htmlBook.ts）。三种都是「每节一个 blob URL」，
+			// 一律记下来交给 destroy() 回收 —— 漏记就是每开一次书漏一份常驻内存
+			// （HTML 是每节一个 URL，比 feed 的单节形态更容易累积）。
+			if ((bookOrFile as SyntheticBook | null)?.__unreaderTxt) {
+				this.syntheticBook = bookOrFile as SyntheticBook
+			}
+			return this.openWithTimeout(el, () => el.open(bookOrFile))
+		}
+		if (!isTxtFile(bookOrFile as File)) {
+			return this.openWithTimeout(el, () => el.open(bookOrFile))
+		}
 		return this.openWithTimeout(el, async () => {
-			const book = await makeTxtBook(file)
-			// 记住它：destroy() 时回收章节 blob URL（见 txtBook 字段注释）
-			this.txtBook = book
+			const book = await makeTxtBook(bookOrFile as File)
+			// 记住它：destroy() 时回收章节 blob URL（见 syntheticBook 字段注释）
+			this.syntheticBook = book
 			await el.open(book)
 		})
 	}
@@ -1512,12 +1545,12 @@ export class EngineAdapter {
 		return typeof sec?.id === "number" ? "mobi" : "epub"
 	}
 
-	async load(file: File, lastLocation: string | undefined, appearance: AppearanceSettings): Promise<BookMetadata> {
+	async load(target: BookOpenTarget, lastLocation: string | undefined, appearance: AppearanceSettings): Promise<BookMetadata> {
 		const el = this.el
 		if (!el) throw new Error("Engine not mounted")
 		this.highlights.clear()
 		// 当前唯一支持的阅读模式：连续滚动（分页模式已删除）
-		return this.loadContinuous(file, lastLocation, appearance)
+		return this.loadContinuous(target, lastLocation, appearance)
 	}
 
 	/** 恢复位置 token → 目标**渲染**章节下标（跳过 `linear="no"` 的分部标题页——
@@ -2614,6 +2647,29 @@ export class EngineAdapter {
 		}
 	}
 
+	/** Feed 正文更新后，按保存的原文在已渲染内容中寻找新位置。 */
+	findTextForAnnotation(text: string): { cfi: string; range: Range } | null {
+		const needle = text.replace(/\s+/g, " ").trim();
+		if (!needle) return null;
+		const docs: Document[] = [];
+		if (this.isContinuous) {
+			for (const frame of this.contFrames.values()) if (frame.doc) docs.push(frame.doc);
+		} else {
+			try {
+				for (const content of this.el?.renderer?.getContents?.() ?? []) if (content.doc) docs.push(content.doc);
+			} catch { /* ignore */ }
+		}
+		for (const doc of docs) {
+			const body = doc.body as HTMLElement | null;
+			if (!body) continue;
+			const range = this.findRangeInElement(body, needle);
+			if (!range) continue;
+			const cfi = this.rangeCFI(doc, range);
+			if (cfi) return { cfi, range };
+		}
+		return null;
+	}
+
 	addHighlight(cfi: string, colorName: string, textHint?: string): void {
 		if (!cfi) return
 		if (this.isContinuous && this.continuousRendered) {
@@ -2761,12 +2817,12 @@ export class EngineAdapter {
 		const el = this.el
 		this.el = null
 		this.handlers = null
-		// TXT 合成书的章节内容是 blob URL（每节一个）。`view.close()` 只销毁 renderer、
-		// 不会回调 `book.destroy`，不在这里回收就会随每次开书累积（一本 500 章的书
-		// ≈ 10MB 常驻，直到页面重载）。只回收 TXT —— 不去动 EPUB/MOBI 的 book.destroy，
-		// 那会 revoke 书内资源的 URL，影响面远超本特性所需。
-		try { this.txtBook?.destroy?.() } catch { /* ignore */ }
-		this.txtBook = null
+		// 合成书（TXT / feed / HTML）的章节内容是 blob URL（每节一个）。`view.close()`
+		// 只销毁 renderer、不会回调 `book.destroy`，不在这里回收就会随每次开书累积
+		// （一本 500 章的书 ≈ 10MB 常驻，直到页面重载）。只回收合成书 —— 不去动
+		// EPUB/MOBI 的 book.destroy，那会 revoke 书内资源的 URL，影响面远超本特性所需。
+		try { this.syntheticBook?.destroy?.() } catch { /* ignore */ }
+		this.syntheticBook = null
 		this.bookFormat = "epub"
 		// 侧栏手势桥：撤掉全局入口并还原被冻结的滚动容器（view 关闭/换书时）
 		const hostWin = window as unknown as { __unreaderSwipe?: unknown }
@@ -5157,7 +5213,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		// 必须落在本函数：它是两条外观落地路径的唯一汇合处（applyAppearance 之外，
 		// load() 直接调用它，不经过 applyAppearance）。写在此处同时保证
 		// registerCustomFontsIn 拿到的集合与紧随其后构建的 contFrameCss 一致。
-		setActiveFontIds(appearance.fontFamily ? new Set([appearance.fontFamily]) : new Set<string>())
+		setActiveFontIds(appearance.fontFamily && isResourceEnabled(appearance.fontFamily) ? new Set([appearance.fontFamily]) : new Set<string>())
 		// 切回连续模式时移除分页模式挂在 stage 上的宿主背景图层，避免双层绘制
 		if (this.hostEl) this.removeHostBgLayers(this.hostEl)
 		const accent = (() => {
@@ -5176,7 +5232,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		try {
 			const cont = this.continuousEl
 			if (cont) {
-				const mobile = isMobileLike()
+				const mobile = isPhoneLike()
 				// 统一使用：移动端直接设置值（最小 8px），桌面限制 25%
 				const leftPad = mobile ? `max(8px, ${app.marginLeft}px)` : `min(${app.marginLeft}px, 25%)`
 				const rightPad = mobile ? `max(8px, ${app.marginRight}px)` : `min(${app.marginRight}px, 25%)`
@@ -5216,7 +5272,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		try {
 			if (this.continuousEl) this.continuousEl.style.backgroundColor = img ? "transparent" : app.backgroundColor
 		} catch { /* ignore */ }
-		this.applyContinuousBgLayer(appearance)
+		this.applyContinuousBgLayer(app)
 		this.contImgActive = !!img
 		this.contFrameCss = `
 ${app.customFontRules ?? ""}
@@ -5275,7 +5331,7 @@ ${darkBase}
 	 *    且只覆盖 body 盒子，会呈现“只在文字处生效”的碎块感）。
 	 *  连续容器自身是 isolate 堆叠上下文，负 z-index 子层不会沉到宿主底色之下。
 	 *  不改动容器的定位/布局（有图无图时正文左右间距完全一致）。 */
-	private applyContinuousBgLayer(appearance: AppearanceSettings): void {
+	private applyContinuousBgLayer(appearance: ResolvedAppearance): void {
 		const host = this.continuousEl
 		if (!host) return
 		// 清理旧版本可能遗留的容器 inline 定位覆盖（避免影响滚动容器布局）
@@ -5293,12 +5349,12 @@ ${darkBase}
 		} catch { /* ignore */ }
 	}
 
-	private paintHostBgLayers(host: HTMLElement, appearance: AppearanceSettings): void {
+	private paintHostBgLayers(host: HTMLElement, appearance: ResolvedAppearance): void {
 		// 图片取「解析后生效值」（activeBackgroundImage：深浅分开时取对应侧字段），
 		// 与 frame 主题（contFrameCss 同样按解析值决定透明/纯色）保持同一判据——
 		// 若这里用原始 backgroundImage 共用字段，深浅分开且当前侧无图时会出现
 		// 「frame 纯色不透明（正文黑）+ 宿主层仍在画共用旧图（只在两侧空白露出）」
-		const image = (activeBackgroundImage(appearance) || "").trim()
+		const image = (appearance.backgroundImage || "").trim()
 		let bg = host.querySelector<HTMLElement>(":scope > .unreader-cont-bg")
 		let tint = host.querySelector<HTMLElement>(":scope > .unreader-cont-tint")
 		if (!image) {

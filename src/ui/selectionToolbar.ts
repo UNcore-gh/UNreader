@@ -1,5 +1,6 @@
 import { setIcon } from "obsidian";
 import { HIGHLIGHT_COLORS, highlightColorOf } from "../types";
+import * as debugLog from "../core/debugLog";
 import { placeFloating, type Bounds } from "./floatingPlacement";
 import { subscribeKeyboardGeometry } from "./keyboardInset";
 
@@ -205,6 +206,31 @@ export class SelectionToolbar {
 	}
 
 	showFor(snapshot: SelectionSnapshot, anchorRect: DOMRect | null, bounds: Bounds): void {
+		// 评论编辑区展开期间，**选区事件重投**不得重置编辑态（2026-09-19 真机回归的第二条路径）。
+		//
+		// 移动端软键盘弹起会让官方收缩 `.app-container` → 书页回流，浏览器常把同一段选区
+		// **重新上报一次**（`pointerup` 的 `setTimeout(0)` 与 `selectionchange` 的 260ms 去抖
+		// 两条路）。此刻选区仍是**非空**的，所以走不到「选区被系统收走」那条守卫，会一路
+		// 落到这里。旧实现无条件执行下面那串重置：
+		//   `commentOpen = false` + `commentWrap.hide()`（= `display:none`）
+		//   → 输入框立刻 blur（已用 Chromium 实测：`display:none` / `visibility:hidden`
+		//     都会让聚焦中的 textarea 失焦）→ 软键盘刚弹起就被系统压回去；
+		//   并且 `commentInput.value = ""` 把用户已经打好的评论一起清掉。
+		//
+		// 判据为什么可以只看 `commentOpen`：**任何**「用户重新划选另一段」的意图，其起点
+		// 必然是书页 iframe 或正文空白上的 `pointerdown`，而那条路一律先经
+		// `dismissFloatingOnBlankClick()` → `hide()`（编辑区已关，`commentOpen === false`）。
+		// 所以编辑区还开着时收到的选区事件，只可能是同一次划选的重投，不是新意图。
+		if (this.commentOpen) {
+			this.snapshot = snapshot;
+			this.lastAnchorRect = this.fixed ? null : anchorRect;
+			const freshBounds = this.boundsResolver?.() ?? bounds;
+			this.lastBounds = freshBounds;
+			this.reposition(this.lastAnchorRect, freshBounds);
+			debugLog.info("[comment] 选区事件重投已让路（评论编辑区保持展开、已输入文字保留）",
+				JSON.stringify(snapshot.text.slice(0, 24)));
+			return;
+		}
 		this.snapshot = snapshot;
 		this.lastAnchorRect = this.fixed ? null : anchorRect;
 		this.commentOpen = false;
@@ -227,6 +253,10 @@ export class SelectionToolbar {
 	}
 
 	hide(): void {
+		// 取证：只有在**编辑区还开着**的时候收起才算故障路径 —— 它会 `visibility:hidden`
+		// 掉承载输入框的容器，移动端软键盘随即被系统收走。带上调用栈，真机日志可直接指认
+		// 是哪条路径动的手（正常出口：取消 / 关闭 / Esc / 点正文空白 / 点别处高亮 / 全沉浸）。
+		if (this.commentOpen) debugLog.info("[comment] hide() 在编辑评论期间收起工具条 ←", new Error("fold"));
 		this.snapshot = null;
 		this.lastAnchorRect = null;
 		this.lastBounds = null;
@@ -244,5 +274,14 @@ export class SelectionToolbar {
 
 	get visible(): boolean {
 		return this.containerEl.hasClass("is-visible");
+	}
+
+	/** 评论编辑区是否展开（其间用户可能正在打字、软键盘可能正弹着）。
+	 *
+	 *  readerView 的「背景活动」路径（relocate / 书页滚动 / 选区被系统收走）据此让路：
+	 *  收起容器会把正在编辑的输入框一起 blur 掉 —— 移动端表现为软键盘弹起又立刻被压回去
+	 *  （用户报的「划线时键盘闪一下就没法标注了」）。 */
+	get isCommentOpen(): boolean {
+		return this.commentOpen;
 	}
 }

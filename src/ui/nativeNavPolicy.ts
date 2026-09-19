@@ -22,17 +22,29 @@
  *    （挂 `document.body`），**失活视图写它会污染下一个视图**。
  *  · **官方「全屏」(`autoFullScreen`)**：官方自己在 markdown 视图上滚动显隐原生界面
  *    用的开关，与本插件无关 —— 这里**刻意不看它**（历史版本拿它当底栏的门，
- *    结果官方设置与本机平台形态一漂移就只剩半边生效，见 AGENTS.md）。
+ *    结果官方设置与本机平台形态一漂移就只剩半边生效，见 AGENTS.md）。官方那条
+ *    滚动钩子只挂在 markdown 视图上，UNreader 视图收不到；用户开着官方「全屏」时
+ *    在阅读器里看到的原生隐现，要么是本插件接管的结果，要么是官方恢复路径留下的
+ *    **半拍残留**（`is-hidden-nav` 在、而我们目标态是显示）—— 后者由
+ *    `readerView.syncNativeNav` 的「显示态断言」摘掉（见下 `nativeScrollHidden`）。
  */
 
-/** 沉浸态的四条输入事实。每条都**只**由 readerView 现读（唯一来源），
+/** 原生导航接管的输入事实。每条都**只**由 readerView 现读（唯一来源），
  *  守卫与同步不许各自再算一套。 */
 export interface ImmersiveNativeInputs {
-	/** 外观「沉浸模式适配」（`appearance.immersiveAdapt`）——用户的总开关：
-	 *  开 = 连 Obsidian 原生界面一起收；关 = 只收本插件自己的悬浮 UI。 */
-	readonly adapt: boolean;
-	/** 沉浸态：`.unreader-root` 上的 `chrome-hidden`（滚动下滑藏、点按唤出）。 */
+	/** 常态滚动隐藏时，是否允许连 Obsidian 页首/手机底栏一起接管。 */
+	readonly normalModeHideNativeChrome: boolean;
+	/** 全沉浸模式是强制接管，不依赖常态滚动设置。 */
+	readonly fullImmersion: boolean;
+	/** 工具层是否处于隐藏态（常态滚动隐藏/默认隐藏/点按收起）。 */
 	readonly chromeHidden: boolean;
+	/** **滚动方向**驱动的原生界面隐藏态（由 readerView 在滚动时维护）。
+	 *
+	 *  与 `chromeHidden` 解耦是刻意的：「滑动自动隐藏」管的是**插件工具层**，
+	 *  而「接管原生界面」管的是 Obsidian 自己的页首/底栏 —— 后者开着时，
+	 *  滚动本身就足以决定原生界面收放，即使工具层保持常显（用户真机配置
+	 *  「工具栏不动、原生让位」）。两组状态任一为真都算「原生该藏」。 */
+	readonly nativeScrollHidden: boolean;
 	/** 本机是**手机形态**（官方 `body.is-phone`，真机制判据）——官方底栏与
 	 *  系统状态栏只在这种形态下存在；平板（`is-tablet`）与桌面都没有。 */
 	readonly phoneLike: boolean;
@@ -42,7 +54,8 @@ export interface ImmersiveNativeInputs {
 
 /** 页首是否由本插件隐藏。**三端通用**：它是本视图自己的元素，与平台无关。 */
 export function headerHiddenByUs(i: ImmersiveNativeInputs): boolean {
-	return i.adapt === true && i.chromeHidden === true;
+	return i.fullImmersion === true
+		|| (i.normalModeHideNativeChrome === true && (i.chromeHidden === true || i.nativeScrollHidden === true));
 }
 
 /** 底栏（手机端另含系统状态栏）是否该由本插件收起。
@@ -56,7 +69,7 @@ export function headerHiddenByUs(i: ImmersiveNativeInputs): boolean {
  *  「沉浸时把原生界面收走」这一件事（官方两条 CSS 同吃 `is-hidden-nav`，做不到
  *  「只藏底栏不藏页首」）。两者必须同进同退，这正是用户要的
  *  「不打开这个开关都不隐藏，打开了这个开关都隐藏」。
- *  `test:immersive-adapt` 对全部 16 种组合断言这条蕴含关系。 */
+ *  `test:immersive-adapt` 对全部 64 种组合断言这条蕴含关系。 */
 export function bottomBarHiddenByUs(i: ImmersiveNativeInputs): boolean {
 	return headerHiddenByUs(i) && i.phoneLike === true && i.selfActive === true;
 }

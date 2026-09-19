@@ -1,9 +1,9 @@
 {
 	"id": "unreader",
 	"name": "UNreader",
-	"version": "0.2.8",
+	"version": "0.2.9",
 	"minAppVersion": "1.7.2",
-	"description": "A beautiful, fully offline e-book reader. EPUB first, plus MOBI/AZW3 and TXT.",
+	"description": "A beautiful, fully offline e-book reader. EPUB first, plus MOBI/AZW3, TXT and HTML.",
 	"author": "UNcore",
 	"authorUrl": "https://github.com/UNcore-gh",
 	"isDesktopOnly": false

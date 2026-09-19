@@ -86,6 +86,8 @@ export interface AppearanceCallbacks {
 	onPickFontSystem?: () => void
 }
 
+export type AppearanceSection = "normal" | "full"
+
 type SegmentedOption<T extends string | number> = {
 	value: T;
 	label: string;
@@ -115,6 +117,8 @@ export class AppearancePanel {
 	private closeTimeout: number | null = null;
 	private entered = false;
 	private ignoreOutsideUntil = 0;
+	/** 下一次 render 完成后要定位到的分组（仅由工具栏快捷按钮传入）。 */
+	private pendingScrollSection: AppearanceSection | null = null;
 
 	constructor(callbacks: AppearanceCallbacks | ((patch: Partial<AppearanceSettings>) => void)) {
 		if (typeof callbacks === "function") {
@@ -183,38 +187,10 @@ export class AppearancePanel {
 				}, 300) as unknown as number;
 			});
 		}
-		this.current = {
-			fontFamily: null,
-			fontSize: null,
-			lineHeight: null,
-			letterSpacing: 0,
-			paragraphIndent: 2,
-			paragraphSpacing: null,
-			marginLeft: null,
-			marginRight: null,
-			theme: "light",
-			colorMode: "obsidian",
-			backgroundColor: "#ffffff",
-			textColor: "#222222",
-			darkBackgroundColor: "#1e1e1e",
-			darkTextColor: "#d4d4d4",
-			backgroundImage: null,
-			bgImageMode: "shared",
-			backgroundImageLight: null,
-			backgroundImageDark: null,
-			imageBlur: 0,
-			glassEnabled: false,
-			glassBlur: 12,
-			glassOpacity: 0.55,
-			railScale: 1,
-			showTocRail: true,
-			chapterProgress: true,
-			immersiveAdapt: false,
-			autoOpenToc: true,
-		};
+		this.current = { ...DEFAULT_APPEARANCE };
 	}
 
-	open(current: AppearanceSettings): void {
+	open(current: AppearanceSettings, section: AppearanceSection | null = null): void {
 		if (this.closeTimeout) {
 			window.clearTimeout(this.closeTimeout);
 			this.closeTimeout = null;
@@ -223,6 +199,7 @@ export class AppearancePanel {
 		// 刚打开时短窗口内忽略外部 pointerdown（覆盖点击触发按钮时的同一次指针事件链）
 		this.ignoreOutsideUntil = performance.now() + 300;
 		this.current = { ...current };
+		this.pendingScrollSection = section;
 		this.activePresetId = this.getActivePresetId();
 		this.render();
 		this.containerEl.addClass("is-open");
@@ -246,11 +223,11 @@ export class AppearancePanel {
 		this.onOpenChange(false);
 	}
 
-	toggle(current: AppearanceSettings): boolean {
+	toggle(current: AppearanceSettings, section: AppearanceSection | null = null): boolean {
 		if (this.containerEl.hasClass("is-open")) {
 			this.close();
 		} else {
-			this.open(current);
+			this.open(current, section);
 		}
 		return this.containerEl.hasClass("is-open");
 	}
@@ -289,6 +266,7 @@ export class AppearancePanel {
 
 		// 预设：多套样式一键切换
 		scrollEl.appendChild(this.buildPresetRow());
+
 
 		// 阅读模式：仅保留上下滚动
 		// （原「左右翻页」选项已删除：见分页模式清理；栏数 colsRow 同样仅
@@ -517,29 +495,53 @@ export class AppearancePanel {
 			scrollEl.appendChild(hint);
 		}
 
-		// ── 界面组：阅读器自己的悬浮 UI（工具栏、目录轨、进度条、面板） ──
-		// 注：「沉浸模式适配」不在这一组 —— 它只在沉浸模式（下滑藏工具栏）下才有意义，
-		// 单独放到末尾的「沉浸模式」组里，免得和这些「两种模式下都生效」的项混在一起。
-		scrollEl.appendChild(this.buildSectionRow("界面"));
-		scrollEl.appendChild(this.buildToggleRow("浮动目录条", this.current.showTocRail !== false, v => {
+		// 常态模式：工具栏、目录轨、进度条与滚动行为都在这一组里，语义不再混用
+		// “沉浸模式”。移动端/平板与桌面只影响加载时的初始默认，不锁死用户选择。
+		const normalSection = this.buildSectionRow("常态模式", "normal");
+		scrollEl.appendChild(normalSection);
+		scrollEl.appendChild(this.buildToggleRow("显示工具栏", this.current.normalModeShowToolbar !== false, v => {
+			this.current.normalModeShowToolbar = v;
+			this.emit({ normalModeShowToolbar: v });
+		}, () => {
+			this.emit({ normalModeShowToolbar: DEFAULT_APPEARANCE.normalModeShowToolbar });
+			this.current.normalModeShowToolbar = DEFAULT_APPEARANCE.normalModeShowToolbar;
+			this.render();
+		}));
+		scrollEl.appendChild(this.buildToggleRow("滑动自动隐藏", this.current.normalModeScrollHide !== false, v => {
+			this.current.normalModeScrollHide = v;
+			this.emit({ normalModeScrollHide: v });
+		}, () => {
+			this.emit({ normalModeScrollHide: DEFAULT_APPEARANCE.normalModeScrollHide });
+			this.current.normalModeScrollHide = DEFAULT_APPEARANCE.normalModeScrollHide;
+			this.render();
+		}));
+		scrollEl.appendChild(this.buildToggleRow("浮动目录条", this.current.showTocRail === true, v => {
 			this.current.showTocRail = v;
 			this.emit({ showTocRail: v });
+			this.render();
 		}, () => {
 			this.emit({ showTocRail: DEFAULT_APPEARANCE.showTocRail });
 			this.current.showTocRail = DEFAULT_APPEARANCE.showTocRail;
 			this.render();
 		}));
-		// 章节进度：一个开关控制两处呈现——右缘章节轨「当前章短横」内的填充 +
-		// 正文列顶边进度条（后者横向只铺正文列宽、常驻可见）
-		scrollEl.appendChild(this.buildToggleRow("章节进度", this.current.chapterProgress !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow("章节进度条", this.current.chapterProgress !== false, v => {
 			this.current.chapterProgress = v;
 			this.emit({ chapterProgress: v });
+			this.render();
 		}, () => {
 			this.emit({ chapterProgress: DEFAULT_APPEARANCE.chapterProgress });
 			this.current.chapterProgress = DEFAULT_APPEARANCE.chapterProgress;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("自动打开目录面板", this.current.autoOpenToc !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow("接管原生界面", this.current.normalModeHideNativeChrome === true, v => {
+			this.current.normalModeHideNativeChrome = v;
+			this.emit({ normalModeHideNativeChrome: v });
+		}, () => {
+			this.emit({ normalModeHideNativeChrome: DEFAULT_APPEARANCE.normalModeHideNativeChrome });
+			this.current.normalModeHideNativeChrome = DEFAULT_APPEARANCE.normalModeHideNativeChrome;
+			this.render();
+		}));
+		scrollEl.appendChild(this.buildToggleRow("自动打开目录面板", this.current.autoOpenToc === true, v => {
 			this.current.autoOpenToc = v;
 			this.emit({ autoOpenToc: v });
 		}, () => {
@@ -547,7 +549,6 @@ export class AppearancePanel {
 			this.current.autoOpenToc = DEFAULT_APPEARANCE.autoOpenToc;
 			this.render();
 		}));
-		// 浮动按钮框/目录条大小（同时作用于左缘功能按钮排与右缘章节短横轨）
 		scrollEl.appendChild(
 			this.buildSlider("按钮/目录条大小", 0.8, 1.6, 0.05, this.current.railScale ?? 1, v => this.emit({ railScale: v }), x => `${Math.round(x * 100)}%`, () => {
 				this.emit({ railScale: DEFAULT_APPEARANCE.railScale });
@@ -555,28 +556,47 @@ export class AppearancePanel {
 				this.render();
 			}),
 		);
+		{
+			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
+			hint.setText("点击正文空白始终可临时唤出工具栏；「滑动自动隐藏」只管插件工具层，「接管原生界面」让 Obsidian 的页首/底栏随滚动与工具层显隐一起收放（关掉后完全不碰原生界面）。浮动目录与章节进度按各自开关显示，不受工具栏显隐影响。");
+		}
 
-		// ── 沉浸模式组 ──
-		// 这一组里的设置**只在沉浸态（下滑藏工具栏、或点了沉浸模式按钮）才有意义**。
-		// 之所以单独成组：混在「界面」组里时，用户会以为它和「浮动目录条」是一类，
-		// 打开后去普通阅读状态下找效果 —— 找不到（它本来就只在沉浸态起作用）。
-		scrollEl.appendChild(this.buildSectionRow("沉浸模式"));
-		// 「沉浸模式适配」= 沉浸时要不要连 **Obsidian 原生界面**一起收走，一个开关管两件事
-		// （页首 + 手机端底栏/系统状态栏）：官方那两条 CSS 同吃一个 `is-hidden-nav`，
-		// 做不到「只藏页首不藏底栏」——拆成两个开关必然出现「一个开了另一个没开」的
-		// 半吊子形态（用户报障的原始形态：页首藏了、底下元素还在）。
-		// 判据与不变量见 ui/nativeNavPolicy.ts。
-		scrollEl.appendChild(this.buildToggleRow("沉浸模式适配", this.current.immersiveAdapt === true, v => {
-			this.current.immersiveAdapt = v;
-			this.emit({ immersiveAdapt: v });
+		// 全沉浸：默认只留退出按钮，这里的两个开关只控制明确例外。
+		const fullSection = this.buildSectionRow("全沉浸模式", "full");
+		scrollEl.appendChild(fullSection);
+		const fullTocRow = this.buildToggleRow("显示浮动目录", this.current.fullImmersionShowTocRail === true, v => {
+			this.current.fullImmersionShowTocRail = v;
+			this.emit({ fullImmersionShowTocRail: v });
 		}, () => {
-			this.emit({ immersiveAdapt: DEFAULT_APPEARANCE.immersiveAdapt });
-			this.current.immersiveAdapt = DEFAULT_APPEARANCE.immersiveAdapt;
+			this.emit({ fullImmersionShowTocRail: DEFAULT_APPEARANCE.fullImmersionShowTocRail });
+			this.current.fullImmersionShowTocRail = DEFAULT_APPEARANCE.fullImmersionShowTocRail;
+			this.render();
+		});
+		if (this.current.showTocRail !== true) fullTocRow.setAttr("data-disabled", "true");
+		(fullTocRow.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.toggleAttribute("disabled", this.current.showTocRail !== true);
+		scrollEl.appendChild(fullTocRow);
+		const fullProgressRow = this.buildToggleRow("显示章节进度条", this.current.fullImmersionShowChapterProgress === true, v => {
+			this.current.fullImmersionShowChapterProgress = v;
+			this.emit({ fullImmersionShowChapterProgress: v });
+		}, () => {
+			this.emit({ fullImmersionShowChapterProgress: DEFAULT_APPEARANCE.fullImmersionShowChapterProgress });
+			this.current.fullImmersionShowChapterProgress = DEFAULT_APPEARANCE.fullImmersionShowChapterProgress;
+			this.render();
+		});
+		if (this.current.chapterProgress !== true) fullProgressRow.setAttr("data-disabled", "true");
+		(fullProgressRow.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.toggleAttribute("disabled", this.current.chapterProgress !== true);
+		scrollEl.appendChild(fullProgressRow);
+		scrollEl.appendChild(this.buildToggleRow("点击屏幕显示界面", this.current.fullImmersionTapReveal === true, v => {
+			this.current.fullImmersionTapReveal = v;
+			this.emit({ fullImmersionTapReveal: v });
+		}, () => {
+			this.emit({ fullImmersionTapReveal: DEFAULT_APPEARANCE.fullImmersionTapReveal });
+			this.current.fullImmersionTapReveal = DEFAULT_APPEARANCE.fullImmersionTapReveal;
 			this.render();
 		}));
 		{
 			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
-			hint.setText("仅在沉浸模式（滚动下滑藏起工具栏）下生效：开启后连 Obsidian 的页首一起收起，手机上底栏与系统状态栏也一并收走，那一段全归正文；关闭则只收本插件自己的工具栏，Obsidian 的界面保持原样。");
+			hint.setText("全沉浸默认隐藏所有界面，仅保留左上角半透明退出图标；开启“点击屏幕显示界面”后，点击正文可临时唤出常态工具层与原生界面。目录与进度只有在上方全局开关开启时才可作为例外保留。");
 		}
 
 		const footer = this.containerEl.createDiv({ cls: "unreader-appearance-footer" });
@@ -587,7 +607,14 @@ export class AppearancePanel {
 			this.onChange(patch);
 			this.render();
 		});
-		if (prevScroll > 0) {
+		const scrollTarget = this.pendingScrollSection;
+		this.pendingScrollSection = null;
+		if (scrollTarget) {
+			requestAnimationFrame(() => {
+				const section = this.containerEl.querySelector<HTMLElement>(`[data-appearance-section="${scrollTarget}"]`);
+				section?.scrollIntoView({ block: "start" });
+			});
+		} else if (prevScroll > 0) {
 			const sc = this.containerEl.querySelector(".unreader-appearance-scroll");
 			if (sc) sc.scrollTop = prevScroll;
 		}
@@ -665,7 +692,7 @@ export class AppearancePanel {
 				: currentId;
 			const opt = document.createElement("option");
 			opt.value = currentId;
-			opt.text = `字体已丢失：${base.replace(/\.[^.]+$/, "")}`;
+			opt.text = `字体已停用或丢失：${base.replace(/\.[^.]+$/, "")}`;
 			select.appendChild(opt);
 		}
 		select.value = currentId ?? "";
@@ -886,11 +913,12 @@ export class AppearancePanel {
 
 	/** 分区标题行（外观面板的分组）。与此前的「读一屏不分组」相比，它要回答的是
 	 *  「这一堆里哪些是同类、哪些只在某种状态下才看得出来」——见各行/各组的注释。 */
-	private buildSectionRow(title: string): HTMLElement {
+	private buildSectionRow(title: string, section?: AppearanceSection): HTMLElement {
 		const el = document.createElement("div");
 		// 复用面板里**已有**的分区标题类（「界面颜色」「背景图片」用的就是它）——
 		// 自造一个类会让同一面板出现两种分区观感。
 		el.className = "unreader-appearance-color-header";
+		if (section) el.setAttr("data-appearance-section", section);
 		el.setText(title);
 		return el;
 	}

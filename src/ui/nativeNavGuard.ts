@@ -82,7 +82,7 @@ export const PLUGIN_NAV_HIDDEN_CLASS = "unreader-nav-hidden";
 
 export interface NativeNavGuardOptions {
 	/** 当前是否要求隐藏底栏。由读者视图算好**全部**判据
-	 *  （外观「沉浸模式适配」∧ 沉浸态 chrome-hidden ∧ 手机形态 ∧ 自活，
+	 *  （「接管原生界面」∧（工具层 chrome-hidden 或滚动方向态 nativeScrollHidden）∧ 手机形态 ∧ 自活，
 	 *  见 readerView.nativeNavWanted() / ui/nativeNavPolicy.ts），
 	 *  守卫不重复实现任何一条。 */
 	readonly wantsHidden: () => boolean;

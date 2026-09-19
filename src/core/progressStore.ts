@@ -34,7 +34,7 @@ function pickAnchor(parsed: Partial<ProgressFile>): string {
 
 /**
  * 阅读进度持久化（多端同步）：
- * 进度按书写入库内小 JSON 文件（UNreader/Progress/<书名>-<hash>.json），
+ * 进度按书写入库内小 JSON 文件（UNreader/Data/Progress/<书名>-<hash>.json），
  * 随 Obsidian Sync / iCloud 自然同步到各端；每书一个文件，冲突粒度小，
  * 同书冲突副本按 updatedAt 取最新，避免 data.json 整体覆盖丢进度。
  *
@@ -168,6 +168,77 @@ export class ProgressStore {
 		const hot = this.hotRead(bookPath)
 		if (hot) this.mergeIn(bookPath, hot)
 		return hot ?? undefined
+	}
+
+	/** 书籍路径变化时迁移进度身份键（资料库文件夹迁移使用）。
+	 *  先写新键、再删旧键；任一步失败都保留旧记录。 */
+	async move(oldPath: string, newPath: string): Promise<boolean> {
+		if (!oldPath || !newPath || oldPath === newPath) return false
+		this.clearWriteTimer(oldPath)
+
+		const oldFile = `${this.folder}/${ProgressStore.fileNameFor(oldPath)}`
+		let diskPosition: BookPosition | null = null
+		let oldReadable = true
+		try {
+			const raw = await this.vault.adapter.read(oldFile)
+			const parsed = JSON.parse(raw) as Partial<ProgressFile>
+			const anchor = pickAnchor(parsed)
+			if (anchor) {
+				diskPosition = {
+					anchor,
+					fraction: typeof parsed.fraction === "number" ? parsed.fraction : 0,
+					updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
+				}
+			}
+		} catch {
+			// 文件不存在是正常的；存在但读失败时仍可迁移缓存值，只是暂不删旧文件。
+			try { oldReadable = !(await this.vault.adapter.exists(oldFile)) } catch { oldReadable = false }
+		}
+
+		const cached = this.cache.get(oldPath) ?? this.hotRead(oldPath) ?? undefined
+		const position = !diskPosition
+			? cached
+			: !cached || diskPosition.updatedAt >= cached.updatedAt
+				? diskPosition
+				: cached
+		if (!position) return false
+
+		const newFile = `${this.folder}/${ProgressStore.fileNameFor(newPath)}`
+		let current = position
+		try {
+			const raw = await this.vault.adapter.read(newFile)
+			const parsed = JSON.parse(raw) as Partial<ProgressFile>
+			const anchor = pickAnchor(parsed)
+			if (anchor && (typeof parsed.updatedAt !== "number" || parsed.updatedAt > current.updatedAt)) {
+				current = {
+					anchor,
+					fraction: typeof parsed.fraction === "number" ? parsed.fraction : 0,
+					updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
+				}
+			}
+		} catch {
+			let exists = false
+			try { exists = await this.vault.adapter.exists(newFile) } catch { /* 判定不了按存在处理 */ exists = true }
+			if (exists) throw new Error(`新路径已有进度文件但暂时读不出来：${newFile}`)
+		}
+
+		await this.ensureFolder()
+		const payload: ProgressFile = {
+			book: newPath,
+			anchor: current.anchor,
+			fraction: current.fraction,
+			updatedAt: current.updatedAt,
+		}
+		await this.vault.adapter.write(newFile, JSON.stringify(payload, null, "\t"))
+
+		if (oldReadable && oldFile !== newFile) {
+			try { await this.vault.adapter.remove(oldFile) } catch { /* 旧文件清理失败不影响新键 */ }
+		}
+		this.cache.delete(oldPath)
+		this.mergeIn(newPath, current)
+		this.hotWrite(newPath, current)
+		try { localStorage.removeItem(this.hotKey(oldPath)) } catch { /* ignore */ }
+		return true
 	}
 
 	/* ---------------- 本机热缓存（localStorage） ---------------- */

@@ -1,19 +1,30 @@
-import { Plugin, TFile, Notice, FuzzySuggestModal, WorkspaceLeaf, Platform } from "obsidian";
-import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance } from "./types";
+import { Plugin, TFile, Notice, FuzzySuggestModal, WorkspaceLeaf, Platform, normalizePath } from "obsidian";
+import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance, platformAppearanceDefaults } from "./types";
 import { UNreaderSettingTab } from "./settings";
 import { getBookFiles } from "./core/bookService";
+import { clearBookPreviewCache } from "./core/bookPreview";
 import { ProgressStore } from "./core/progressStore";
 import { PresetStore } from "./core/presetStore";
 import { scanCustomFonts, fontToBlobUrl } from "./core/fontService";
-import { UNREADER_ROOT, BOOKS_FOLDER, FONTS_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER } from "./core/paths";
+import { repairDanglingFontRefs } from "./core/fontRefRepair";
+import { ResourceStore, setActiveResourceStore, type SharedResourceKind } from "./core/resourceStore";
+import { UNREADER_ROOT, DATA_FOLDER, DATA_DIR_NAME, FONTS_FOLDER, RESOURCES_FOLDER, IMAGES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER, FEEDS_FOLDER, setConfiguredDataFolder, dataRootOf, normalizeDataFolder } from "./core/paths";
 import { healLibraryFolders } from "./core/libraryFolders";
+import { planDataFolderMigration, planLegacyDataFolderNesting, planDataContainerNesting, migrateDataFolder, rewriteFontReferences, type LibraryMigrationPlan } from "./core/libraryMigration";
 import { syncVaultExclusions, clearVaultExclusions } from "./core/exclusions";
 import * as debugLog from "./core/debugLog";
 import { saveDebugReportToVault, writeReport } from "./core/debugReport";
 import { setCustomFonts, clearCustomFonts } from "./core/engineAdapter";
+import { idleYield } from "./core/idle";
 import { VIEW_TYPE_UNREADER, UNreaderView, ReaderSelectionInfo } from "./ui/readerView";
+import { ResourceManagerModal, type ManagedResource } from "./ui/resourceManagerModal";
 import { collectNeighborFacts } from "./ui/explorerDiag";
 import { ExplorerHeal } from "./ui/explorerHeal";
+import { AddFeedModal, DeleteFeedModal, ImportOpmlModal, RenameFeedModal } from "./ui/feedModals";
+import type { DiscoveredFeed } from "./core/feedParser";
+import { FeedStore } from "./core/feedStore";
+import { FeedService } from "./core/feedService";
+import { FeedMediaStore } from "./core/feedMediaStore";
 
 /** 等「首屏绘制之后的第一个空闲期」。
  *
@@ -56,12 +67,44 @@ function yieldToFirstIdle(): Promise<void> {
 	});
 }
 
+/** 启动期字体预热的「先让过多久」与「最迟多久」（毫秒）。
+ *
+ *  一段固定让路 + 一段「等到真空闲为止」的探测：固定值用来跨过首屏绘制与
+ *  workspace 恢复那个必然繁忙的窗口（几百 ms 起步，移动端更久），探测用来在
+ *  机器真的空下来之后立刻开跑，而不是把代价一路拖到用户第一次点东西。
+ *  上限 4s：预热只是「提前备好」，任何消费点都会自己 await 一次扫描（单飞行去重），
+ *  拖太久就失去了「开书零等待」的意义，宁可让它在一个较早的繁忙片里跑完。 */
+const FONT_PREWARM_DELAY_MS = 1200;
+const FONT_PREWARM_MAX_DELAY_MS = 4000;
+/** 建 blob 之前值得让出一帧的批量大小。几枚 CJK 字库（>4MB）的 `readBinary` +
+ *  `new Blob` + `createObjectURL` 在移动端是肉眼可见的一次卡顿；小字体（几百 KB）
+ *  连 1ms 都不到，为它插一片空闲让路反而把开书路径拖长。 */
+const FONT_BLOB_YIELD_BYTES = 4 * 1024 * 1024;
+
+/** `applyDataFolder` 的结果。失败时 `ok=false` 且 `error` 已经是可读中文，调用方只负责提示。 */
+export interface DataFolderSwitchResult {
+	ok: boolean;
+	error?: string;
+	/** 真正搬动的文件数 */
+	moved: number;
+	/** 迁移后变空、被删掉的旧目录数 */
+	removedEmpty: number;
+	/** 被改写的字体引用数（字段 + 库内文件） */
+	rewrote: number;
+}
+
 export default class UNreaderPlugin extends Plugin {
 	settings!: UNreaderSettings;
-	/** 阅读进度库：每书一个小 JSON 文件（UNreader/Progress/），随库同步到各端 */
+	/** 阅读进度库：每书一个小 JSON 文件（UNreader/Data/Progress/），随库同步到各端 */
 	progress!: ProgressStore;
-	/** 外观预设库：每个预设一个文件夹（UNreader/Presets/<名>/），随库同步到各端 */
+	/** 外观预设库：每个预设一个文件夹（UNreader/Data/Presets/<名>/），随库同步到各端 */
 	presetStore!: PresetStore;
+	/** 共享资源库：字体与图片只存一份，预设/设备保存引用 */
+	resourceStore!: ResourceStore;
+	/** RSS/Atom/JSON Feed 订阅与文章快照。网络请求只由显式刷新或打开文章触发。 */
+	feedStore!: FeedStore;
+	feedService!: FeedService;
+	feedMediaStore!: FeedMediaStore;
 	/** 目录找回（core/libraryFolders）的结果。**必须被 `ensureLibraryFolders` await**：
 	 *  它是「不存在就建空目录」的那一半，会与找回抢着创建 `UNreader/`，一旦空壳先落盘，
 	 *  候选里的 `Fonts` 就会因为「目标已有同名子目录」被跳过而永久留在原地。 */
@@ -76,6 +119,10 @@ export default class UNreaderPlugin extends Plugin {
 	private fontBlobbedIds = new Set<string>();
 	/** 进行中的字体刷新（单飞行去重，见 refreshCustomFonts） */
 	private fontRefreshInFlight: Promise<CustomFont[]> | null = null;
+	/** 已经卸载（禁用/重载）。延后的启动预热必须靠它及时刹车 —— 否则它会在
+	 *  `onunload` 的 `clearCustomFonts()` **之后**建出 blob URL，既漏内存，
+	 *  又把刚清空的字体注册表重新灌满。 */
+	private unloaded = false;
 	// 最近一次存活的阅读视图：阅读器为 iframe 架构，焦点进入书页后
 	// Obsidian 的 getActiveViewOfType 可能解析不到活动视图（表现为命令面板
 	// 首次回车不执行、点过书页后又失效），用自跟踪视图做兜底
@@ -196,6 +243,14 @@ export default class UNreaderPlugin extends Plugin {
 		// 外观预设库：从库内预设文件夹加载
 		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER);
 
+		// 共享资源库：字体沿用 Fonts/，图片统一落 Resources/Images/；
+		// 资源文件与启用索引随库同步，设备外观和当前预设仍只存在本机。
+		this.resourceStore = new ResourceStore(this.app.vault);
+		setActiveResourceStore(this.resourceStore);
+		this.feedStore = new FeedStore(this.app.vault);
+		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
+		this.feedMediaStore = new FeedMediaStore(() => this.settings.feeds);
+
 		// ⚠️ 这里**绝不能再 await**（2026-09-11 性能回归点）。
 		// 进度库 + 预设库合计 20+ 次文件读取（实测本机：14 个进度文件 + 5 个预设），
 		// 全部串行时插件启用耗时 ≈ 次数 × 单次读延迟。冷启动测量台实测（.perf/runner.cjs）：
@@ -205,11 +260,11 @@ export default class UNreaderPlugin extends Plugin {
 		// 改为「同步发起 + 暴露 dataReady」后，插件启用不再等磁盘，消费点
 		// （readerView 开书取进度、外观面板列预设、预设重扫）各自 await whenDataReady()。
 		//
-		// 链首多了两步前置（目录找回 + 排除项同步），它们**不改变上面那条性能结论**：
+		// 链首多了几步前置（旧布局/容器整理 + 目录找回 + 排除项同步），它们**不改变上面那条性能结论**：
 		// 「不 await」约束的是 **onload 路径**，而链内 await 只推迟 dataReady 的兑现，
 		// 不推迟插件启用。两步的顺序有硬约束：
-		//   ① `healLibraryFolders` 必须排在两份存储读盘**之前** —— 目录若被改名搬走过，
-		//      下面两个 init 会按空目录读完，搬回来也白搭（本会话缓存仍是空的）。
+		//   ① 目录整理与 `healLibraryFolders` 必须排在两份存储读盘**之前** —— 目录若被
+		//      改名搬走过，下面两个 init 会按空目录读完，搬回来也白搭（本会话缓存仍是空的）。
 		//   ② 先等布局就绪再动目录/配置 —— 启动瞬间的库事件会把移动端官方文件列表的条目
 		//      永久打成 `hidden`（理由见下方 onLayoutReady 那段与 explorerHeal.ts）。
 		// 健康情况下 ① 是**纯读**、② 是幂等空写，两者都不产生库事件。
@@ -229,6 +284,64 @@ export default class UNreaderPlugin extends Plugin {
 			// 把书首写回进度文件（= 永久性丢进度）。这两步失败（rename 被拒、用户
 			// 的 .obsidian 配置只读）远不该有这种后果。
 			let msHeal = -1;
+			let msLegacy = -1;
+			try {
+				const t = Date.now();
+				const legacyPlan = planLegacyDataFolderNesting(this.app, this.settings.dataFolder);
+				if (legacyPlan.collisions.length) {
+					debugLog.warn("[dataFolder] 旧版散放数据迁移被重名文件阻止", legacyPlan.collisions);
+					new Notice(`UNreader：检测到旧版数据散放在「${legacyPlan.from}」中，但目标已有同名文件（如「${legacyPlan.collisions[0]}」），已停止自动整理。请先处理重名文件。`);
+				} else if (legacyPlan.from) {
+					// 即使 moves 为空也调用：上一轮可能已删完文件，只剩空目录骨架。
+					const result = await migrateDataFolder(this.app, legacyPlan);
+					if (result.error) {
+						debugLog.warn("[dataFolder] 旧版散放数据迁移失败", result.error, result.rollbackFailures);
+						new Notice(`UNreader：旧版数据自动整理失败：${result.error}`);
+					} else if (result.moved.length || result.removedEmpty.length) {
+						debugLog.info(`[dataFolder] 旧版数据整理完成：移动 ${result.moved.length} 个文件，清理 ${result.removedEmpty.length} 个空目录 → ${legacyPlan.to}`);
+					}
+				}
+				msLegacy = Date.now() - t;
+			} catch (e) {
+				console.warn("[UNreader] 旧版数据文件夹整理失败（继续读存储）", e);
+			}
+			// ③ 容器化整理（2026-09-19）：旧版把六个数据目录平铺在数据根下
+			//    （`UNreader/Progress/…`），现在统一收进 `Data/`。必须排在 heal 之前：
+			//    heal 的内容证据要按收敛后的布局落位，刚搬回来的目录才不会再散一次。
+			//    失败不阻断后续（数据仍在原地，只是布局没收敛，下次启动再试）。
+			let msNest = -1;
+			try {
+				const t = Date.now();
+				const containerPlan = planDataContainerNesting(this.app);
+				if (containerPlan.moves.length || containerPlan.skippedDirs?.length) {
+					const result = await migrateDataFolder(this.app, containerPlan);
+					if (result.error) {
+						debugLog.warn("[dataFolder] 数据容器化整理失败", result.error, result.rollbackFailures);
+						new Notice(`UNreader：数据目录整理失败：${result.error}`);
+					} else {
+						// 平铺 `Fonts/` 收进 `Data/Fonts/` 会让 `custom:<库内路径>` 全部悬空
+						// （字体 id 含完整路径），这里按目录前缀精确改写；`Fonts` 因重名被
+						// 跳过时文件没动，引用仍是对的，不能改。
+						if (result.moved.length && !containerPlan.skippedDirs?.includes("Fonts")) {
+							const rewrote = await rewriteFontReferences(this.app, this.settings, [`${UNREADER_ROOT}/Fonts`], FONTS_FOLDER);
+							if (rewrote) {
+								// 外观快照在本机 localStorage（不随 data.json 同步），两份都写
+								this.saveDeviceAppearance();
+								this.scheduleSave();
+							}
+						}
+						if (result.moved.length || result.removedEmpty.length) {
+							debugLog.info(`[dataFolder] 数据容器化完成：移动 ${result.moved.length} 个文件，清理 ${result.removedEmpty.length} 个空目录 → ${containerPlan.to}`);
+						}
+						if (containerPlan.skippedDirs?.length) {
+							new Notice(`UNreader：有 ${containerPlan.skippedDirs.length} 个数据目录因目标已有同名文件未整理（${containerPlan.skippedDirs.join("、")}），已保留原样。`);
+						}
+					}
+				}
+				msNest = Date.now() - t;
+			} catch (e) {
+				console.warn("[UNreader] 数据目录容器化整理失败（继续读存储）", e);
+			}
 			try {
 				const t = Date.now();
 				this.libraryHeal = healLibraryFolders(this.app);
@@ -240,7 +353,7 @@ export default class UNreaderPlugin extends Plugin {
 			let msExcl = -1;
 			try {
 				const t = Date.now();
-				await syncVaultExclusions(this.app, { includeNotes: this.settings.excludeNotesFromSearch !== false });
+				await syncVaultExclusions(this.app, { excludeNotes: this.settings.excludeNotesFromSearch !== false });
 				msExcl = Date.now() - t;
 			} catch (e) {
 				console.warn("[UNreader] 排除项同步失败", e);
@@ -265,6 +378,9 @@ export default class UNreaderPlugin extends Plugin {
 			const msIdle = Date.now() - tIdle;
 			const tRead = Date.now();
 			await Promise.all([
+				this.resourceStore.init().catch(e => {
+					console.warn("[UNreader] 共享资源库初始化失败", e);
+				}),
 				this.progress.init(this.settings.positions).then(n => {
 					// **迁移完就清空旧字段**（2026-09-13）：留着它，他端只要把旧 values 的
 					// updatedAt 推得更新，**每次插件加载都会把这批进度文件重写一遍** ——
@@ -281,13 +397,19 @@ export default class UNreaderPlugin extends Plugin {
 				this.presetStore.init(this.settings.appearancePresets).catch(e => {
 					console.warn("[UNreader] 预设库初始化失败", e);
 				}),
+				this.feedStore.init().catch(e => {
+					console.warn("[UNreader] 订阅库初始化失败", e);
+				}),
 			]);
+			await this.migrateLegacyImageResources().catch(e => {
+				console.warn("[UNreader] 迁移共享图片资源失败", e);
+			});
 			// 一条汇总，直接回答「那 12s 到底花在哪一段」：
 			// `layout` = 等 Obsidian 布局就绪（本插件控制不了，时序约束见 explorerHeal.ts）；
 			// `heal` / `excl` / `idle` / `read` = 本插件的四段。哪段大，锅就在哪。
 			// -1 表示该段抛异常被 catch 了（消息里另有一条 warn）。
 			debugLog.info(
-				`[startup] layout=${msLayout}ms heal=${msHeal}ms excl=${msExcl}ms idle=${msIdle}ms read=${Date.now() - tRead}ms`,
+				`[startup] layout=${msLayout}ms legacy=${msLegacy}ms nest=${msNest}ms heal=${msHeal}ms excl=${msExcl}ms idle=${msIdle}ms read=${Date.now() - tRead}ms`,
 			);
 		})().catch(e => {
 			console.warn("[UNreader] 数据就绪链失败", e);
@@ -297,7 +419,6 @@ export default class UNreaderPlugin extends Plugin {
 		// 同步是异步的：预设文件在插件启动后才到达 → 监听 vault 事件重扫，保证他端
 		// 新增/修改/删除的预设即时出现在面板里（去抖，本机未落盘写回不会被覆盖）
 		{
-			const presetDir = PRESETS_FOLDER;
 			let rescanTimer: number | null = null;
 			const scheduleRescan = (): void => {
 				if (rescanTimer) window.clearTimeout(rescanTimer);
@@ -308,8 +429,10 @@ export default class UNreaderPlugin extends Plugin {
 					void this.dataReady.then(() => this.presetStore.reload()).catch(() => {});
 				}, 800);
 			};
+			// 每次调用读**活绑定**（paths.ts）：切数据落点后的事件必须跟着新目录走，
+			// 不能在 onload 时就捕获成常量（那样切根后预设变化永远不再重扫）。
 			const underPresets = (path: string): boolean =>
-				path === presetDir || path.startsWith(`${presetDir}/`);
+				path === PRESETS_FOLDER || path.startsWith(`${PRESETS_FOLDER}/`);
 			this.registerEvent(this.app.vault.on("create", f => { if (underPresets(f.path)) scheduleRescan(); }));
 			this.registerEvent(this.app.vault.on("modify", f => { if (underPresets(f.path)) scheduleRescan(); }));
 			this.registerEvent(this.app.vault.on("delete", f => { if (underPresets(f.path)) scheduleRescan(); }));
@@ -318,14 +441,41 @@ export default class UNreaderPlugin extends Plugin {
 			}));
 		}
 
-		// 启动时扫描自定义字体（字体文件随库同步到各端，每端独立内联为 data URI）。
+		// 启动时扫描自定义字体（字体文件随库同步到各端，每端按需建 blob URL）。
+		// 共享资源随库同步：他端新增/替换/删除图片或字体后，本端自动重扫。
+		{
+			let resourceRescanTimer: number | null = null;
+			const scheduleResourceRescan = (): void => {
+				if (resourceRescanTimer) window.clearTimeout(resourceRescanTimer);
+				resourceRescanTimer = window.setTimeout(() => {
+					resourceRescanTimer = null;
+					void this.dataReady.then(async () => {
+						await this.resourceStore.reload();
+						await this.refreshCustomFonts();
+						this.getActiveReader()?.refreshAppearance();
+					}).catch(() => {});
+				}, 800);
+			};
+			const underResources = (path: string): boolean =>
+				path === FONTS_FOLDER || path.startsWith(`${FONTS_FOLDER}/`)
+				|| path === RESOURCES_FOLDER || path.startsWith(`${RESOURCES_FOLDER}/`);
+			this.registerEvent(this.app.vault.on("create", f => { if (underResources(f.path)) scheduleResourceRescan(); }));
+			this.registerEvent(this.app.vault.on("modify", f => { if (underResources(f.path)) scheduleResourceRescan(); }));
+			this.registerEvent(this.app.vault.on("delete", f => { if (underResources(f.path)) scheduleResourceRescan(); }));
+			this.registerEvent(this.app.vault.on("rename", (f, oldPath) => {
+				if (underResources(f.path) || underResources(oldPath)) scheduleResourceRescan();
+			}));
+		}
+
 		// **排在 `onLayoutReady` 之后**：本方法开头会 `ensureLibraryFolders()`（vault.createFolder
 		// = 库事件），而移动端启动瞬间正是官方文件列表虚拟化测量最敏感的窗口 ——
 		// 库事件会把 FileExplorerView 推进一次 `compute()`，若此时左抽屉还是
 		// `display:none`（它创建时就是隐藏的），当趟测到的条目会被官方永久打上
 		// `hidden`（详见 `src/ui/explorerHeal.ts` 的逐行取证）。挪到布局就绪后开跑。
+		// 2026-09-19 起再往后挪一档：**等主线程真正闲下来**才读盘建 blob，理由见
+		// `prewarmCustomFonts` 的注释。
 		this.app.workspace.onLayoutReady(() => {
-			void this.refreshCustomFonts().catch(e => console.warn("[UNreader] refresh custom fonts failed", e));
+			void this.prewarmCustomFonts().catch(e => console.warn("[UNreader] refresh custom fonts failed", e));
 		});
 
 		// 移动端文件列表自愈：官方移动端文件列表住在左抽屉里，而抽屉收起时
@@ -352,7 +502,7 @@ export default class UNreaderPlugin extends Plugin {
 		// "Attempting to register an existing file extension" 导致插件加载失败，
 		// 逐项 try 可跳过被占用项、不影响其余扩展名（历史上 `pdf` 被 Obsidian 核心
 		// 内置 PDF 查看器占用；现 PDF 已移除，保留该逐项机制作通用保护）。
-		for (const ext of ["epub", "mobi", "azw3", "txt"]) {
+		for (const ext of ["epub", "mobi", "azw3", "txt", "html", "htm"]) {
 			try {
 				this.registerExtensions([ext], VIEW_TYPE_UNREADER);
 			} catch (e) {
@@ -403,6 +553,31 @@ export default class UNreaderPlugin extends Plugin {
 			callback: () => withReader(view => view.toggleAnnotations()),
 		});
 		this.addCommand({
+			id: "toggle-bookshelf",
+			name: "切换书籍侧边栏",
+			callback: () => withReader(view => view.toggleBookshelf()),
+		});
+		this.addCommand({
+			id: "toggle-feeds",
+			name: "切换订阅侧边栏",
+			callback: () => withReader(view => view.toggleFeeds()),
+		});
+		this.addCommand({
+			id: "refresh-feeds",
+			name: "刷新全部订阅",
+			callback: () => { void this.refreshAllFeeds(); },
+		});
+		this.addCommand({
+			id: "add-feed",
+			name: "添加订阅",
+			callback: () => this.promptAddFeed(),
+		});
+		this.addCommand({
+			id: "open-next-unread-feed",
+			name: "打开下一篇未读文章",
+			callback: () => { void this.openNextUnreadFeed(); },
+		});
+		this.addCommand({
 			id: "toggle-toc",
 			name: "显示/隐藏浮动目录",
 			callback: () => withReader(view => view.toggleTocPanel()),
@@ -416,6 +591,11 @@ export default class UNreaderPlugin extends Plugin {
 			id: "toggle-appearance",
 			name: "阅读外观",
 			callback: () => withReader(view => view.toggleAppearance()),
+		});
+		this.addCommand({
+			id: "toggle-full-immersion",
+			name: "切换全沉浸模式",
+			callback: () => withReader(view => view.toggleFullImmersion()),
 		});
 		// 诊断：把缓冲里的日志一键导出到库根（等价于 设置 → 诊断 → 保存到库，
 		// 但不必进设置页翻找——排查闭环里这一步会被反复做）。
@@ -480,6 +660,7 @@ export default class UNreaderPlugin extends Plugin {
 	}
 
 	onunload(): void {
+		this.unloaded = true;
 		this.flushSave();
 		// 退出/禁用/重载插件时先把阅读视图的当前位置交出来：视图层的去抖（800ms）
 		// 可能还没把这一拍的位置递给进度库，而下面那行只 flush「已经进库的」
@@ -488,8 +669,15 @@ export default class UNreaderPlugin extends Plugin {
 		// 待写盘的进度立即落库（卸载后没有机会再写）
 		void this.progress?.flush();
 		void this.presetStore?.flush();
+		void this.feedStore?.flush();
+		try { this.feedService?.close(); } catch { /* ignore */ }
+		try { this.feedMediaStore?.releaseSessionUrls(); } catch { /* ignore */ }
 		// 插件卸载时释放自定义字体 blob URL
 		try { clearCustomFonts() } catch { /* ignore */ }
+		// 释放书架卡片缓存的封面 blob URL
+		try { clearBookPreviewCache() } catch { /* ignore */ }
+		// 释放共享图片 blob URL 并解除引擎解析器
+		try { this.resourceStore?.dispose(); setActiveResourceStore(null); } catch { /* ignore */ }
 		// 兜底：两个底栏隐藏类都是 app 级（官方 is-hidden-nav 同时隐藏 view-header
 		// 与 mobile-navbar；unreader-nav-hidden 是本插件的视觉闸门）。禁用/重载插件时
 		// 若残留，别的视图会一进去就是沉浸态。
@@ -533,10 +721,10 @@ export default class UNreaderPlugin extends Plugin {
 		return getBookFiles(this);
 	}
 
-	/** 确保插件目录（UNreader/、Books/、Fonts/）存在。
-	 *  路径是常量（见 core/paths.ts）——曾经的「资料库文件夹」设置项已撤下，
-	 *  这三个目录不再由用户配置决定。Books/ 只作为「建议落点」存在（书放哪里都能读，
-	 *  见 bookService.getBookFiles），空态提示里会提它一句。
+	/** 确保当前数据根下的插件目录存在（根 + `Data/` 容器 + 数据子目录）。
+	 *  路径读的是 `core/paths.ts` 的**活绑定**：`setLibraryRoot` 换根后本方法就跟着建
+	 *  新根，不会在旧位置重建空壳。`Books/` 已退役（2026-09-19）：不再创建 ——
+	 *  书放在库里任何位置都能读（见 `bookService.getBookFiles`），换数据落点**不搬书**。
 	 *
 	 *  ⚠️ 这里**只建空目录**，不负责找回。被改名/挪走的目录由 `core/libraryFolders.ts`
 	 *  的 `healLibraryFolders` 在 `dataReady` 链首搬回 —— 那个必须跑在存储读盘之前，
@@ -549,7 +737,7 @@ export default class UNreaderPlugin extends Plugin {
 		try {
 			await this.libraryHeal.catch(() => undefined);
 			const missing: string[] = [];
-			for (const sub of [UNREADER_ROOT, BOOKS_FOLDER, FONTS_FOLDER]) {
+			for (const sub of [UNREADER_ROOT, DATA_FOLDER, FONTS_FOLDER, RESOURCES_FOLDER, IMAGES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER]) {
 				const existing = this.app.vault.getAbstractFileByPath(sub);
 				if (!existing || (existing as { children?: unknown[] }).children === undefined) missing.push(sub);
 			}
@@ -562,7 +750,149 @@ export default class UNreaderPlugin extends Plugin {
 	/** 把当前的排除开关状态同步到 Obsidian 配置（见 core/exclusions.ts）。
 	 *  设置页切换开关后调用；`dataReady` 链首也会调一次（幂等）。 */
 	async syncExclusions(): Promise<void> {
-		await syncVaultExclusions(this.app, { includeNotes: this.settings.excludeNotesFromSearch !== false });
+		await syncVaultExclusions(this.app, { excludeNotes: this.settings.excludeNotesFromSearch !== false });
+	}
+
+	/** 预检「把数据落点切到 `next`」要搬哪些文件。只读：不建目录、不改任何状态。 */
+	planDataFolder(next: string | null): LibraryMigrationPlan {
+		return planDataFolderMigration(this.app, this.settings.dataFolder, next);
+	}
+
+	/** 切换插件**数据**的落点（`next = null` → 默认根 `UNreader/`）。
+	 *  `migrate=false` 时只切不搬（用户明确选择「文件我自己处理」）。
+	 *
+	 *  **书籍一律不搬**：书放在库里任何位置都能读（`bookService.getBookFiles` 全库扫描），
+	 *  所以进度键（书籍完整路径的 djb2 hash）、书架顺序 / 置顶、笔记 frontmatter 里的
+	 *  书籍链接、他端的同步身份**全都不需要改** —— 这正是「只搬数据」比「搬书」简单
+	 *  且安全的地方。搬的是 `paths.ts` 里的 `DATA_SUBFOLDERS`：
+	 *  Progress / Presets / Fonts / Resources / Notes。
+	 *
+	 *  顺序有硬约束（每一步都是为了上一步的结果不被下面覆盖）：
+	 *   ① 先把两份存储的去抖写入 `flush` 到**旧根** —— 它们构造时就捕获了旧目录，
+	 *      下面重建后未落盘的改动会写到新根（落错地方）甚至丢失；
+	 *   ② 迁移（`migrate=false` 时跳过）；失败即中止，**不切根**，保持旧状态可用；
+	 *   ③ `setConfiguredDataFolder` —— 活绑定生效，此后所有路径读取立刻指向新根；
+	 *   ④ 改写字体引用：字体 id 是 `custom:<库内路径>`，搬 `Fonts/` 会让这四处全部悬空；
+	 *   ⑤ 重建存储并读新目录；
+	 *   ⑥ 落盘 settings（`dataFolder` 换新值）。
+	 */
+	async applyDataFolder(next: string | null, options: { migrate: boolean }): Promise<DataFolderSwitchResult> {
+		const target = normalizeDataFolder(next);
+		const fromRoot = dataRootOf(this.settings.dataFolder);
+		const toRoot = dataRootOf(target);
+		const failed = (error: string): DataFolderSwitchResult =>
+			({ ok: false, error, moved: 0, removedEmpty: 0, rewrote: 0 });
+		if (fromRoot === toRoot) {
+			this.settings.dataFolder = target;
+			await this.persistData();
+			return { ok: true, moved: 0, removedEmpty: 0, rewrote: 0 };
+		}
+		// 存储首次读盘还没完成时切根：它们的 init 会把**旧根**读完（甚至按旧根写回），
+		// 之后再重建等于白读一遍。先等到它就绪（正常情况下早已 resolve）。
+		await this.whenDataReady().catch(() => undefined);
+		await this.progress.flush().catch(() => undefined);
+		await this.presetStore.flush().catch(() => undefined);
+
+		let moved = 0;
+		let removedEmpty = 0;
+		if (options.migrate) {
+			const plan = this.planDataFolder(target);
+			if (plan.collisions.length) {
+				return failed(`目标位置已有 ${plan.collisions.length} 个同名文件（如「${plan.collisions[0]}」），请先处理冲突`);
+			}
+			const result = await migrateDataFolder(this.app, plan);
+			if (result.error) {
+				debugLog.warn("[dataFolder] 迁移失败", result.error, result.rollbackFailures);
+				const suffix = result.rollbackFailures.length ? `；${result.rollbackFailures.length} 个文件未能自动回滚` : "";
+				return failed(`${result.error}${suffix}`);
+			}
+			moved = result.moved.length;
+			removedEmpty = result.removedEmpty.length;
+		}
+
+		setConfiguredDataFolder(target);
+		await this.ensureLibraryFolders();
+		// 旧根下的字体可能在规范位（`Data/Fonts`），也可能是上一轮容器迁移因重名
+		// 跳过的平铺残留（`Fonts`）—— 两个来源都映射到新根的 `Data/Fonts`。
+		const rewrote = await rewriteFontReferences(
+			this.app,
+			this.settings,
+			[`${fromRoot}/Fonts`, `${fromRoot}/${DATA_DIR_NAME}/Fonts`],
+			FONTS_FOLDER,
+		);
+		this.settings.dataFolder = target;
+		await this.persistData();
+		await this.rebuildStores();
+		try { this.getActiveReader()?.refreshAppearance(); } catch { /* 没有打开的阅读器 */ }
+		return { ok: true, moved, removedEmpty, rewrote };
+	}
+
+	/** 按**当前**数据根重建三份存储。
+	 *
+	 *  必须重建，不能只改字段：`ProgressStore` / `PresetStore` 在构造时就把目录字符串
+	 *  捕获成了私有字段，`ResourceStore` 的默认参数同理 —— `core/paths.ts` 的活绑定只对
+	 *  **每次读取**的调用点有效，构造期捕获的值不会跟着变。 */
+	private async rebuildStores(): Promise<void> {
+		try { this.resourceStore?.dispose(); } catch { /* ignore */ }
+		this.progress = new ProgressStore(this.app.vault, PROGRESS_FOLDER, this.deviceScope());
+		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER);
+		this.resourceStore = new ResourceStore(this.app.vault);
+		setActiveResourceStore(this.resourceStore);
+		this.feedStore = new FeedStore(this.app.vault);
+		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
+		this.feedMediaStore = new FeedMediaStore(() => this.settings.feeds);
+		await Promise.all([
+			this.progress.init(this.settings.positions).then(n => {
+				// 与 onload 的链首同一口径：迁移完就清空旧字段（见那里的长注释）
+				if (n > 0) {
+					this.settings.positions = {};
+					this.scheduleSave();
+				}
+			}).catch(e => console.warn("[UNreader] 进度库重建失败", e)),
+			this.presetStore.init(this.settings.appearancePresets).catch(e => console.warn("[UNreader] 预设库重建失败", e)),
+			this.resourceStore.init().catch(e => console.warn("[UNreader] 共享资源库重建失败", e)),
+			this.feedStore.init().catch(e => console.warn("[UNreader] 订阅库重建失败", e)),
+		]);
+		// 字体文件路径全变了：重扫会把新路径建成新 blob，并回收旧路径的缓存（见 doRefreshCustomFonts）
+		await this.refreshCustomFonts().catch(e => console.warn("[UNreader] 字体重扫失败", e));
+	}
+
+	/** 启动期的字体预热：**等主线程真正闲下来之后**才去读盘、建 blob。
+	 *
+	 *  ## 为什么要这么绕（2026-09-19 启动卡顿专项）
+	 *
+	 *  原先这里是 `onLayoutReady(() => refreshCustomFonts())` —— 紧跟布局就绪。
+	 *  而这一步的真实成本是「读被外观/预设引用的那几枚字库 + `new Blob` +
+	 *  `createObjectURL`」：作者库里 2 枚 CJK 字库合计 ~50MB，桌面实测 ≈54ms，
+	 *  移动端 WebView（iCloud 上未下载的文件要现拉、`createObjectURL` 还要按
+	 *  blob 尺寸走一遍渲染器）是数百 ms 到秒级。它落地的时刻恰好与「首屏绘制 +
+	 *  workspace 恢复 + 其它插件各自启动」重叠，于是表现为用户报的
+	 *  **「界面已经画出来了，但几秒内点什么都没反应，恢复后操作一次性涌出」**。
+	 *
+	 *  ## 语义不变
+	 *
+	 *  这里做的只是**提前备好**。任何真正的消费点（开书、外观面板选中字体的
+	 *  `ensureFontReady`、资源变化重扫）都会各自 await `refreshCustomFonts()`，
+	 *  单飞行去重保证同一轮只读一次盘 —— 用户若在这个窗口里打开书，那一次就由
+	 *  开书路径自己承担，与「没有预热」的旧版本完全一致，不会少东西。
+	 *
+	 *  慢机器上最迟 `FONT_PREWARM_MAX_DELAY_MS` 放行：预热不该被无限期饿死，
+	 *  否则「开书零等待」这个它存在的理由就没了。
+	 */
+	private async prewarmCustomFonts(): Promise<void> {
+		const started = Date.now();
+		await new Promise<void>(resolve => window.setTimeout(resolve, FONT_PREWARM_DELAY_MS));
+		// 固定让路之后，再逐片试探：`idleYield` 兑现得快 = 这一片确实没有排队工作。
+		// （空闲回调在忙时会被推迟到 timeout，或干脆被长任务压在后面 —— 那就会
+		// 明显超过这里的阈值，于是再让一片。WebKit 没有 requestIdleCallback，
+		// 回落是一枚 32ms 宏任务，语义同样是「本帧已经画完」。）
+		while (Date.now() - started < FONT_PREWARM_MAX_DELAY_MS) {
+			const t = Date.now();
+			await idleYield(250);
+			if (Date.now() - t <= 48) break;
+		}
+		if (this.unloaded) return;
+		await this.refreshCustomFonts();
 	}
 
 	/** 扫描字体文件夹并把自定义字体注入引擎（跨设备：字体文件随库同步，
@@ -596,7 +926,9 @@ export default class UNreaderPlugin extends Plugin {
 	 *  → 当场补上真 blob，不会出现「选了却不生效」。 */
 	private referencedFontIds(): Set<string> {
 		const ids = new Set<string>();
-		const push = (v: string | null | undefined): void => { if (v) ids.add(v) };
+		const push = (v: string | null | undefined): void => {
+			if (v && this.resourceStore.isEnabled(v)) ids.add(v);
+		};
 		push(this.settings.appearance?.fontFamily);
 		for (const p of this.settings.appearancePresets ?? []) push(p.appearance?.fontFamily);
 		try {
@@ -607,11 +939,37 @@ export default class UNreaderPlugin extends Plugin {
 
 	private async doRefreshCustomFonts(): Promise<CustomFont[]> {
 		await this.ensureLibraryFolders();
-		const fonts = scanCustomFonts(this.app, FONTS_FOLDER);
+		const fonts = scanCustomFonts(this.app, FONTS_FOLDER).filter(f => this.resourceStore.isEnabled(f.id));
+		// 悬空引用自愈（见 core/fontRefRepair.ts）：数据根搬家后 `custom:<旧路径>` 的引用
+		// 会静默失效（引擎查不到 id → 正文回落主题字体，不报错）。**必须排在下面算
+		// `referencedFontIds()` 之前**：修完这一轮就能直接把 blob 建出来，用户不需要
+		// 再手动重选一次字体。
+		try {
+			const repaired = repairDanglingFontRefs(this.settings, fonts, this.presetStore?.list() ?? []);
+			if (repaired.settingsChanged) {
+				// 外观快照存在**本机 localStorage**（永不随 data.json 同步，见 persistData）：
+				// 只 scheduleSave 的话改写只活在内存里，下次启动又从旧快照读回悬空值 ——
+				// 于是每次启动都要重修一遍，而首屏消费点（开书、应用预设）在预热跑完之前
+				// 拿到的仍是旧 id。两份都要写。
+				this.saveDeviceAppearance();
+				this.scheduleSave();
+			}
+			// 库内预设走 store 落盘：它自带内容去重与 600ms 去抖，不会每次启动都写文件
+			for (const preset of repaired.changedPresets) this.presetStore.upsert(preset);
+			if (repaired.repairs.length) {
+				debugLog.info(
+					`[font] 悬空字体引用已自愈 ${repaired.repairs.length} 处：` +
+					repaired.repairs.map(r => `${r.where}「${r.from}」→「${r.to}」`).join("；"),
+				);
+			}
+		} catch (e) {
+			console.warn("[UNreader] 字体引用自愈失败（不影响本轮扫描）", e);
+		}
 		const needed = this.referencedFontIds();
 		// path → entry，最后按 fonts 顺序还原，保证并发完成顺序不影响结果顺序
 		const byPath = new Map<string, { id: string; label: string; src: string; format: string }>();
 		const pending: Promise<void>[] = [];
+		let pendingBytes = 0;
 		// 字体 blob 缓存：readBinary + createObjectURL 对几 MB 的字体文件在移动端
 		// 要花数秒，而 loadBook 每次开书都会调用本方法——按 mtime+size 缓存，
 		// 未变化的文件直接复用 blob URL（ onload 首扫预热，开书零开销）
@@ -637,7 +995,12 @@ export default class UNreaderPlugin extends Plugin {
 				this.fontBlobCache.set(f.path, { mtime: st?.mtime ?? 0, size: st?.size ?? 0, uri: r.uri, format: r.format });
 				byPath.set(f.path, { id: f.id, label: f.label, src: r.uri, format: r.format });
 			}));
+			pendingBytes += st?.size ?? 0;
 		}
+		// 大批量读盘/建 blob 前先让出一个空闲片：这一步会同时发生在开书路径上
+		// （`loadBook` 与读整包并行），大字体在移动端足以吃掉一帧甚至几帧。
+		// 命中缓存时 `pending` 为空、不产生任何额外等待。
+		if (pending.length && pendingBytes >= FONT_BLOB_YIELD_BYTES) await idleYield(120);
 		await Promise.all(pending);
 		// 本次不需要 blob 的字体：把缓存里那份回收掉（否则它一直占着内存，
 		// 且 `sig` 里仍留真 src → 下次还会被当成「已注册」）
@@ -674,7 +1037,124 @@ export default class UNreaderPlugin extends Plugin {
 
 	/** 自定义字体列表（外观面板用） */
 	getCustomFonts(): CustomFont[] {
-		return scanCustomFonts(this.app, FONTS_FOLDER);
+		return scanCustomFonts(this.app, FONTS_FOLDER).filter(f => this.resourceStore.isEnabled(f.id));
+	}
+
+	/** 资源引用被当前设备外观与预设使用的次数。 */
+	private resourceUsageCount(ref: string): number {
+		const fields = ["backgroundImage", "backgroundImageLight", "backgroundImageDark", "fontFamily"] as const;
+		const refs: (string | null | undefined)[] = [];
+		for (const field of fields) refs.push((this.settings.appearance as unknown as Record<string, unknown>)[field] as string | null | undefined);
+		for (const preset of this.presetStore.list()) {
+			for (const field of fields) refs.push((preset.appearance as unknown as Record<string, unknown>)[field] as string | null | undefined);
+		}
+		return refs.filter(value => value === ref).length;
+	}
+
+	/** 删除资源后清掉本机外观与所有预设里的悬空引用。 */
+	private clearResourceReferences(id: string, kind: SharedResourceKind): void {
+		const fields = kind === "font"
+			? (["fontFamily"] as const)
+			: (["backgroundImage", "backgroundImageLight", "backgroundImageDark"] as const);
+		const clear = (appearance: AppearanceSettings): boolean => {
+			const raw = appearance as unknown as Record<string, unknown>;
+			let changed = false;
+			for (const field of fields) {
+				if (raw[field] !== id) continue;
+				raw[field] = null;
+				changed = true;
+			}
+			return changed;
+		};
+
+		if (clear(this.settings.appearance)) {
+			this.saveDeviceAppearance();
+			this.scheduleSave();
+		}
+		for (const preset of this.presetStore.list()) {
+			if (!clear(preset.appearance)) continue;
+			preset.appearance = { ...preset.appearance };
+			this.presetStore.upsert(preset);
+		}
+	}
+
+	/** 设置页打开统一资源管理器；启用、移除与删除都走同一套插件级逻辑。 */
+	async openResourceManager(kind: SharedResourceKind, onChanged?: () => void): Promise<void> {
+		await this.whenDataReady();
+		const resources: ManagedResource[] = this.resourceStore.list(kind).map(resource => ({
+			...resource,
+			usedBy: this.resourceUsageCount(resource.id),
+		}));
+		const refresh = async (): Promise<void> => {
+			if (kind === "font") await this.refreshCustomFonts();
+			try { this.getActiveReader()?.refreshAppearance(); } catch { /* ignore */ }
+			onChanged?.();
+		};
+
+		new ResourceManagerModal(this.app, kind, resources, {
+			onToggle: async (id, enabled) => {
+				await this.resourceStore.setEnabled(id, enabled);
+				const resource = resources.find(item => item.id === id);
+				if (resource) resource.enabled = enabled;
+				await refresh();
+			},
+			onDelete: async resource => {
+				const used = this.resourceUsageCount(resource.id);
+				if (used > 0 && !window.confirm(`资源“${resource.name}”正被 ${used} 处配置引用，删除后这些配置会失去该资源。确定删除？`)) return;
+				if (!await this.resourceStore.remove(resource.id)) {
+					new Notice("资源删除失败");
+					return;
+				}
+				const index = resources.findIndex(item => item.id === resource.id);
+				if (index >= 0) resources.splice(index, 1);
+				this.clearResourceReferences(resource.id, kind);
+				await refresh();
+				new Notice(`已删除资源“${resource.name}”`);
+			},
+		}).open();
+	}
+
+	/** 把旧版内联/预设内图片一次性迁移为共享图片引用。重复执行是幂等的。 */
+	private async migrateLegacyImageResources(): Promise<void> {
+		const fields = ["backgroundImage", "backgroundImageLight", "backgroundImageDark"] as const;
+		let currentChanged = false;
+		for (const field of fields) {
+			const value = ((this.settings.appearance as unknown as Record<string, unknown>)[field] as string | null) ?? null;
+			const imported = await this.resourceStore.importImageReference(value, field === "backgroundImageLight" ? "浅色背景" : field === "backgroundImageDark" ? "深色背景" : "背景图片");
+			if (imported && imported !== value) {
+				(this.settings.appearance as unknown as Record<string, unknown>)[field] = imported;
+				currentChanged = true;
+			}
+		}
+		if (currentChanged) {
+			this.saveDeviceAppearance();
+			this.scheduleSave();
+		}
+
+		for (const preset of this.presetStore.list()) {
+			let changed = false;
+			const dir = preset.dir ?? preset.name;
+			for (const field of fields) {
+				const value = ((preset.appearance as unknown as Record<string, unknown>)[field] as string | null) ?? null;
+				let imported: string | null = null;
+				if (value?.startsWith("preset:")) {
+					const file = value.slice("preset:".length);
+					const ext = (file.split(".").pop() ?? "png").toLowerCase();
+					imported = await this.resourceStore.importImage({
+						name: (file.split(".").shift() || preset.name),
+						ext,
+						sourcePath: `${PRESETS_FOLDER}/${dir}/${file}`,
+					});
+				} else {
+					imported = await this.resourceStore.importImageReference(value, preset.name);
+				}
+				if (imported && imported !== value) {
+					(preset.appearance as unknown as Record<string, unknown>)[field] = imported;
+					changed = true;
+				}
+			}
+			if (changed) this.presetStore.upsert(preset);
+		}
 	}
 
 	/** 某字体 id 当前是否已建出 blob。
@@ -727,10 +1207,121 @@ export default class UNreaderPlugin extends Plugin {
 	async openBookPicker(): Promise<void> {
 		const files = this.getBookFiles();
 		if (!files.length) {
-			new Notice("库里没有找到 EPUB / MOBI / AZW3 / TXT 文件：把书放进库内任意位置即可");
+			// 书籍不限位置（数据落点与书籍位置无关，见 core/paths.ts）：
+			// 扫描范围就是整个库，所以空态的修复建议只能是「把书放进库」。
+			new Notice("库里没有找到 EPUB / MOBI / AZW3 / TXT / HTML 文件：把书放进库内任意位置即可");
 			return;
 		}
 		new BookPickerModal(this, files).open();
+	}
+
+	/** 打开 RSS 文章/播客条目；稳定身份不依赖数组下标或虚拟文件路径。 */
+	async openFeedEntry(feedId: string, entryId: string): Promise<WorkspaceLeaf | null> {
+		if (!this.feedStore.getEntry(feedId, entryId)) {
+			new Notice("文章不存在或已被清理");
+			return null;
+		}
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)[0];
+		const leaf = existing ?? this.app.workspace.getLeaf(true);
+		await leaf.setViewState({
+			type: VIEW_TYPE_UNREADER,
+			state: { source: { kind: "feed-entry", feedId, entryId } },
+		});
+		return leaf;
+	}
+
+	promptAddFeed(): void {
+		new AddFeedModal(this.app, this).open();
+	}
+
+	async addResolvedFeed(candidate: DiscoveredFeed): Promise<void> {
+		await this.whenDataReady();
+		const result = await this.feedService.addSubscription({
+			feedUrl: candidate.url,
+			siteUrl: "",
+			title: candidate.title,
+		});
+		if (result.error) throw new Error(result.error);
+		new Notice(`已添加订阅：${this.feedStore.getFeed(result.feedId)?.title ?? candidate.title}`);
+		this.getActiveReader()?.refreshFeedsPanel();
+	}
+
+	importOpmlFromFile(): void {
+		new ImportOpmlModal(this.app, this).open();
+	}
+
+	async exportOpmlToVault(): Promise<void> {
+		await this.whenDataReady();
+		const feeds = this.feedStore.listFeeds();
+		if (!feeds.length) {
+			new Notice("还没有可导出的订阅");
+			return;
+		}
+		const folder = normalizePath(FEEDS_FOLDER);
+		try { await this.app.vault.createFolder(folder); } catch { /* 已存在 */ }
+		const path = normalizePath(`${FEEDS_FOLDER}/UNreader订阅.opml`);
+		const payload = this.feedService.exportOpml();
+		try {
+			const existing = this.app.vault.getAbstractFileByPath(path);
+			if (existing instanceof TFile) await this.app.vault.modify(existing, payload);
+			else await this.app.vault.create(path, payload);
+			new Notice(`OPML 已导出到 ${path}`);
+		} catch (error) {
+			new Notice(`导出失败：${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	renameFeed(feedId: string, title: string): void {
+		new RenameFeedModal(this.app, title, value => {
+			void this.feedStore.renameSubscription(feedId, value).then(() => {
+				this.getActiveReader()?.refreshFeedsPanel();
+			});
+		}).open();
+	}
+
+	async deleteFeed(feedId: string): Promise<void> {
+		const feed = this.feedStore.getFeed(feedId);
+		if (!feed) return;
+		new DeleteFeedModal(this.app, feed.title, () => {
+			void this.feedService.removeSubscription(feedId).then(() => {
+				const reader = this.getActiveReader();
+				if (reader?.getCurrentFeedSource()?.feedId === feedId) reader.showEmptyState();
+				reader?.refreshFeedsPanel();
+				new Notice(`已删除订阅：${feed.title}`);
+			});
+		}).open();
+	}
+
+	async downloadPodcast(feedId: string, entryId: string): Promise<boolean> {
+		const entry = this.feedStore.getEntry(feedId, entryId);
+		const url = entry?.enclosure?.url;
+		if (!url) return false;
+		if (this.settings.feeds.mediaCacheMb <= 0) {
+			new Notice("播客缓存上限为 0，请先在订阅设置中调大后再下载");
+			return false;
+		}
+		const bytes = this.settings.feeds.mediaCacheMb * 1024 * 1024;
+		const ok = await this.feedMediaStore.downloadMedia(url, bytes);
+		if (ok) this.getActiveReader()?.refreshFeedsPanel();
+		return ok;
+	}
+
+	async refreshAllFeeds(): Promise<void> {
+		await this.whenDataReady();
+		const results = await this.feedService.refreshAll(true);
+		const failed = results.filter(result => result.error).length;
+		new Notice(failed ? `刷新完成，${failed} 个订阅失败` : "订阅已刷新");
+		this.getActiveReader()?.refreshFeedsPanel();
+	}
+
+	async openNextUnreadFeed(): Promise<void> {
+		await this.whenDataReady();
+		const next = this.feedStore.listEntries().find(entry => entry.state.readAt == null);
+		if (!next) {
+			new Notice("没有未读文章");
+			return;
+		}
+		await this.openFeedEntry(next.feedId, next.id);
 	}
 
 	/** 进度库 / 预设库初始化完成。
@@ -830,48 +1421,80 @@ export default class UNreaderPlugin extends Plugin {
 	}
 
 	private async loadSettingsData(): Promise<void> {
-		const data = (await this.loadData()) as Partial<UNreaderSettings> | null;
+		const data = (await this.loadData()) as (Partial<UNreaderSettings> & {
+			hideChromeOnScroll?: unknown;
+			hideChromeOnScrollSet?: unknown;
+			/** 旧字段：曾是「打开书籍」的扫描范围（切换时把书迁进去）。语义已整体拆除，见下。 */
+			materialsFolder?: unknown;
+		}) | null;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
-		this.settings.positions = this.settings.positions ?? {};
+		// **绝不把旧 `materialsFolder` 当新 `dataFolder` 迁移**（2026-09-18，关键）：
+		// 旧字段表达的是「书扫描范围」，用户选过的值往往是他的**书**目录（作者库里就是
+		// `4-配置文件`）。照搬成数据落点的话，首次启动时活绑定就指向那个目录，而
+		// `healLibraryFolders` 会把 `UNreader/` 下的进度 / 预设 / 字体**悄悄搬进用户的
+		// 书籍目录** —— 不可逆的用户可见事故。新语义是「插件数据放哪儿」，默认根
+		// `UNreader/` 也正是数据**现在**实际所在的位置；要换位置请在设置页显式迁移。
+		this.settings.dataFolder = normalizeDataFolder(this.settings.dataFolder);
+		delete (this.settings as unknown as Record<string, unknown>).materialsFolder;
+		// **落点必须在这里生效**：下面所有路径读取（三份存储的构造、字体 id 解析、
+		// `ensureLibraryFolders`）读的都是 `core/paths.ts` 的活绑定。
+		setConfiguredDataFolder(this.settings.dataFolder);
+		if (this.settings.bookshelfSortMode !== "recent" && this.settings.bookshelfSortMode !== "manual") {
+			this.settings.bookshelfSortMode = "scan";
+		}
+		this.settings.bookshelfManualOrder = Array.isArray(this.settings.bookshelfManualOrder)
+			? this.settings.bookshelfManualOrder.filter((path): path is string => typeof path === "string")
+			: [];
+		this.settings.bookshelfPinned = Array.isArray(this.settings.bookshelfPinned)
+			? this.settings.bookshelfPinned.filter((path): path is string => typeof path === "string")
+			: [];
+			this.settings.positions = this.settings.positions ?? {};
+			this.settings.feeds = Object.assign({}, DEFAULT_SETTINGS.feeds, this.settings.feeds ?? {});
+			this.settings.feeds.entryLimit = Math.max(20, Math.min(2000, Math.floor(Number(this.settings.feeds.entryLimit) || DEFAULT_SETTINGS.feeds.entryLimit)));
+			this.settings.feeds.imageCacheMb = Math.max(0, Math.min(2048, Math.floor(Number(this.settings.feeds.imageCacheMb) || 0)));
+			this.settings.feeds.mediaCacheMb = Math.max(0, Math.min(8192, Math.floor(Number(this.settings.feeds.mediaCacheMb) || 0)));
 		// 路径不再是设置项：四个文件夹字段已从 UNreaderSettings 删除，全部改用
 		// core/paths.ts 的常量。老 data.json 里残留的同名字段会被 Object.assign
 		// 一起带进来，但没有任何读取点，属无害的惰性残留。
 		// 外观是设备本地状态（localStorage 按库隔离，不随 data.json 同步）：
 		// 本机有快照就用本机的；没有（首次升级/新库）则回退旧 data.json 的
-		// appearance 并迁移为本机快照——此后各设备外观互相独立
-		const localAppearance = this.loadDeviceAppearance();
-		this.settings.appearance = Object.assign(
-			{},
-			DEFAULT_APPEARANCE,
-			localAppearance ?? data?.appearance ?? {},
-		);
-		if (!localAppearance && data?.appearance) this.saveDeviceAppearance();
-		// 迁移：移动端默认开启「沉浸模式」（桌面/平板默认关）。仅当用户从未显式
-		// 设置过（Set 标记缺失）时才按平台给默认——旧版会把桌面端写入的默认
-		// false 同步到移动端，导致移动端沉浸模式永久失效
+		// appearance 并迁移为本机快照——此后各设备外观互相独立。
 		let mobileLike = false;
 		try {
 			mobileLike = Platform.isMobile || Platform.isIosApp || Platform.isAndroidApp;
 		} catch { /* ignore */ }
-		if (this.settings.hideChromeOnScrollSet !== true) {
-			this.settings.hideChromeOnScroll = mobileLike;
-		}
-		// 迁移：沉浸模式适配（外观项，随预设存储）——移动端默认开，沿用既有的
-		// 「沉浸隐藏页首」观感；桌面端默认关（页首承载标签/导航，藏掉会挡路）。
-		// 外观是设备本地快照，故按平台给默认天然合理；仅当本机快照与旧 data.json
-		// 都没有该字段（未设置过、也未被预设写入过）时才补。
-		// 旧字段 `hideHeader`（只藏页首）就地迁移为 `immersiveAdapt`（2026-09-14 改名，
-		// 语义扩到「连原生底栏/系统状态栏一起藏」）——**必须在合并默认值之前**
-		// 对原始对象调用，否则默认值 false 会把旧值盖掉（见 adoptLegacyAppearance）。
-		const rawAppearance = (localAppearance ?? data?.appearance ?? {}) as Record<string, unknown>;
-		adoptLegacyAppearance(rawAppearance);
-		if (typeof rawAppearance.immersiveAdapt === "boolean") {
-			this.settings.appearance.immersiveAdapt = rawAppearance.immersiveAdapt;
-		} else {
-			this.settings.appearance.immersiveAdapt = mobileLike;
-		}
-		// 合并默认值时会把原始对象里的旧键一并带进来 —— 删掉，别让它跟着快照落盘
+		const platformDefaults = platformAppearanceDefaults(mobileLike);
+		const localAppearance = this.loadDeviceAppearance();
+		const rawAppearance = {
+			...((localAppearance ?? data?.appearance ?? {}) as Record<string, unknown>),
+		};
+		// 旧顶层开关只在旧版明确标记为“用户设置过”时迁移；否则按平台新默认。
+		adoptLegacyAppearance(rawAppearance, platformDefaults, {
+			value: data?.hideChromeOnScroll,
+			explicitlySet: data?.hideChromeOnScrollSet,
+		});
+		this.settings.appearance = Object.assign({}, DEFAULT_APPEARANCE, rawAppearance);
+		// 旧顶层字段已无读取点，从最终对象中删掉，避免继续落盘。
+		const legacySettings = this.settings as unknown as Record<string, unknown>;
+		delete legacySettings.hideChromeOnScroll;
+		delete legacySettings.hideChromeOnScrollSet;
+		delete (this.settings.appearance as unknown as Record<string, unknown>).immersiveAdapt;
 		delete (this.settings.appearance as unknown as Record<string, unknown>).hideHeader;
+		// 旧版默认「开书显示目录轨 + 桌面自动展开目录面板」，会让正文一打开就被目录类 UI 包围。
+		// 按库做一次本机迁移：默认回到纯阅读；用户之后在界面里主动开启会被本机快照保留。
+		let cleanOpenMigrationKey: string | null = null;
+		try {
+			const key = `unreader-clean-open-v1:${this.deviceScope()}`;
+			if (localStorage.getItem(key) !== "1") {
+				this.settings.appearance.showTocRail = false;
+				this.settings.appearance.autoOpenToc = false;
+				cleanOpenMigrationKey = key;
+			}
+		} catch {
+			// localStorage 不可用时仍保证当前会话只打开正文；下次启动会再按新默认值收敛。
+			this.settings.appearance.showTocRail = false;
+			this.settings.appearance.autoOpenToc = false;
+		}
 		// 移动端默认不自动展开浮动目录（隐藏了章节轨，目录改由工具栏「目录」按钮唤起；
 		// 开书即弹面板反而打扰）。原先靠顶层旧字段 autoOpenToc/autoOpenTocSet 中转，
 		// 那两个字段已随「已废弃设置项」清理删除 —— 直接写外观字段，行为不变。
@@ -920,10 +1543,14 @@ export default class UNreaderPlugin extends Plugin {
 		for (const p of this.settings.appearancePresets) {
 			if (!p || typeof p.name !== "string" || !p.appearance) continue;
 			// 旧字段迁移必须在合并默认值之前（否则默认 false 盖掉旧值，见 adoptLegacyAppearance）
-			adoptLegacyAppearance(p.appearance as unknown as Record<string, unknown>);
+			adoptLegacyAppearance(p.appearance as unknown as Record<string, unknown>, platformDefaults);
 			p.appearance = Object.assign({}, DEFAULT_APPEARANCE, p.appearance);
 			if (!p.id) p.id = String(Date.now()) + Math.random().toString(36).slice(2, 7);
 			if (!p.createdAt) p.createdAt = Date.now();
+		}
+		const appearanceSaved = this.saveDeviceAppearance();
+		if (cleanOpenMigrationKey && appearanceSaved) {
+			try { localStorage.setItem(cleanOpenMigrationKey, "1"); } catch { /* 下次启动重试即可 */ }
 		}
 	}
 
@@ -938,8 +1565,9 @@ export default class UNreaderPlugin extends Plugin {
 			platform: Platform.isMobileApp
 				? Platform.isIosApp ? "iOS app" : "Android app"
 				: Platform.isDesktopApp ? "Desktop app" : "Desktop",
-			"library root": UNREADER_ROOT,
+			"data root": dataRootOf(this.settings.dataFolder),
 			"fonts folder": FONTS_FOLDER,
+			"data folder setting": normalizeDataFolder(this.settings.dataFolder) ?? `（默认 ${dataRootOf(null)}）`,
 			// 排除项（core/exclusions）：用户报「我的笔记不参与搜索了 / 明明排除了还在」
 			// 这类问题时，唯一能看到**实际生效的配置**的地方 —— 设置里的开关只表达意图，
 			// 官方配置里到底写了什么才是事实。
@@ -978,7 +1606,7 @@ export default class UNreaderPlugin extends Plugin {
 }
 
 class BookPickerModal extends FuzzySuggestModal<TFile> {
-	/** 书名 → 库内出现次数。书不再限定在某个文件夹里（见 bookService.getBookFiles），
+	/** 书名 → 当前资料范围内的出现次数（见 bookService.getBookFiles）。
 	 *  重名书会同时出现在列表里 —— 只显示 basename 时两项一模一样、无法分辨，故重名时补所在目录。 */
 	private nameCounts = new Map<string, number>();
 

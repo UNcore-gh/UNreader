@@ -1,6 +1,6 @@
 # UNreader
 
-A beautiful, fully offline e-book reader — **EPUB first**, plus MOBI/AZW3 and TXT. Reflowable layout with a seamless continuous scroll, a floating table of contents, an on-edge chapter rail, highlights / bookmarks / comments, and a full appearance system (fonts, backgrounds, presets).
+A beautiful, local-first e-book reader — **EPUB first**, plus MOBI/AZW3, TXT, local HTML and RSS/Atom/JSON Feed subscriptions. Reflowable layout with a seamless continuous scroll, a floating table of contents, an on-edge chapter rail, highlights / bookmarks / comments, and a full appearance system (fonts, backgrounds, presets).
 
 > Part of the **UN series** by [UNcore](https://github.com/UNcore-gh).
 
@@ -9,7 +9,8 @@ A beautiful, fully offline e-book reader — **EPUB first**, plus MOBI/AZW3 and 
 | Feature | Description |
 |---------|-------------|
 | **📚 EPUB first** | Reflowable EPUB with a real outline/TOC, chapter navigation and footnote support |
-| **📖 MOBI / AZW3 / TXT** | KF8 (AZW3/MOBI) reflow plus TXT with automatic encoding detection and chapter splitting |
+| **📖 MOBI / AZW3 / TXT / HTML** | KF8 (AZW3/MOBI) reflow, TXT with automatic encoding detection and chapter splitting, and local HTML sanitised and split by heading (author CSS is dropped so your appearance settings always win) |
+| **📰 Feeds** | RSS 2.0 / Atom / RDF / JSON Feed subscriptions in the same sidebar as your shelf — OPML import and export, feed discovery from a web page, full-text article fetch, cached articles for offline reading, podcast enclosures |
 | **📜 Continuous scroll** | Chapters render as stacked same-origin frames — one seamless document, no page-flip friction |
 | **🧭 Two ways to navigate** | Floating TOC panel **and** a chapter rail on the right edge (dash length = outline depth; hover to preview, click to jump) |
 | **️ Annotations** | Highlights, bookmarks and comments, with a dedicated annotations sidebar and an in-text selection toolbar |
@@ -56,20 +57,30 @@ Development happens in the private repository `UNcore-gh/UNreader-src`; the sour
 | Command | What it does |
 |---------|--------------|
 | `UNreader: 打开书籍` | Open a book from the configured library folder |
+| `UNreader: 切换书籍侧边栏` | Toggle the bookshelf sidebar |
+| `UNreader: 切换订阅侧边栏` | Toggle the feeds sidebar |
+| `UNreader: 刷新全部订阅` | Refresh every subscription |
+| `UNreader: 添加订阅` | Add a subscription by URL, or discover one from an ordinary web page |
+| `UNreader: 打开下一篇未读文章` | Open the next unread article |
 | `UNreader: 显示/隐藏浮动目录` | Toggle the floating table of contents |
 | `UNreader: 切换标注侧边栏` | Toggle the highlights / bookmarks / comments panel |
 | `UNreader: 添加书签` | Bookmark the current position |
 | `UNreader: 阅读外观` | Open the appearance panel |
 
-## Privacy
+## Network and privacy
 
-UNreader is **fully offline**:
+UNreader is **offline by default** and collects **no telemetry**. It reads the book files inside your vault, plus its own settings, fonts, appearance presets, reading progress, annotation data and cached feed snapshots. Podcast and image media caches are local IndexedDB data and are not part of vault sync.
 
-- Zero network requests
-- Zero telemetry collection
-- It only reads the book files inside your vault, plus its own settings, fonts, appearance presets, reading progress and annotation data
+Network access happens only after an explicit user action:
 
-No accounts. No cloud. No background processes.
+- adding or refreshing a subscription
+- resolving a web page into a feed
+- fetching an article's full text
+- downloading a podcast episode
+
+Reading ordinary books, opening an already-cached article and restoring the workspace never start feed polling. The first time the Feeds sidebar is opened, UNreader may perform one controlled refresh when that setting is enabled. There is no background periodic polling, no paywall or login bypass, and video podcasts are not supported.
+
+No accounts. No cloud.
 
 ## License
 

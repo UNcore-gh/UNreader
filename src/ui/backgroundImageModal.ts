@@ -9,6 +9,8 @@ export interface BackgroundImagePick {
 	ext: string;
 	/** 读取原始字节 */
 	read: () => Promise<ArrayBuffer>;
+	/** 已是共享资源时直接复用引用，避免再次复制 */
+	ref?: string;
 }
 
 /** 选择背景图片（库内文件列表，逐张即时生效；系统文件选择器由面板行「系统」按钮承担）。 */
