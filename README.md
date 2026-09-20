@@ -9,11 +9,12 @@ A beautiful, local-first e-book reader — **EPUB first**, plus MOBI/AZW3, TXT, 
 | Feature | Description |
 |---------|-------------|
 | **📚 EPUB first** | Reflowable EPUB with a real outline/TOC, chapter navigation and footnote support |
-| **📖 MOBI / AZW3 / TXT / HTML** | KF8 (AZW3/MOBI) reflow, TXT with automatic encoding detection and chapter splitting, and local HTML sanitised and split by heading (author CSS is dropped so your appearance settings always win) |
-| **📰 Feeds** | RSS 2.0 / Atom / RDF / JSON Feed subscriptions in the same sidebar as your shelf — OPML import and export, feed discovery from a web page, full-text article fetch, cached articles for offline reading, podcast enclosures |
+| **📖 MOBI / AZW3 / TXT / HTML** | KF8 (AZW3/MOBI) reflow, TXT with automatic encoding detection and chapter splitting, and local HTML/HTM that keeps the page's own layout and author CSS. Relative assets resolve against the vault, and a reading-device control re-renders the page at phone, tablet or desktop width for comfortable reading on smaller screens |
+| **📂 Shelf filters** | Hide folders from the bookshelf and *Open book* picker. Obsidian's own **Excluded files** are respected by default, and extra vault folders can be added in Settings → UNreader → Shelf |
+| **📰 Feeds** | RSS 2.0 / Atom / RDF / JSON Feed subscriptions in the same sidebar as your shelf — OPML import and export, feed discovery from a web page, full-text article fetch, cached articles for offline reading, podcast enclosures, star/favourite state, and an original-article footer link |
 | **📜 Continuous scroll** | Chapters render as stacked same-origin frames — one seamless document, no page-flip friction |
 | **🧭 Two ways to navigate** | Floating TOC panel **and** a chapter rail on the right edge (dash length = outline depth; hover to preview, click to jump) |
-| **️ Annotations** | Highlights, bookmarks and comments, with a dedicated annotations sidebar and an in-text selection toolbar |
+| **️ Annotations** | Highlights, bookmarks and comments, with a dedicated annotations sidebar and an in-text selection toolbar. Feed articles are starred instead of bookmarked |
 | **🎨 Appearance** | Import your own fonts; control size, line height, letter/paragraph spacing, indent and margins; light–dark themes with custom colours |
 | **🖼️ Backgrounds & glass** | Background images with a blur/glass layer, per light/dark or shared |
 | **🎛️ Presets** | Named appearance presets you can switch between, export and reuse across books |
@@ -21,7 +22,7 @@ A beautiful, local-first e-book reader — **EPUB first**, plus MOBI/AZW3, TXT, 
 | **️ Immersive mode** | Auto-hiding chrome with tap-to-reveal, coordinated with Obsidian's native bars on mobile |
 | **📱 Mobile ready** | Swipe from the text area to open the side drawer, touch-friendly rail, soft-keyboard aware layout |
 
-**Not supported:** PDF. Obsidian's core viewer owns the `.pdf` extension and renders PDFs better than a plugin can — UNreader deliberately stays out of that lane.
+**Not supported:** PDF, Markdown and FB2 are not treated as books. Obsidian's core viewer owns the `.pdf` extension and renders PDFs better than a plugin can, while other file types continue to open normally from the vault.
 
 ## Source code
 
@@ -50,7 +51,7 @@ Development happens in the private repository `UNcore-gh/UNreader-src`; the sour
 
 ## Usage
 
-- Click any `.epub` / `.mobi` / `.azw3` / `.txt` file in your vault — UNreader opens it directly
+- Click any `.epub` / `.mobi` / `.azw3` / `.txt` / `.html` / `.htm` file in your vault — UNreader opens it directly
 - Or run **UNreader: 打开书籍** from the command palette
 - Set your books folder in **Settings → UNreader**
 
@@ -100,10 +101,12 @@ No accounts. No cloud.
 | 功能 | 说明 |
 |------|------|
 | **📚 EPUB 优先** | 重排 EPUB，支持真实目录/大纲、章节导航与脚注 |
-| **📖 MOBI / AZW3 / TXT** | KF8（AZW3/MOBI）重排；TXT 自动判定编码并切分章节 |
+| **📖 MOBI / AZW3 / TXT / HTML** | KF8（AZW3/MOBI）重排；TXT 自动判定编码并切分章节；本地 HTML/HTM 保留原页面布局与作者 CSS，相对资源按库内路径解析，并可用「阅读设备」按手机、平板或桌面宽度重新排版 |
+| **📂 书架过滤** | 可从书架与「打开书籍」列表隐藏文件夹；默认遵循 Obsidian 的 **排除文件** 设置，也可在 设置 → UNreader → 书架 中追加每个库自己的排除目录 |
+| **📰 订阅** | RSS 2.0 / Atom / RDF / JSON Feed 与书架共用侧栏；支持 OPML 导入导出、网页自动发现、全文抓取、离线文章快照、播客附件、星标收藏，以及文末原文跳转 |
 | ** 连续滚动** | 每章渲染为堆叠的同源 frame，读起来是一整篇文档，没有翻页顿挫 |
 | **🧭 两种导航** | 浮动目录面板 **+** 右缘章节轨：短横长度编码大纲层级，悬停预览、点击跳转，远跳一次落地无中间闪烁 |
-| **️ 标注系统** | 高亮、书签、评论三类标注，独立批注侧边栏 + 划过即出的选区工具条 |
+| **️ 标注系统** | 高亮、书签、评论三类标注，独立批注侧边栏 + 划过即出的选区工具条；订阅文章使用星标收藏，不占书籍书签 |
 | **🎨 阅读外观** | 导入自定义字体；字号、行高、字距、段间距、首行缩进、左右边距全可调；明暗主题 + 自定义配色 |
 | **🖼️ 背景与毛玻璃** | 背景图支持毛玻璃层，明/暗可共用或分别设置 |
 | **🎛️ 外观预设** | 命名预设随时切换，可导出复用 |
@@ -111,7 +114,7 @@ No accounts. No cloud.
 | **️ 沉浸模式** | 自动隐藏界面元素，点按唤出；移动端与官方状态栏/底栏协同 |
 | **📱 移动端适配** | 正文区横滑呼出侧栏，触屏友好的章节轨，软键盘感知布局 |
 
-**不支持 PDF**：Obsidian 核心查看器占用了 `.pdf` 扩展名，且官方渲染比插件自造更成熟——UNreader 故意不做这块。
+**不收录 PDF / Markdown / FB2**：Obsidian 核心查看器占用了 `.pdf` 扩展名，且官方渲染比插件自造更成熟；其他类型仍可在库中正常打开，只是不作为书籍收录。
 
 ## 源码
 
@@ -140,7 +143,7 @@ npm run build   # tsc 类型检查 + esbuild 生产打包 → main.js + styles.c
 
 ## 使用
 
-- 直接点击库里的 `.epub` / `.mobi` / `.azw3` / `.txt` 文件即可用 UNreader 打开
+- 直接点击库里的 `.epub` / `.mobi` / `.azw3` / `.txt` / `.html` / `.htm` 文件即可用 UNreader 打开
 - 或在命令面板运行 **UNreader: 打开书籍**
 - 书籍文件夹在 **设置 → UNreader** 中配置
 

@@ -74,7 +74,7 @@ export function hasCoreModal(doc?: Document | null): boolean {
 
 /** 节点自身或其子树里是否是模态框容器（判定单个变更节点，不做文档级查询）。 */
 function nodeIsModalContainer(n: Node): boolean {
-	if (!(n instanceof Element)) return false;
+	if (!n.instanceOf(Element)) return false;
 	try {
 		return n.classList.contains("modal-container") || n.querySelector(".modal-container") !== null;
 	} catch {

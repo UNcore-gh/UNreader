@@ -63,7 +63,7 @@ export class SideNav {
 	onPanelOpenChange: ((open: boolean) => void) | null = null;
 
 	constructor() {
-		this.navEl = document.createElement("div");
+		this.navEl = createDiv();
 		this.navEl.className = "unreader-nav is-empty";
 		// 移动端：右下角独立页码与桌面一致常显（曾被 .is-mobile 隐藏，但页码所在的
 		// 功能按钮排半隐藏于左缘、触屏无 hover 唤不出，等于移动端没有页码）；
@@ -147,7 +147,7 @@ export class SideNav {
 		});
 		this.renderPageText();
 
-		this.actionsEl = document.createElement("div");
+		this.actionsEl = createDiv();
 		this.actionsEl.className = "unreader-actions";
 		this.actionsPanel = this.actionsEl.createDiv({ cls: "unreader-actions-panel" });
 		const trigger = this.actionsEl.createDiv({ cls: "unreader-actions-trigger", attr: { "aria-label": "阅读工具" } });
@@ -157,7 +157,7 @@ export class SideNav {
 			this.actionsEl.toggleClass("is-expanded", !this.actionsEl.hasClass("is-expanded"));
 		});
 
-		this.actionsEl = document.createElement("div");
+		this.actionsEl = createDiv();
 		this.actionsEl.className = "unreader-actions";
 		this.actionsPanel = this.actionsEl.createDiv({ cls: "unreader-actions-panel" });
 		this.pinTrigger = this.actionsEl.createDiv({ cls: "unreader-actions-trigger", attr: { "aria-label": "钉住按钮组（不自动隐藏）" } });
@@ -174,7 +174,7 @@ export class SideNav {
 			if (this.open && this.panelAnchor === "actions") this.closePanel();
 		});
 
-		this.backEl = document.createElement("div");
+		this.backEl = createDiv();
 		this.backEl.className = "unreader-back-btn";
 		this.backEl.setAttr("aria-label", "返回上一位置");
 		setIcon(this.backEl, "undo-2");
@@ -183,7 +183,7 @@ export class SideNav {
 
 	/** 在功能按钮排中添加一枚图标按钮。 */
 	addIconButton(icon: string, label: string, onClick: () => void): HTMLElement {
-		const btn = document.createElement("div");
+		const btn = createDiv();
 		btn.className = "unreader-nav-action";
 		btn.setAttribute("aria-label", label);
 		setIcon(btn, icon);
@@ -205,7 +205,7 @@ export class SideNav {
 	 * 点击弹出页码跳转面板。页码文字由 setPageText 同步更新。
 	 */
 	addPageDisplay(onClick: () => void): HTMLElement {
-		const el = document.createElement("div");
+		const el = createDiv();
 		el.className = "unreader-nav-action is-page-btn";
 		el.setAttribute("aria-label", "跳转到页码");
 		el.addEventListener("click", e => {
@@ -387,7 +387,7 @@ export class SideNav {
 
 		this.clusterEl.querySelectorAll(".unreader-nav-node").forEach(el => el.remove());
 		this.entries.forEach((entry, i) => {
-			const node = document.createElement("span");
+			const node = createSpan();
 			node.className = "unreader-nav-node";
 			node.dataset.navIndex = String(i);
 			node.dataset.depth = String(Math.min(entry.depth, 3));
@@ -727,7 +727,7 @@ export class SideNav {
 		// 在章节列表里上下划动都只该滚动列表，不该把原生抽屉划出来
 		panel.setAttribute("data-ignore-swipe", "true");
 		this.entries.forEach((entry, i) => {
-			const row = document.createElement("button");
+			const row = createEl("button");
 			row.type = "button";
 			row.setAttribute("role", "menuitem");
 			row.className = "unreader-nav-row";

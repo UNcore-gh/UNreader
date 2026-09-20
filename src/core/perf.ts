@@ -4,7 +4,7 @@ let enabled: boolean | null = null
 
 const isOn = (): boolean => {
 	if (enabled == null) {
-		try { enabled = localStorage.getItem("unreader-perf") === "1" } catch { enabled = false }
+		try { enabled = window.localStorage.getItem("unreader-perf") === "1" } catch { enabled = false }
 	}
 	return enabled
 }

@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "0.2.9",
+  "version": "0.3.0",
   "description": "UNreader - A beautiful local-first reader. EPUB first, plus MOBI/AZW3, TXT, HTML and RSS feeds.",
   "main": "main.js",
   "type": "module",
@@ -53,6 +53,7 @@
     "test:resource-store": "node test/run-resource-store.mjs",
     "test:progress-durability": "node test/run-progress-durability.mjs",
     "test:exclusions": "node test/run-exclusions.mjs",
+    "test:book-filter": "node test/run-book-filter.mjs",
     "test:gap": "esbuild test/gap-probe.ts --bundle --outfile=test/gap-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning && node test/run-gap.mjs",
     "test:csseq": "node test/run-csseq.mjs",
     "test:shelf-dark": "node test/run-shelf-dark.mjs",
@@ -60,6 +61,8 @@
     "test:reclaim": "node test/run-reclaim.mjs",
     "test:startup-layout": "node test/run-startup-layout.mjs",
     "test:feed": "node test/run-feed.mjs",
+    "test:external-link": "node test/run-external-link.mjs",
+    "test:feed-hl": "esbuild test/feed-hl-probe.ts --bundle --outfile=test/feed-hl-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-feed-hl.mjs",
     "perf:startup": "node .perf/runner.cjs --runs=11 --phases=parse,moduleLoad,onload,layout --label=startup",
     "perf:open": "esbuild test/openperf-entry.ts --bundle --outfile=test/openperf-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning && node test/run-openperf.mjs",
     "test:comment-mirror": "esbuild test/comment-mirror-probe.ts --bundle --outfile=test/comment-mirror-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-startup.mjs --external:./pdf.js --log-level=warning && node test/run-comment-mirror.mjs",
@@ -71,7 +74,6 @@
   "devDependencies": {
     "@eslint/js": "^10.0.1",
     "@types/node": "^22.15.17",
-    "builtin-modules": "^4.0.0",
     "esbuild": "0.25.5",
     "eslint": "^10.10.0",
     "eslint-plugin-obsidianmd": "^0.4.2",

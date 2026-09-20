@@ -36,6 +36,8 @@ export interface AnnotationsPanelActions {
 	getBookshelfEntries?: () => BookshelfEntry[]
 	getBookshelfSortMode?: () => BookshelfSortMode
 	getCurrentBookPath?: () => string | null
+	/** 当前正在阅读的页面名（书名 / 订阅文章名）；没有打开任何页面时返回 null。 */
+	getCurrentDocumentName?: () => string | null
 	onBookshelfSortModeChange?: (mode: BookshelfSortMode) => void
 	onBookshelfReorder?: (paths: string[]) => void
 	onToggleBookPin?: (path: string) => void
@@ -55,10 +57,13 @@ export interface AnnotationsPanelActions {
 	onRefreshFeeds?: () => void
 	onAddFeed?: () => void
 	onImportOpml?: () => void
-	onExportOpml?: () => void
-	onRenameFeed?: (feedId: string, currentTitle: string) => void
-	onDeleteFeed?: (feedId: string) => void
+	/** 订阅管理面板（工具栏「设置」按钮） */
+	onOpenFeedManager?: () => void
+	/** 悬浮态面板的「移开鼠标自动关闭」临时挂起（菜单/子面板打开期间用） */
+	onHoldAutoClose?: (hold: boolean) => void
 	onFetchFulltext?: (feedId: string, entryId: string) => void
+	/** 把文章存成 Obsidian 笔记（Markdown + 图片落盘）；未抓全文时由宿主先抓再存。 */
+	onSaveNote?: (feedId: string, entryId: string) => void
 	onOpenOriginal?: (url: string) => void
 	onDownloadPodcast?: (feedId: string, entryId: string) => Promise<boolean>
 	onPodcastProgress?: (feedId: string, entryId: string, seconds: number, duration: number) => void
@@ -96,16 +101,20 @@ function formatFeedDate(timestamp: number): string {
 	const date = new Date(timestamp);
 	const now = new Date();
 	const sameYear = date.getFullYear() === now.getFullYear();
-	try {
-		return new Intl.DateTimeFormat("zh-CN", sameYear
-			? { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }
-			: { year: "numeric", month: "short", day: "numeric" }).format(date);
-	} catch {
-		return sameYear
-			? `${date.getMonth() + 1}月${date.getDate()}日`
-			: `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
-	}
+	if (sameYear && FEED_DATE_THIS_YEAR) return FEED_DATE_THIS_YEAR.format(date);
+	if (!sameYear && FEED_DATE_OTHER_YEAR) return FEED_DATE_OTHER_YEAR.format(date);
+	return sameYear
+		? `${date.getMonth() + 1}月${date.getDate()}日`
+		: `${date.getFullYear()}年${date.getMonth() + 1}月${date.getDate()}日`;
 }
+
+const FEED_DATE_THIS_YEAR = (() => {
+	try { return new Intl.DateTimeFormat("zh-CN", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" }); } catch { return null; }
+})();
+
+const FEED_DATE_OTHER_YEAR = (() => {
+	try { return new Intl.DateTimeFormat("zh-CN", { year: "numeric", month: "short", day: "numeric" }); } catch { return null; }
+})();
 
 function formatMediaDuration(seconds: number | null): string {
 	if (seconds == null || !Number.isFinite(seconds) || seconds < 0) return "";
@@ -124,12 +133,23 @@ export class AnnotationsPanel {
 	private actions: AnnotationsPanelActions;
 	private mode: "annotations" | "bookshelf" | "feeds" = "annotations";
 	private annotationData: AnnotationFileData = { highlights: [], bookmarks: [] };
-	private bookshelfTitleEl: HTMLElement | null = null;
+	private headerTitleEl: HTMLElement | null = null;
 	private bookshelfModeBtn: HTMLElement | null = null;
 	private feedsModeBtn: HTMLElement | null = null;
 	private annotationModeBtn: HTMLElement | null = null;
 	private shelfPreviewObserver: IntersectionObserver | null = null;
 	private shelfPreviewLoaders = new WeakMap<Element, () => void>();
+	private feedListObserver: IntersectionObserver | null = null;
+	private feedListSentinel: HTMLElement | null = null;
+	private feedListState: {
+		entries: FeedEntry[]
+		feeds: Map<string, FeedSubscription>
+		current: { feedId: string; entryId: string } | null
+		list: HTMLElement
+		nextIndex: number
+		generation: number
+	} | null = null;
+	private feedListGeneration = 0;
 	private shelfDragCleanup: (() => void) | null = null;
 	private pinBtn: HTMLElement | null = null;
 	private pinned = false;
@@ -219,13 +239,13 @@ export class AnnotationsPanel {
 
 	constructor(actions: AnnotationsPanelActions) {
 		this.actions = actions;
-		this.containerEl = document.createElement("div");
+		this.containerEl = createDiv();
 		this.containerEl.className = "unreader-anno-panel";
 
 		const header = this.containerEl.createDiv({ cls: "unreader-toc-header" });
-		const brand = header.createDiv({ cls: "unreader-anno-brand" });
-		brand.createSpan({ text: "UNreader" });
-		this.bookshelfTitleEl = brand.createSpan({ cls: "unreader-anno-mode-label", text: "标注" });
+		// 头部只显示**正在阅读的页面名**（书名 / 文章名），没有打开页面时才退回模式名。
+		// 原来这里挂的是固定品牌字样「UNreader」，在侧栏里等于没信息量。
+		this.headerTitleEl = header.createDiv({ cls: "unreader-anno-title" });
 		const headerRight = header.createDiv({ cls: "unreader-toc-header-right" });
 		const modeSwitch = headerRight.createDiv({ cls: "unreader-anno-mode-switch" });
 		this.bookshelfModeBtn = modeSwitch.createDiv({ cls: "unreader-anno-mode-btn" });
@@ -413,6 +433,22 @@ export class AnnotationsPanel {
 		return this.mode;
 	}
 
+	/** 当前模式的兜底标题（没有任何页面打开时显示，保证头部不空着）。 */
+	private modeLabel(): string {
+		return this.mode === "bookshelf" ? "书架" : this.mode === "feeds" ? "订阅" : "标注";
+	}
+
+	/** 头部标题 = 当前页面名；换书 / 换文章 / 回到空白态时由宿主调用重读。
+	 *  取值是现读的（`getCurrentDocumentName` 每次现算），不做缓存。 */
+	refreshHeaderTitle(): void {
+		const el = this.headerTitleEl;
+		if (!el) return;
+		const name = (this.actions.getCurrentDocumentName?.() ?? "").trim();
+		el.setText(name || this.modeLabel());
+		el.toggleClass("is-placeholder", !name);
+		el.setAttribute("title", name || this.modeLabel());
+	}
+
 	/** 三种内容共用同一抽屉、钉住状态、尺寸与开合状态，只切换列表主体。 */
 	setMode(mode: "annotations" | "bookshelf" | "feeds"): void {
 		this.shelfDragCleanup?.();
@@ -434,7 +470,7 @@ export class AnnotationsPanel {
 		this.containerEl.toggleClass("is-bookshelf", shelf);
 		this.containerEl.toggleClass("is-feeds", feeds);
 		this.containerEl.toggleClass("is-annotations", !shelf && !feeds);
-		this.bookshelfTitleEl?.setText(shelf ? "书架" : feeds ? "订阅" : "标注");
+		this.refreshHeaderTitle();
 		this.bookshelfModeBtn?.toggleClass("is-active", shelf);
 		this.feedsModeBtn?.toggleClass("is-active", feeds);
 		this.annotationModeBtn?.toggleClass("is-active", !shelf && !feeds);
@@ -446,6 +482,15 @@ export class AnnotationsPanel {
 		this.shelfPreviewLoaders = new WeakMap<Element, () => void>();
 	}
 
+	private stopFeedListRendering(): void {
+		try { this.feedListObserver?.disconnect(); } catch { /* ignore */ }
+		this.feedListObserver = null;
+		this.feedListSentinel?.remove();
+		this.feedListSentinel = null;
+		this.feedListState = null;
+		this.feedListGeneration++;
+	}
+
 	private renderAnnotations(): void {
 		this.disconnectShelfPreviews();
 		const data = this.annotationData;
@@ -454,9 +499,14 @@ export class AnnotationsPanel {
 		this.listEl.empty();
 		this.bookmarkPageEls = [];
 		if (!data.bookmarks.length && !data.highlights.length) {
+			// 当前读的是 Feed 文章时功能轨上是「星标」而不是「添加书签」（两枚互斥），
+			// 空态提示必须跟着走，否则指的那枚按钮根本不在屏幕上。
+			const feed = !!this.actions.getCurrentFeedEntry?.();
 			this.listEl.createDiv({
 				cls: "unreader-toc-empty",
-				text: "暂无标注。选中文字可高亮或评论，点击工具栏书签按钮可收藏当前位置。",
+				text: feed
+					? "暂无标注。选中文字可高亮或评论，点击工具栏星标按钮可收藏这篇文章。"
+					: "暂无标注。选中文字可高亮或评论，点击工具栏书签按钮可收藏当前位置。",
 			});
 			return;
 		}
@@ -489,7 +539,7 @@ export class AnnotationsPanel {
 
 		const toolbar = this.listEl.createDiv({ cls: "unreader-shelf-toolbar" });
 		toolbar.createDiv({ cls: "unreader-shelf-summary", text: `全库 · ${entries.length} 本` });
-		const select = toolbar.createEl("select", { cls: "unreader-shelf-sort" }) as HTMLSelectElement;
+		const select = toolbar.createEl("select", { cls: "unreader-shelf-sort" });
 		select.setAttribute("aria-label", "书架排序");
 		const options: Array<[BookshelfSortMode, string]> = [
 			["scan", "默认排序"],
@@ -497,7 +547,7 @@ export class AnnotationsPanel {
 			["manual", "手动排序"],
 		];
 		for (const [value, label] of options) {
-			const option = select.createEl("option", { text: label }) as HTMLOptionElement;
+			const option = select.createEl("option", { text: label });
 			option.value = value;
 		}
 		select.value = sortMode;
@@ -507,7 +557,7 @@ export class AnnotationsPanel {
 		});
 
 		if (!entries.length) {
-			this.listEl.createDiv({ cls: "unreader-toc-empty", text: "全库中还没有 EPUB / MOBI / AZW3 / TXT / HTML 书籍。" });
+			this.listEl.createDiv({ cls: "unreader-toc-empty", text: "全库中还没有可收录的书籍（EPUB / AZW3 / MOBI / TXT / HTML）。若书在排除的文件夹里，可在 设置 → UNreader → 书架 调整。" });
 			return;
 		}
 		this.listEl.toggleClass("is-manual", sortMode === "manual");
@@ -520,24 +570,24 @@ export class AnnotationsPanel {
 	/** 重建第三板块。所有数据从缓存读取，不在这里发网络请求。 */
 	renderFeeds(): void {
 		this.disconnectShelfPreviews();
+		this.stopFeedListRendering();
 		this.stopEditorReveal();
 		this.listEl.empty();
 		this.bookmarkPageEls = [];
 		const feeds = this.actions.getFeeds?.() ?? [];
 		const allEntries = this.actions.getFeedEntries?.() ?? [];
 		const filter = this.actions.getFeedFilter?.() ?? "all";
-		const sourceFilter = this.actions.getFeedSourceFilter?.() ?? null;
-		const unread = allEntries.filter(entry => entry.state.readAt == null).length;
-		const starred = allEntries.filter(entry => entry.state.starredAt != null).length;
+		const feedsById = new Map(feeds.map(feed => [feed.id, feed]));
+		const requestedSource = this.actions.getFeedSourceFilter?.() ?? null;
+		// 订阅被删掉后筛选值会悬空：当场按「全部」渲染，并把宿主那份状态一起清掉，
+		// 否则下一次渲染又会拿着同一个悬空 id 过滤出一片空白。
+		const sourceFilter = requestedSource && feedsById.has(requestedSource) ? requestedSource : null;
+		if (requestedSource && !sourceFilter) this.actions.onFeedSourceFilterChange?.(null);
 
+		// 工具栏只有两件东西：左边「订阅源选择」，右边「刷新 + 设置」。
+		// 新建 / 导入导出 / 停用删除这些低频操作全在「设置」那个订阅管理面板里。
 		const toolbar = this.listEl.createDiv({ cls: "unreader-feed-toolbar" });
-		const summary = toolbar.createDiv({ cls: "unreader-feed-summary" });
-		summary.createSpan({ text: `${feeds.length} 个订阅` });
-		summary.createSpan({ cls: "unreader-feed-summary-sep", text: "·" });
-		summary.createSpan({ text: `${unread} 未读` });
-		summary.createSpan({ cls: "unreader-feed-summary-sep", text: "·" });
-		summary.createSpan({ text: `${starred} 收藏` });
-
+		this.buildFeedSourceButton(toolbar, feeds, sourceFilter);
 		const actions = toolbar.createDiv({ cls: "unreader-feed-actions" });
 		const refreshBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-feed-action" });
 		refreshBtn.setAttribute("aria-label", "刷新全部订阅");
@@ -547,33 +597,13 @@ export class AnnotationsPanel {
 			e.stopPropagation();
 			this.actions.onRefreshFeeds?.();
 		});
-		const addBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-feed-action" });
-		addBtn.setAttribute("aria-label", "添加订阅");
-		addBtn.setAttribute("title", "添加订阅");
-		try { setIcon(addBtn, "plus"); } catch { addBtn.setText("+"); }
-		addBtn.addEventListener("click", e => {
+		const settingsBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-feed-action" });
+		settingsBtn.setAttribute("aria-label", "订阅管理");
+		settingsBtn.setAttribute("title", "订阅管理");
+		try { setIcon(settingsBtn, "settings-2"); } catch { settingsBtn.setText("⚙"); }
+		settingsBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onAddFeed?.();
-		});
-		const moreBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-feed-action" });
-		moreBtn.setAttribute("aria-label", "更多订阅操作");
-		moreBtn.setAttribute("title", "更多");
-		try { setIcon(moreBtn, "ellipsis"); } catch { moreBtn.setText("…"); }
-		moreBtn.addEventListener("click", e => {
-			e.stopPropagation();
-			const menu = new Menu();
-			menu.addItem(item => item.setTitle("导入 OPML").setIcon("file-up").onClick(() => this.actions.onImportOpml?.()));
-			menu.addItem(item => item.setTitle("导出 OPML").setIcon("file-down").onClick(() => this.actions.onExportOpml?.()));
-			if (sourceFilter) {
-				const feed = feeds.find(item => item.id === sourceFilter);
-				if (feed) {
-					menu.addSeparator();
-					menu.addItem(item => item.setTitle("重命名当前订阅").setIcon("pencil").onClick(() => this.actions.onRenameFeed?.(feed.id, feed.title)));
-					menu.addItem(item => item.setTitle("删除当前订阅").setIcon("trash-2").onClick(() => this.actions.onDeleteFeed?.(feed.id)));
-				}
-			}
-			const rect = moreBtn.getBoundingClientRect();
-			menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+			this.actions.onOpenFeedManager?.();
 		});
 
 		const filters = this.listEl.createDiv({ cls: "unreader-feed-filter" });
@@ -587,50 +617,106 @@ export class AnnotationsPanel {
 				this.renderFeeds();
 			});
 		}
-		const sourceSelect = filters.createEl("select", { cls: "unreader-feed-source-select" }) as HTMLSelectElement;
-		sourceSelect.setAttribute("aria-label", "按订阅源筛选");
-		const allOption = sourceSelect.createEl("option", { text: "全部订阅" }) as HTMLOptionElement;
-		allOption.value = "";
-		for (const feed of feeds) {
-			const option = sourceSelect.createEl("option", { text: feed.title }) as HTMLOptionElement;
-			option.value = feed.id;
-		}
-		sourceSelect.value = sourceFilter ?? "";
-		sourceSelect.addEventListener("change", e => {
-			e.stopPropagation();
-			this.actions.onFeedSourceFilterChange?.(sourceSelect.value || null);
-			this.renderFeeds();
-		});
-
 		if (!feeds.length) {
 			const empty = this.listEl.createDiv({ cls: "unreader-feed-empty" });
 			const icon = empty.createDiv({ cls: "unreader-feed-empty-icon" });
 			try { setIcon(icon, "rss"); } catch { icon.setText("RSS"); }
 			empty.createDiv({ cls: "unreader-feed-empty-title", text: "还没有订阅" });
 			empty.createDiv({ cls: "unreader-feed-empty-desc", text: "添加一个 Feed 地址或网站地址，文章会缓存到当前库中离线可读。" });
-			const add = empty.createEl("button", { text: "添加订阅", cls: "mod-cta" });
+			const emptyActions = empty.createDiv({ cls: "unreader-feed-empty-actions" });
+			const add = emptyActions.createEl("button", { text: "添加订阅", cls: "mod-cta" });
 			add.addEventListener("click", () => this.actions.onAddFeed?.());
+			const importOpml = emptyActions.createEl("button", { text: "导入 .opml" });
+			importOpml.addEventListener("click", () => this.actions.onImportOpml?.());
 			return;
 		}
 
-		let entries = allEntries;
+		// 「全部」视图里收起停用订阅的文章（缓存还在，显式选中那个源仍可看）；
+		// 选中某个源时按源过滤，不再受它自身启用状态影响。
+		const disabledFeeds = new Set(feeds.filter(feed => feed.enabled === false).map(feed => feed.id));
+		let entries = sourceFilter
+			? allEntries.filter(entry => entry.feedId === sourceFilter)
+			: allEntries.filter(entry => !disabledFeeds.has(entry.feedId));
 		if (filter === "unread") entries = entries.filter(entry => entry.state.readAt == null);
 		else if (filter === "starred") entries = entries.filter(entry => entry.state.starredAt != null);
-		if (sourceFilter) entries = entries.filter(entry => entry.feedId === sourceFilter);
 		if (!entries.length) {
 			this.listEl.createDiv({
 				cls: "unreader-toc-empty",
-				text: filter === "unread" ? "没有未读文章。" : filter === "starred" ? "没有收藏文章。" : "当前订阅还没有文章，点击刷新试试。",
+				text: filter === "unread" ? "没有未读文章。" : filter === "starred" ? "没有收藏文章。" : sourceFilter ? "当前订阅还没有文章，点击刷新试试。" : "还没有文章，点击右上角刷新试试。",
 			});
 			return;
 		}
 
 		const list = this.listEl.createDiv({ cls: "unreader-feed-list" });
 		const current = this.actions.getCurrentFeedEntry?.() ?? null;
-		for (const entry of entries) {
-			const feed = feeds.find(item => item.id === entry.feedId) ?? null;
-			list.appendChild(this.feedEntryCard(entry, feed, current));
+		this.feedListState = {
+			entries,
+			feeds: feedsById,
+			current,
+			list,
+			nextIndex: 0,
+			generation: this.feedListGeneration,
+		};
+		const done = this.appendFeedChunk();
+		if (done) return;
+		if (typeof IntersectionObserver === "undefined") {
+			while (!this.appendFeedChunk()) { /* 旧环境一次性完成，保持功能可用 */ }
+			return;
 		}
+		this.feedListObserver = new IntersectionObserver(records => {
+			if (!records.some(record => record.isIntersecting)) return;
+			if (this.appendFeedChunk()) return;
+			const sentinel = this.feedListSentinel;
+			const state = this.feedListState;
+			if (sentinel && state) state.list.appendChild(sentinel);
+		}, { root: this.listEl, rootMargin: "480px 0px" });
+		this.feedListSentinel = list.createDiv({ cls: "unreader-feed-load-more" });
+		this.feedListObserver.observe(this.feedListSentinel);
+	}
+
+	/** 工具栏左端的「订阅源选择」按钮：点开是「全部订阅 + 各订阅源」的菜单。
+	 *  用按钮 + 菜单而不是原生 select —— 能标出「已停用」的源，样式也与右侧两枚按钮同族。 */
+	private buildFeedSourceButton(toolbar: HTMLElement, feeds: FeedSubscription[], sourceFilter: string | null): void {
+		const current = sourceFilter ? feeds.find(feed => feed.id === sourceFilter) ?? null : null;
+		const label = current ? current.title : "全部订阅";
+		const button = toolbar.createEl("button", { cls: "unreader-feed-source-btn" });
+		button.setAttribute("aria-label", "选择订阅源");
+		button.setAttribute("title", label);
+		button.disabled = feeds.length === 0;
+		const icon = button.createSpan({ cls: "unreader-feed-source-icon" });
+		try { setIcon(icon, current ? "rss" : "newspaper"); } catch { /* 图标缺失不影响点按 */ }
+		button.createSpan({ cls: "unreader-feed-source-label", text: label });
+		if (current && current.enabled === false) button.createSpan({ cls: "unreader-feed-source-flag", text: "已停用" });
+		const chevron = button.createSpan({ cls: "unreader-feed-source-chevron" });
+		try { setIcon(chevron, "chevron-down"); } catch { /* ignore */ }
+		button.addEventListener("click", e => {
+			e.stopPropagation();
+			const menu = new Menu();
+			// 菜单挂在 body 上：悬浮态面板会因鼠标离开而自动收起，开菜单期间先挂住
+			this.actions.onHoldAutoClose?.(true);
+			menu.addItem(item => item
+				.setTitle("全部订阅")
+				.setIcon("newspaper")
+				.setChecked(sourceFilter == null)
+				.onClick(() => {
+					this.actions.onFeedSourceFilterChange?.(null);
+					this.renderFeeds();
+				}));
+			if (feeds.length) menu.addSeparator();
+			for (const feed of feeds) {
+				menu.addItem(item => item
+					.setTitle(feed.enabled === false ? `${feed.title} · 已停用` : feed.title)
+					.setIcon("rss")
+					.setChecked(sourceFilter === feed.id)
+					.onClick(() => {
+						this.actions.onFeedSourceFilterChange?.(feed.id);
+						this.renderFeeds();
+					}));
+			}
+			menu.onHide(() => this.actions.onHoldAutoClose?.(false));
+			const rect = button.getBoundingClientRect();
+			menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+		});
 	}
 
 	/** 阅读状态变化后只刷新第三板块，不影响当前滚动中的正文。 */
@@ -638,8 +724,34 @@ export class AnnotationsPanel {
 		if (this.mode === "feeds") this.renderFeeds();
 	}
 
+	/** 每次只构建一屏附近的卡片，避免上千篇文章在打开板块时同步创建 DOM。 */
+	private appendFeedChunk(): boolean {
+		const state = this.feedListState;
+		if (!state || state.generation !== this.feedListGeneration) return true;
+		if (state.nextIndex >= state.entries.length) {
+			this.stopFeedListRendering();
+			return true;
+		}
+		const chunkSize = 48;
+		const end = Math.min(state.entries.length, state.nextIndex + chunkSize);
+		const fragment = createFragment();
+		for (let index = state.nextIndex; index < end; index++) {
+			const entry = state.entries[index];
+			if (!entry) continue;
+			fragment.appendChild(this.feedEntryCard(entry, state.feeds.get(entry.feedId) ?? null, state.current));
+		}
+		state.list.appendChild(fragment);
+		state.nextIndex = end;
+		if (end >= state.entries.length) {
+			this.stopFeedListRendering();
+			return true;
+		}
+		return false;
+	}
+
 	private feedEntryCard(entry: FeedEntry, feed: FeedSubscription | null, current: { feedId: string; entryId: string } | null): HTMLElement {
-		const card = this.listEl.createDiv({ cls: "unreader-feed-card" });
+		const card = createDiv();
+		card.className = "unreader-feed-card";
 		card.toggleClass("is-unread", entry.state.readAt == null);
 		card.toggleClass("is-starred", entry.state.starredAt != null);
 		card.toggleClass("is-audio", entry.kind === "audio");
@@ -707,10 +819,25 @@ export class AnnotationsPanel {
 				this.actions.onFetchFulltext?.(entry.feedId, entry.id);
 			});
 		}
+		// 「保存为笔记」与「抓取网页全文」是两件事，各占一枚：只抓不存（在阅读器里读）
+		// 与存成 Markdown 文件（进 vault，交给 Obsidian 同步/双链）都有各自的场合，
+		// 合成一枚会让「只想看看全文」的人凭空多出一堆笔记文件。
+		if (entry.kind === "article") {
+			const save = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
+			save.setAttribute("aria-label", entry.contentSource === "fulltext" ? "保存为笔记" : "抓取全文并保存为笔记");
+			// setIcon 碰到不存在的图标名不会抛错、只是什么都不画（按钮会整个空白），
+			// 所以画完看一眼 DOM 再决定要不要退到文字兜底。
+			setIcon(save, "file-down");
+			if (!save.querySelector("svg")) save.setText("存");
+			save.addEventListener("click", e => {
+				e.stopPropagation();
+				this.actions.onSaveNote?.(entry.feedId, entry.id);
+			});
+		}
 
 		if (entry.kind === "audio" && entry.enclosure?.url) {
 			const audioRow = card.createDiv({ cls: "unreader-feed-audio" });
-			const audio = audioRow.createEl("audio", { cls: "unreader-feed-audio-player" }) as HTMLAudioElement;
+			const audio = audioRow.createEl("audio", { cls: "unreader-feed-audio-player" });
 			audio.controls = true;
 			// 列表渲染不能替用户触发媒体元数据请求；点击播放后才加载远程音频。
 			audio.preload = "none";
@@ -730,15 +857,17 @@ export class AnnotationsPanel {
 					}
 				}).catch(() => undefined);
 			}
-			download.addEventListener("click", async e => {
-				e.stopPropagation();
-				if (download.disabled) return;
-				download.disabled = true;
-				download.setText("下载中…");
-				const ok = await this.actions.onDownloadPodcast?.(entry.feedId, entry.id);
-				download.setText(ok ? "已缓存" : "下载失败");
-				download.disabled = false;
-				if (ok) void useCachedSource();
+			download.addEventListener("click", e => {
+				void (async (): Promise<void> => {
+					e.stopPropagation();
+					if (download.disabled) return;
+					download.disabled = true;
+					download.setText("下载中…");
+					const ok = await this.actions.onDownloadPodcast?.(entry.feedId, entry.id);
+					download.setText(ok ? "已缓存" : "下载失败");
+					download.disabled = false;
+					if (ok) void useCachedSource();
+				})();
 			});
 			if (entry.state.position?.anchor.startsWith("audio:")) {
 				const seconds = Number(entry.state.position.anchor.slice("audio:".length));
@@ -880,7 +1009,7 @@ export class AnnotationsPanel {
 			card.addClass("is-dragging");
 			const move = (ev: PointerEvent): void => {
 				const cards = Array.from(group.children).filter(
-					(child): child is HTMLElement => child instanceof HTMLElement && child !== card && child.hasClass("unreader-shelf-card"),
+					(child): child is HTMLElement => child.instanceOf(HTMLElement) && child !== card && child.hasClass("unreader-shelf-card"),
 				);
 				const before = cards.find(child => {
 					const rect = child.getBoundingClientRect();
@@ -967,7 +1096,7 @@ export class AnnotationsPanel {
 			clickTimer = window.setTimeout(() => {
 				clickTimer = null;
 				this.actions.onJump(h.anchor, h.text);
-			}, 220) as unknown as number;
+			}, 220);
 			e.stopPropagation();
 		});
 		li.addEventListener("dblclick", e => {
@@ -1068,12 +1197,17 @@ export class AnnotationsPanel {
 			await navigator.clipboard.writeText(text);
 		} catch {
 			// 兜底：隐藏 textarea 方案（离屏定位在 .unreader-copy-bridge 类里给）
-			const ta = document.createElement("textarea");
+			const ta = createEl("textarea");
 			ta.value = text;
 			ta.className = "unreader-copy-bridge";
 			document.body.appendChild(ta);
 			ta.select();
-			try { document.execCommand("copy"); } catch { /* ignore */ }
+			// `document.execCommand` 已被标准废弃，这里是 `navigator.clipboard` 失败后的
+			// **兜底**（非安全上下文 / 老 WebView）：没有等价替代品，且只在异常路径上跑。
+			// 按结构类型取用，免得这条兜底一直挂在废弃清单里。
+			try {
+				(document as unknown as { execCommand?: (command: string) => boolean }).execCommand?.("copy")
+			} catch { /* ignore */ }
 			ta.remove();
 		}
 		btn.addClass("is-copied");
@@ -1098,7 +1232,7 @@ export class AnnotationsPanel {
 		const ta = editorEl.createEl("textarea", {
 			cls: "unreader-anno-comment-input",
 			attr: { placeholder: "写下你的评论…", rows: "3" },
-		}) as HTMLTextAreaElement;
+		});
 		ta.value = h.comment ?? "";
 		const row = editorEl.createDiv({ cls: "unreader-anno-comment-editor-actions" });
 		const cancelBtn = row.createEl("button", { text: "取消", cls: "unreader-anno-comment-cancel" });
@@ -1132,7 +1266,7 @@ export class AnnotationsPanel {
 		li.classList.add("is-editing");
 		// 移动端：先停靠进可用区，再 focus 拉起键盘；之后由订阅跟着键盘重算
 		this.startEditorReveal(editorEl);
-		setTimeout(() => ta.focus(), 30);
+		window.setTimeout(() => ta.focus(), 30);
 	}
 
 	/**
@@ -1174,7 +1308,7 @@ export class AnnotationsPanel {
 			bmTimer = window.setTimeout(() => {
 				bmTimer = null;
 				this.actions.onJump(b.anchor);
-			}, 220) as unknown as number;
+			}, 220);
 			e.stopPropagation();
 		});
 		li.addEventListener("dblclick", e => {
@@ -1240,7 +1374,7 @@ export class AnnotationsPanel {
 			cls: "unreader-anno-rename-input",
 			type: "text",
 			attr: { placeholder: "书签名称", maxlength: "120" },
-		}) as HTMLInputElement;
+		});
 		input.value = b.label || "";
 		excerpt?.addClass("is-hidden");
 
@@ -1265,7 +1399,7 @@ export class AnnotationsPanel {
 		li.addClass("is-editing");
 		// 单行输入框同样会被键盘盖住（手机竖屏下半屏的卡片尤甚）→ 与评论输入区同一套停靠
 		this.startEditorReveal(row);
-		setTimeout(() => { input.focus(); input.select(); }, 30);
+		window.setTimeout(() => { input.focus(); input.select(); }, 30);
 	}
 
 	/** 收尾重命名：label === null 表示取消（Esc）。保存时 trim，空值不落库。 */

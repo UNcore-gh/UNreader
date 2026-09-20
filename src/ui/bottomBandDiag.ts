@@ -137,7 +137,7 @@ function envFacts(): string[] {
 		// 安全区：官方把 safe-area-inset 消费进 padding，自定义属性本身是未解析 token 流，
 		// 所以用一次性探针元素**量成 px**（同 engineAdapter.spacingPx 的手法）
 		try {
-			const probe = document.createElement("div");
+			const probe = createDiv();
 			probe.style.cssText = SAFE_AREA_PROBE_CSS;
 			document.body.appendChild(probe);
 			const h = probe.getBoundingClientRect().height;

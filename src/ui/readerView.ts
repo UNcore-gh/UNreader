@@ -1,12 +1,13 @@
 import { HoverPopover, ItemView, WorkspaceLeaf, TFile, Notice, setIcon, debounce, ViewStateResult, Platform } from "obsidian";
 import type UNreaderPlugin from "../main";
-import { EngineAdapter, RelocateInfo, RawFoliateView, styleFootnoteView, NavEntryModel, backDebugOn, isMobileLike, FrameSwipeInfo, type BookOpenTarget } from "../core/engineAdapter";
+import { EngineAdapter, RelocateInfo, RawFoliateView, styleFootnoteView, NavEntryModel, backDebugOn, FrameSwipeInfo, type BookOpenTarget } from "../core/engineAdapter";
 import { createVaultResourceResolver, getBookshelfEntries, isHtmlBookFile, readBookFile, sortBookshelfEntries } from "../core/bookService";
 import { loadBookPreview } from "../core/bookPreview";
 import { makeHtmlBook } from "../core/htmlBook";
 import { ProgressCursor } from "../core/progressCursor";
 import { perfReset, perfBegin, perfEnd } from "../core/perf";
 import * as debugLog from "../core/debugLog";
+import { confirmAction } from "./confirmModal";
 
 /** 悬浮预览锚点的兜底尺寸（range 量不到时的 12px 占位）。常量提取只为满足
  *  官方 lint「不得给 .style 赋字面量」；值与写入时机不变。 */
@@ -15,10 +16,56 @@ const HOVER_ANCHOR_FALLBACK_SIZE = "12px";
 /** 标注侧边栏展开时，按钮排贴到面板右缘的两条行内样式（提常量以过官方 lint）。 */
 const RAIL_SHIFTED_TRANSFORM = "translateX(0) translateY(-50%)";
 const RAIL_SHIFTED_OPACITY = "0.9";
+
+/** 网页（本地 HTML）设备模式按钮的档位表：图标 + 无障碍名，按键查表（键集 = 全部档位，
+ *  查不到 undefined 不存在）。图标即档位，一眼看出当前按哪台设备渲染。 */
+const WEB_DEVICE_STEPS: Record<WebDeviceMode, { icon: string; label: string }> = {
+	auto: { icon: "monitor-smartphone", label: "自动（跟随窗口宽度）" },
+	phone: { icon: "smartphone", label: "手机（390px 视口）" },
+	tablet: { icon: "tablet", label: "平板（834px 视口）" },
+	desktop: { icon: "monitor", label: "桌面（1280px 视口）" },
+};
+
+/** 点击循环顺序：auto（默认档、也是「跟随窗口宽度」的老口径）排第一。 */
+const WEB_DEVICE_ORDER: WebDeviceMode[] = ["auto", "phone", "tablet", "desktop"];
+
+/** 循环顺序里 `cur` 的下一档（表尾回到表首）。 */
+function nextWebDevice(cur: WebDeviceMode): WebDeviceMode {
+	const i = WEB_DEVICE_ORDER.indexOf(cur);
+	return WEB_DEVICE_ORDER[(i + 1) % WEB_DEVICE_ORDER.length] ?? "auto";
+}
+
+/** 画图标；本机图标集里没有 `icon` 时退到 `fallback`（见 hasIcon）。
+ *  给「新图标名 + 老兜底」这种成对写法用的：Obsidian 各版本打进来的 lucide 集不完全
+ *  一致，`setIcon` 碰到不存在的名字会静默失败 —— 按钮整个空白，比图标不贴切难查得多。 */
+function paintIcon(el: HTMLElement, icon: string, fallback: string): void {
+	setIcon(el, hasIcon(icon) ? icon : fallback);
+}
+
+/** 本机 lucide 图标集里有没有这个名字（结果缓存）。取不到的图标名会让按钮**整个空白**
+ *  （setIcon 静默失败，比图标不贴切难查得多），所以用之前先问一句。
+ *
+ *  判定方式是「画一次看有没有落地」，不走 obsidian 的 `getIconIds()`：那是一个额外的
+ *  公开导出，加进 import 就得让每个测试替身跟着补一个同名导出，收益为零。画不出来
+ *  （含替身环境里 setIcon 是空实现）一律按「有」处理 —— 宁可图标不贴切，也不要
+ *  把调用方的兜底图标名也改掉。 */
+const iconKnown = new Map<string, boolean>();
+function hasIcon(name: string): boolean {
+	const hit = iconKnown.get(name);
+	if (hit !== undefined) return hit;
+	let ok = true;
+	try {
+		const probe = createSpan();
+		setIcon(probe, name);
+		ok = probe.querySelector("svg") !== null;
+	} catch { /* 环境不支持：当作有 */ }
+	iconKnown.set(name, ok);
+	return ok;
+}
 import { collectHeaderBandFacts } from "./headerBandDiag";
 import { importFontFile, isFontExt, MAX_FONT_BYTES } from "../core/fontService";
 import { FONTS_FOLDER, IMAGES_FOLDER } from "../core/paths";
-import type { AppearanceSettings, BookshelfSortMode, BookPosition } from "../types";
+import type { AppearanceSettings, BookshelfSortMode, BookPosition, WebDeviceMode } from "../types";
 import type { FeedEntry, FeedFilter, ReaderSource } from "../types";
 import { DEFAULT_APPEARANCE, activeTheme } from "../types";
 import { resolveActiveColors } from "../core/engineAdapter";
@@ -34,6 +81,8 @@ import {
 import { makeFeedBook } from "../core/feedBookFactory";
 import { reconcileFeedAnnotationAnchors } from "../core/feedUtils";
 import { sanitizeArticleHtml } from "../core/articleExtractor";
+import { openExternalLink } from "../core/externalLink";
+import { saveArticleNote } from "../core/noteExporter";
 import { AppearancePanel } from "./appearancePanel";
 import { PresetNameModal } from "./presetModal";
 import { SelectionToolbar } from "./selectionToolbar";
@@ -59,6 +108,9 @@ const NAV_FLOAT_CLASS = "unreader-nav-float";
 /** 唤出底栏后延迟多久撤销让位（ms）：官方底栏 `transform 0.3s ease-out` + 一点余量。
  *  提前撤销 = 那 80px 先露出窗口底色再被滑回来的底栏盖住（一次 300ms 的闪）。 */
 const NAV_FLOAT_RELEASE_MS = 340;
+
+/** 全沉浸「返回哨兵」在视图状态里的标记键（见 UNreaderView.immersionHistoryGuard）。 */
+const IMMERSION_HISTORY_GUARD_KEY = "__unreaderImmersionGuard";
 
 interface PendingSelection {
 	doc: Document
@@ -111,6 +163,8 @@ export class UNreaderView extends ItemView {
 	private feedFilter: FeedFilter = "all";
 	private feedSourceFilter: string | null = null;
 	private feedAutoRefreshDone = false;
+	private podcastProgressTimer: number | null = null;
+	private podcastProgressPending = new Map<string, { feedId: string; entryId: string; position: BookPosition }>();
 	private loadedPath: string | null = null;
 	private loadingToken = 0;
 	/** 正在开书恢复上次阅读位置（见 loadBook 的 is-restoring / whenRestored）。
@@ -175,13 +229,25 @@ export class UNreaderView extends ItemView {
 	private fullImmersionRevealed = false;
 	/** 会话级状态，不写设置：切书/关闭视图清理，标签页失活只释放原生导航。 */
 	private fullImmersion = false;
-	/** 功能轨上四个「开关型」按钮：各自对应的面板/浮层开着时常亮（见 syncRailButtons） */
+	/** 全沉浸期间压在 leaf 导航历史里的「返回哨兵」条目（见 pushImmersionHistoryGuard）。 */
+	private immersionHistoryGuard: Record<string, unknown> | null = null;
+	/** 功能轨上「开关型」按钮：各自对应的面板/浮层开着时常亮（见 syncRailButtons）；
+	 *  星标是唯一带**内容状态**的一枚（当前文章是否已收藏），同样现读、不在调用点切类。 */
 	private railTocBtn: HTMLElement | null = null;
 	private railShelfBtn: HTMLElement | null = null;
 	private railFeedsBtn: HTMLElement | null = null;
 	private railAnnoBtn: HTMLElement | null = null;
 	private railAppearanceBtn: HTMLElement | null = null;
 	private railSearchBtn: HTMLElement | null = null;
+	/** Feed 专属：在系统默认浏览器打开当前文章原文（正文里不再注入这条链接） */
+	private railOriginalBtn: HTMLElement | null = null;
+	/** Feed 专属：收藏（星标）当前文章；书源下由 CSS 收走（`is-feed-only-control`） */
+	private railStarBtn: HTMLElement | null = null;
+	/** Feed 专属：把当前文章（必要时先抓全文）另存为一篇 Obsidian 笔记 */
+	private railSaveNoteBtn: HTMLElement | null = null;
+	/** 本地 HTML 专属：阅读设备档位（自动/手机/平板/桌面）。非 HTML 书由 CSS 收走
+	 *  （`is-html-only-control`，靠 root 上的 `is-html-source` 类判定）。 */
+	private railDeviceBtn: HTMLElement | null = null;
 	private pinBtnHidden = false;
 	private debouncedPinVisibility: (() => void) | null = null;
 	private stageResizeObserver: ResizeObserver | null = null;
@@ -191,6 +257,9 @@ export class UNreaderView extends ItemView {
 	/** 焦点闭环守卫的解绑函数（见 core/modalFocusGate.arbitrateReaderFocus） */
 	private unarbitrateFocus: (() => void) | null = null;
 	private annoAutoCloseTimer: number | null = null;
+	/** 悬浮态面板自动收起的挂起位：从面板里弹出的菜单开着时，鼠标必然离开面板，
+	 *  但那时收起面板会把菜单晾在半空 —— 挂住它，等菜单关掉再恢复常规判定。 */
+	private annoAutoCloseHold = false;
 
 	private footnoteBackdrop: HTMLElement | null = null;
 	private activeFootnoteView: RawFoliateView | null = null;
@@ -325,14 +394,25 @@ export class UNreaderView extends ItemView {
 	}
 
 	async setState(state: unknown, result: ViewStateResult): Promise<void> {
+		// 「全沉浸返回哨兵」被消费（`leaf.history.back()` 把视图切回哨兵本身）：
+		// 返回动作已经被这一条吃掉了，这里只负责退出全沉浸 —— 不再走「换书」分支，
+		// 用户留在原书原位。标记必须在交给 `super.setState` 之前摘掉，
+		// 否则它会随 `getState()` 传下去，之后每次布局恢复都被误判成「返回」。
+		if (state && typeof state === "object" && (state as Record<string, unknown>)[IMMERSION_HISTORY_GUARD_KEY] === true) {
+			delete (state as Record<string, unknown>)[IMMERSION_HISTORY_GUARD_KEY];
+			this.immersionHistoryGuard = null;
+			if (this.fullImmersion) this.exitFullImmersion();
+		}
 		const nextState = state as { file?: unknown; source?: unknown };
 		const source = nextState.source;
 		const filePath = nextState.file;
-		const incomingSource: ReaderSource | null = source && typeof source === "object" && (source as { kind?: unknown }).kind === "feed-entry"
+		const feedSource = source as { kind?: unknown; feedId?: unknown; entryId?: unknown };
+		const incomingSource: ReaderSource | null = source && typeof source === "object" && feedSource.kind === "feed-entry"
 			? {
 				kind: "feed-entry",
-				feedId: String((source as { feedId?: unknown }).feedId ?? ""),
-				entryId: String((source as { entryId?: unknown }).entryId ?? ""),
+				// 只接受字符串：`String(对象)` 会得到 "[object Object]" 这种假 id（no-base-to-string）
+				feedId: typeof feedSource.feedId === "string" ? feedSource.feedId : "",
+				entryId: typeof feedSource.entryId === "string" ? feedSource.entryId : "",
 			}
 			: typeof filePath === "string"
 				? { kind: "book", filePath }
@@ -344,7 +424,7 @@ export class UNreaderView extends ItemView {
 		}
 		await super.setState(state, result);
 		if (this.chromeReady) {
-			requestAnimationFrame(() => {
+			window.requestAnimationFrame(() => {
 				this.syncNativeHeader();
 				});
 			this.scheduleLoad();
@@ -494,7 +574,9 @@ export class UNreaderView extends ItemView {
 		this.registerDomEvent(window, "keydown", (e: KeyboardEvent) => {
 			const ev = e as KeyboardEvent & { __unreaderForwarded?: boolean; __unreaderHandled?: boolean };
 			if (ev.__unreaderForwarded || ev.__unreaderHandled) return;
-			if (e.key === "Escape" && this.fullImmersion) {
+			// Esc 退出全沉浸：核心模态框（命令面板/设置/快速切换）开着时**先放行**，
+			// 让官方 keymap 关掉弹窗（那一层才是用户此刻在操作的东西），再按一次才退模式。
+			if (e.key === "Escape" && this.fullImmersion && !hasCoreModal()) {
 				e.preventDefault();
 				this.exitFullImmersion();
 				return;
@@ -514,8 +596,15 @@ export class UNreaderView extends ItemView {
 			if (target?.closest?.(".modal-container, input, textarea, [contenteditable], .cm-editor")) return;
 			this.handleKey(e);
 		});
+		// 系统级返回的第三条入口：iOS 侧滑返回 / 浏览器式后退会派发 popstate。
+		// 官方在同一条事件上做布局复位，这里只做一件事 —— 全沉浸时当作「返回」退出。
+		// 注意它与下面那条哨兵机制**不重叠**：Android 返回走的是官方重定向过的
+		// `leaf.history.back()`（纯 JS 调用，不动真实历史，不产生 popstate）。
+		this.registerDomEvent(window, "popstate", () => {
+			if (this.fullImmersion) this.exitFullImmersion();
+		});
 		this.registerDomEvent(window, "keyup", e => {
-			const ke = e as unknown as KeyboardEvent;
+			const ke = e;
 			if (!ke.metaKey && !ke.ctrlKey) clearCommand();
 		});
 		this.registerDomEvent(window, "blur", clearCommand as unknown as EventListener);
@@ -600,7 +689,7 @@ export class UNreaderView extends ItemView {
 			this.themeRefreshTimer = null;
 			replay();
 			window.setTimeout(replay, 300);
-		}, 80) as unknown as number;
+		}, 80);
 	}
 
 	/** 标签页切回/布局变化时驱动连续模式填充：隐藏期间 scroll 事件不触发，填充链会停摆 */
@@ -640,7 +729,7 @@ export class UNreaderView extends ItemView {
 		}
 		this.closeFootnotePopup();
 		this.dismissHover();
-		if (this.hoverRaf) cancelAnimationFrame(this.hoverRaf);
+		if (this.hoverRaf) window.cancelAnimationFrame(this.hoverRaf);
 		if (this.pinResizeObserver) {
 			try { this.pinResizeObserver.disconnect(); } catch { /* ignore */ }
 			this.pinResizeObserver = null;
@@ -677,9 +766,10 @@ export class UNreaderView extends ItemView {
 			window.clearTimeout(this.themeRefreshTimer);
 			this.themeRefreshTimer = null;
 		}
-		this.cancelAnnoAutoClose();
-		this.clearMirrorSelection();
-		this.adapter.destroy();
+			this.cancelAnnoAutoClose();
+			this.clearMirrorSelection();
+			try { await this.flushPodcastProgress(); } catch { /* 关闭路径不能因进度落盘失败而跳过清理 */ }
+			this.adapter.destroy();
 		this.contentHost?.empty();
 		await super.onClose();
 	}
@@ -701,6 +791,49 @@ export class UNreaderView extends ItemView {
 
 	refreshFeedsPanel(): void {
 		this.annotationsPanel?.refreshFeeds();
+	}
+
+	/** UNagent 写完当前书/文章的旁车标注笔记后，重读并立即覆盖当前视图。
+	 *  只处理已经加载完成的同一 source；等待读盘期间若用户换书则整轮作废。 */
+	async refreshAnnotationsFromExternalWrite(paths: readonly string[]): Promise<void> {
+		const notePath = this.notePath;
+		const loadedPath = this.loadedPath;
+		if (!notePath || !loadedPath || !this.adapter.hasBook()) return;
+		if (!paths.some(path => path === notePath)) return;
+		if (this.currentSourceKey() !== loadedPath) return;
+		const entry = this.currentFeedEntry;
+		const link = entry?.url || entry?.title || this.file?.path || "";
+		const annotations = await loadAnnotations(this.app.vault, notePath, link);
+		if (this.notePath !== notePath || this.loadedPath !== loadedPath || !this.adapter.hasBook()) return;
+		this.annotations = annotations;
+		this.adapter.replaceHighlights(annotations.highlights);
+		this.syncAnnotationViews();
+		if (entry) {
+			const hasAnnotations = annotations.highlights.length > 0 || annotations.bookmarks.length > 0;
+			if (hasAnnotations !== (entry.state.hasAnnotations === true)) {
+				const updated = await this.plugin.feedStore.updateEntryState(entry.feedId, entry.id, { hasAnnotations });
+				if (updated && this.currentFeedEntry?.feedId === entry.feedId && this.currentFeedEntry?.id === entry.id) {
+					this.currentFeedEntry = updated;
+				}
+				this.annotationsPanel.refreshFeeds();
+			}
+		}
+	}
+
+	/** 预设文件夹被外部（UNagent / 同步）改动后重绘**已打开**的外观面板：
+	 *  面板里的预设下拉是 render 时现算的，不重绘就还是旧列表。面板没开则不做。 */
+	refreshAppearancePanel(): void {
+		if (!this.appearancePanel?.isOpen()) return;
+		this.appearancePanel.open(this.plugin.settings.appearance);
+	}
+
+	/** 书架排除项 / 收录格式变更后重绘书架（设置页那条路径调过来）。
+	 *  只在书架**正显示**时重绘：其他模式下重绘是白做功，而 `setMode` 到别的模式
+	 *  会把用户从当前列表拽走。同模式重绘保留滚动位置（见 annotationsPanel.setMode）。 */
+	refreshBookshelfPanel(): void {
+		if (!this.annotationsPanel?.isOpen()) return;
+		if (this.annotationsPanel.getMode() !== "bookshelf") return;
+		this.annotationsPanel.setMode("bookshelf");
 	}
 
 	getCurrentFeedSource(): { feedId: string; entryId: string } | null {
@@ -730,6 +863,11 @@ export class UNreaderView extends ItemView {
 		try {
 			new Notice("正在刷新订阅…");
 			const results = await this.plugin.feedService.refreshAll(true);
+			if (!results.length) {
+				new Notice("没有可刷新的订阅（订阅源可能都已停用）");
+				this.annotationsPanel.refreshFeeds();
+				return;
+			}
 			const failed = results.filter(result => result.error).length;
 			new Notice(failed ? `刷新完成，${failed} 个订阅失败` : "订阅已刷新");
 			this.annotationsPanel.refreshFeeds();
@@ -745,6 +883,28 @@ export class UNreaderView extends ItemView {
 			starredAt: entry.state.starredAt ? null : Date.now(),
 		});
 		this.annotationsPanel.refreshFeeds();
+		this.syncCurrentFeedStar();
+	}
+
+	/** 功能轨「星标」按钮：收藏 / 取消收藏当前文章。只对 Feed 文章有意义，
+	 *  因此按钮挂 `is-feed-only-control`（书源下由 CSS 收走，那里是「添加书签」）。 */
+	private async toggleCurrentFeedStar(): Promise<void> {
+		const ref = this.feedRef;
+		if (!ref) return;
+		await this.toggleFeedStar(ref.feedId, ref.entryId);
+	}
+
+	/** 星标状态回写：`currentFeedEntry` 是打开时的快照，收藏变化后必须从 store 现读，
+	 *  否则按钮会停在上一次的状态（列表里收藏/取消收藏、刷新合并都会改 store）。 */
+	private syncCurrentFeedStar(): void {
+		const ref = this.feedRef;
+		if (!ref) {
+			this.syncRailButtons();
+			return;
+		}
+		const entry = this.plugin.feedStore.getEntry(ref.feedId, ref.entryId);
+		if (entry) this.currentFeedEntry = entry;
+		this.syncRailButtons();
 	}
 
 	private async toggleFeedRead(feedId: string, entryId: string): Promise<void> {
@@ -769,6 +929,89 @@ export class UNreaderView extends ItemView {
 		}
 	}
 
+	/** 功能轨上的「保存为笔记」：当前打开的文章走这条路（列表卡片里那枚是同一收口）。 */
+	private async saveCurrentFeedNote(): Promise<void> {
+		const ref = this.feedRef;
+		if (!ref) {
+			new Notice("当前页面不是订阅文章");
+			return;
+		}
+		await this.saveFeedNote(ref.feedId, ref.entryId);
+	}
+
+	/**
+	 * 把一篇文章存成 Obsidian 笔记（Markdown + 图片落盘）。
+	 *
+	 * 还没抓过全文的**先抓再存** —— RSS 摘要存下来没有任何价值，而用户点「保存为笔记」
+	 * 想要的显然是那篇网页正文。抓取失败就到此为止，绝不退化成「存一份摘要」，
+	 * 否则用户会以为存到了全文而实际只拿到两行导语。
+	 *
+	 * 落点、覆盖策略、图片命名全部在 `core/noteExporter.ts` 里收口（用 Obsidian 自己的
+	 * 「新建笔记默认位置 / 附件默认位置」设置），这里只负责触发与回报。
+	 */
+	private async saveFeedNote(feedId: string, entryId: string): Promise<void> {
+		const store = this.plugin.feedStore;
+		const current = store.getEntry(feedId, entryId);
+		if (!current) {
+			new Notice("文章不存在");
+			return;
+		}
+		let entry = current;
+		if (entry.contentSource !== "fulltext") {
+			await this.fetchFeedFulltext(feedId, entryId);
+			const fetched = store.getEntry(feedId, entryId);
+			// 抓取失败（或抓完仍是 Feed 摘要）：`fetchFeedFulltext` 已经报过错了，不再叠一条
+			if (!fetched || fetched.contentSource !== "fulltext") return;
+			entry = fetched;
+		}
+		try {
+			new Notice("正在保存笔记…");
+			const result = await saveArticleNote(this.app, {
+				title: entry.title || "未命名文章",
+				author: entry.author,
+				url: entry.url,
+				feedTitle: store.getFeed(feedId)?.title,
+				publishedAt: entry.publishedAt,
+				contentHtml: entry.contentHtml,
+			});
+			// 图片落盘失败不当作整体失败：Markdown 里保留的是原链接，笔记本身仍然可用，
+			// 只在提示里点明有几张没下来（否则用户会以为笔记里那些链接是正常状态）。
+			const images = result.imageCount ? `（图片 ${result.imageCount} 张）` : "";
+			const failed = result.failedImages ? `，${result.failedImages} 张图片未保存` : "";
+			new Notice(`已保存笔记：${result.path}${images}${failed}`);
+		} catch (error) {
+			new Notice(`保存笔记失败：${error instanceof Error ? error.message : String(error)}`);
+		}
+	}
+
+	private queuePodcastProgress(feedId: string, entryId: string, seconds: number, duration: number): void {
+		if (!Number.isFinite(seconds) || seconds < 1) return;
+		const fraction = duration > 0 ? Math.max(0, Math.min(1, seconds / duration)) : 0;
+		this.podcastProgressPending.set(`${feedId}:${entryId}`, {
+			feedId,
+			entryId,
+			position: { anchor: `audio:${seconds.toFixed(2)}`, fraction, updatedAt: Date.now() },
+		});
+		if (this.podcastProgressTimer != null) return;
+		this.podcastProgressTimer = window.setTimeout(() => { void this.flushPodcastProgress(); }, 5_000);
+	}
+
+	private async flushPodcastProgress(): Promise<void> {
+		if (this.podcastProgressTimer != null) {
+			window.clearTimeout(this.podcastProgressTimer);
+			this.podcastProgressTimer = null;
+		}
+		if (!this.podcastProgressPending.size) return;
+		const byFeed = new Map<string, Array<{ entryId: string; patch: { position: BookPosition } }>>();
+		for (const item of this.podcastProgressPending.values()) {
+			const patches = byFeed.get(item.feedId) ?? [];
+			patches.push({ entryId: item.entryId, patch: { position: item.position } });
+			byFeed.set(item.feedId, patches);
+		}
+		this.podcastProgressPending.clear();
+		await Promise.all([...byFeed.entries()].map(([feedId, patches]) => this.plugin.feedStore.updateEntriesState(feedId, patches)));
+	}
+
 	private toggleSidePanel(mode: "annotations" | "bookshelf" | "feeds"): void {
 		// 面板是**贴顶 / 贴底铺满的不透明抽屉**，开合前把两条原生 chrome 的让位量
 		// （--ur-top-inset / --ur-bottom-inset）重测一遍：页首与底栏随时会被收走或收起
@@ -784,7 +1027,11 @@ export class UNreaderView extends ItemView {
 			this.annotationsPanel.show();
 			if (mode === "feeds" && !this.feedAutoRefreshDone && this.plugin.settings.feeds.refreshOnOpen !== false) {
 				this.feedAutoRefreshDone = true;
-				queueMicrotask(() => { void this.refreshFeeds(); });
+				const feeds = this.plugin.feedStore.listFeeds();
+				const oldestFetch = feeds.reduce((oldest, feed) => Math.min(oldest, feed.lastFetchedAt || 0), Date.now());
+				if (Date.now() - oldestFetch > 10 * 60_000) {
+					void idleYield().then(() => this.refreshFeeds()).catch(() => undefined);
+				}
 			}
 		}
 		if (hide) this.cancelAnnoAutoClose();
@@ -987,51 +1234,51 @@ export class UNreaderView extends ItemView {
 		if (!can) {
 			new Notice(dir === 1 ? "已经是最后一章" : "已经是第一章");
 			this.bodyEl.addClass("is-chapter-bounce");
-			if (this.transitionTimer) clearTimeout(this.transitionTimer);
+			if (this.transitionTimer) window.clearTimeout(this.transitionTimer);
 			this.transitionTimer = window.setTimeout(() => {
 				this.bodyEl.removeClass("is-chapter-bounce");
 				this.transitionTimer = null;
-			}, 520) as unknown as number;
+			}, 520);
 			return;
 		}
 		if (this.transitionTimer) {
-			clearTimeout(this.transitionTimer);
+			window.clearTimeout(this.transitionTimer);
 			this.transitionTimer = null;
 		}
 		if (this.transitionCleanupTimer) {
-			clearTimeout(this.transitionCleanupTimer);
+			window.clearTimeout(this.transitionCleanupTimer);
 			this.transitionCleanupTimer = null;
 		}
 		this.chapterTransitioning = true;
 		// 安全网：任何路径（含 promise 永不 resolve 的异常）下，转场标志都必须快速复位，
 		// 否则卡死的标志会让后续所有「上一章/下一章」点击静默失效
-		if (this.transitionSafetyTimer) clearTimeout(this.transitionSafetyTimer);
+		if (this.transitionSafetyTimer) window.clearTimeout(this.transitionSafetyTimer);
 		this.transitionSafetyTimer = window.setTimeout(() => {
 			this.chapterTransitioning = false;
 			this.transitionSafetyTimer = null;
-		}, 2500) as unknown as number;
+		}, 2500);
 		this.bodyEl.addClass("is-chapter-transitioning");
 		this.bodyEl.toggleClass("is-transition-next", dir === 1);
 		this.bodyEl.toggleClass("is-transition-prev", dir === -1);
 		// 强制回流确保动效起手帧生效，避免与阻尼 transform 叠加导致的掉帧
 		void this.contentHost.offsetHeight;
 		const loadPromise = dir === 1 ? this.adapter.nextSection() : this.adapter.prevSection();
-		const animPromise = new Promise<void>(r => setTimeout(r, 320));
+		const animPromise = new Promise<void>(r => window.setTimeout(r, 320));
 		try {
 			await Promise.all([loadPromise, animPromise]);
-			await new Promise<void>(r => requestAnimationFrame(() => requestAnimationFrame(() => r())));
+			await new Promise<void>(r => window.requestAnimationFrame(() => window.requestAnimationFrame(() => r())));
 		} finally {
 			this.bodyEl.removeClass("is-transition-next");
 			this.bodyEl.removeClass("is-transition-prev");
 			this.transitionCleanupTimer = window.setTimeout(() => {
 				this.bodyEl.removeClass("is-chapter-transitioning");
 				this.chapterTransitioning = false;
-				if (this.transitionSafetyTimer) { clearTimeout(this.transitionSafetyTimer); this.transitionSafetyTimer = null; }
+				if (this.transitionSafetyTimer) { window.clearTimeout(this.transitionSafetyTimer); this.transitionSafetyTimer = null; }
 				this.updateChapterNav();
 				this.contentHost.style.removeProperty("transform");
 				this.contentHost.style.removeProperty("transition");
 				this.transitionCleanupTimer = null;
-			}, 360) as unknown as number;
+			}, 360);
 		}
 	}
 
@@ -1075,7 +1322,7 @@ export class UNreaderView extends ItemView {
 		this.searchInputEl = bar.createEl("input", {
 			cls: "unreader-search-input",
 			attr: { placeholder: "搜索正文…", spellcheck: "false" },
-		}) as HTMLInputElement;
+		});
 		this.searchCountEl = bar.createDiv({ cls: "unreader-search-count" });
 		const prevBtn = bar.createDiv({ cls: "unreader-search-btn", attr: { "aria-label": "上一处" } });
 		setIcon(prevBtn, "chevron-up");
@@ -1316,6 +1563,8 @@ export class UNreaderView extends ItemView {
 		this.cursor.reset(sourceKey);
 		this.rootEl.addClass("is-restoring");
 		this.rootEl.toggleClass("is-feed-source", source.kind === "feed-entry");
+		// 换书先把上一本的 HTML 标记摘掉（否则加载期间那枚设备按钮会挂在新书上）
+		this.rootEl.removeClass("is-html-source");
 		perfReset();
 		perfBegin("loadBook");
 		try {
@@ -1414,6 +1663,10 @@ export class UNreaderView extends ItemView {
 			debugLog.info("[progress] open", sourceKey,
 				saved ? `restore ${saved.anchor.slice(0, 32)} @${saved.updatedAt} ${saved.fraction.toFixed(3)}` : "无记录（从书首打开）");
 			await this.adapter.load(target, saved?.anchor || undefined, this.plugin.settings.appearance);
+			// 网页（本地 HTML）：把持久化的设备档位交给引擎（非 HTML 书上它是空操作），
+			// 并同步设备按钮的显隐 —— 必须在 load 之后，webLayout 的判据在 el.book 上
+			this.adapter.setWebDevice(this.plugin.settings.webDeviceMode);
+			this.syncHtmlSourceClass();
 			// **开书即在上次阅读位置**：等恢复落点确定再揭示正文。旧流程在这里就往下走、
 			// 立刻加 `has-book` 显示正文，而恢复落地要等目标章渲染 + 收敛循环（数百 ms 起），
 			// 用户看到的就是「先开在书首、再跳到上次位置」。等待有上限（见 adapter.restoreGateMs），
@@ -1455,6 +1708,8 @@ export class UNreaderView extends ItemView {
 				this.sideNav.closePanel();
 				this.annotationsPanel.refreshFeeds();
 			}
+			// 星标按钮的状态源是「当前文章」，换书/换文章/刷新后都要重算一次
+			this.syncRailButtons();
 			void this.refreshSideNavCounts();
 			this.updateChapterNav();
 
@@ -1763,7 +2018,7 @@ export class UNreaderView extends ItemView {
 			window.removeEventListener("resize", this.debouncedPinVisibility);
 		}
 		const debounced = debounce(() => this.updatePinButtonVisibility(), 160, true);
-		this.debouncedPinVisibility = debounced as unknown as () => void;
+		this.debouncedPinVisibility = debounced;
 		window.addEventListener("resize", this.debouncedPinVisibility);
 		this.registerEvent(this.app.workspace.on("resize", debounced as unknown as () => void));
 		this.register(() => window.removeEventListener("resize", this.debouncedPinVisibility!));
@@ -1789,7 +2044,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	private scheduleAnnoAutoClose(): void {
-		if (this.pinned || !this.annotationsPanel.isOpen()) return;
+		if (this.annoAutoCloseHold || this.pinned || !this.annotationsPanel.isOpen()) return;
 		this.cancelAnnoAutoClose();
 		this.annoAutoCloseTimer = window.setTimeout(() => {
 			this.annoAutoCloseTimer = null;
@@ -1804,7 +2059,7 @@ export class UNreaderView extends ItemView {
 
 	private cancelAnnoAutoClose(): void {
 		if (this.annoAutoCloseTimer != null) {
-			clearTimeout(this.annoAutoCloseTimer);
+			window.clearTimeout(this.annoAutoCloseTimer);
 			this.annoAutoCloseTimer = null;
 		}
 	}
@@ -1812,11 +2067,14 @@ export class UNreaderView extends ItemView {
 	private syncNativeHeader(): void {
 		const t = this.currentFeedEntry?.title || this.file?.basename || "";
 		this.titleText = t;
+		// 侧栏头部跟着换成同一个页面名（页面名只有这里算得全：订阅文章名 / 书名）
+		this.annotationsPanel?.refreshHeaderTitle();
 		// 使用 queueMicrotask 异步更新，避免在 setState/layout 期间同步触发导致回环卡死
 		queueMicrotask(() => {
 			try {
-				// @ts-ignore - WorkspaceLeaf.updateHeader 在新版 Obsidian 可用
-				this.leaf.updateHeader?.();
+				// WorkspaceLeaf.updateHeader 在新版 Obsidian 才有（旧版没有这个方法），
+				// 所以按结构类型探测后调用，而不是 @ts-ignore 压过去。
+				(this.leaf as unknown as { updateHeader?: () => void }).updateHeader?.();
 			} catch { /* ignore */ }
 			try {
 				const headerTitle = this.containerEl.closest(".workspace-leaf")?.querySelector<HTMLElement>(".view-header-title");
@@ -1884,6 +2142,7 @@ export class UNreaderView extends ItemView {
 			),
 			getBookshelfSortMode: () => this.plugin.settings.bookshelfSortMode,
 			getCurrentBookPath: () => this.file?.path ?? null,
+			getCurrentDocumentName: () => this.currentFeedEntry?.title || this.file?.basename || null,
 			onBookshelfSortModeChange: mode => this.setBookshelfSortMode(mode),
 			onBookshelfReorder: paths => this.reorderBookshelf(paths),
 			onToggleBookPin: path => this.toggleBookPin(path),
@@ -1906,18 +2165,16 @@ export class UNreaderView extends ItemView {
 			onRefreshFeeds: () => void this.refreshFeeds(),
 			onAddFeed: () => this.plugin.promptAddFeed(),
 			onImportOpml: () => this.plugin.importOpmlFromFile(),
-			onExportOpml: () => this.plugin.exportOpmlToVault(),
-			onRenameFeed: (feedId, title) => this.plugin.renameFeed(feedId, title),
-			onDeleteFeed: feedId => void this.plugin.deleteFeed(feedId),
+			onOpenFeedManager: () => this.plugin.openFeedManager(),
+			onHoldAutoClose: hold => {
+				this.annoAutoCloseHold = hold;
+				if (hold) this.cancelAnnoAutoClose();
+			},
 			onFetchFulltext: (feedId, entryId) => void this.fetchFeedFulltext(feedId, entryId),
-			onOpenOriginal: url => this.openExternalUrl(url),
-				onDownloadPodcast: (feedId, entryId) => this.plugin.downloadPodcast(feedId, entryId),
-				onPodcastProgress: (feedId, entryId, seconds, duration) => {
-				const fraction = duration > 0 ? Math.max(0, Math.min(1, seconds / duration)) : 0;
-				void this.plugin.feedStore.updateEntryState(feedId, entryId, {
-					position: { anchor: `audio:${seconds.toFixed(2)}`, fraction, updatedAt: Date.now() },
-					}).then(() => this.annotationsPanel?.refreshFeeds()).catch(() => undefined);
-				},
+			onSaveNote: (feedId, entryId) => void this.saveFeedNote(feedId, entryId),
+			onOpenOriginal: url => openExternalLink(url),
+					onDownloadPodcast: (feedId, entryId) => this.plugin.downloadPodcast(feedId, entryId),
+					onPodcastProgress: (feedId, entryId, seconds, duration) => this.queuePodcastProgress(feedId, entryId, seconds, duration),
 				onResolvePodcastUrl: url => this.plugin.feedMediaStore.playableUrl(url),
 				isPodcastDownloaded: url => this.plugin.feedMediaStore.isCached(url),
 			onCheckPodcastDownloaded: url => this.plugin.feedMediaStore.has(url),
@@ -1925,13 +2182,13 @@ export class UNreaderView extends ItemView {
 				// 侧边栏高度手动调节：持久化（null = 恢复默认全高）
 				if (px == null) delete this.plugin.settings.annoPanelHeight;
 				else this.plugin.settings.annoPanelHeight = px;
-				this.plugin.persistData();
+				void this.plugin.persistData();
 			},
 			onWidthChange: px => {
 				// 侧边栏宽度手动调节：持久化（null = 恢复默认）
 				if (px == null) delete this.plugin.settings.annoPanelWidth;
 				else this.plugin.settings.annoPanelWidth = px;
-				this.plugin.persistData();
+				void this.plugin.persistData();
 				this.alignActionsRail();
 				// 松手后立即重绘高亮（连续模式），确保拖拽结束即对齐
 				this.adapter.notifyVisible();
@@ -2049,10 +2306,31 @@ export class UNreaderView extends ItemView {
 		this.sideNav.onPanelOpenChange = () => this.syncRailButtons();
 		this.railShelfBtn = this.sideNav.addIconButton("library", "书籍侧边栏", () => this.toggleBookshelf());
 		this.railFeedsBtn = this.sideNav.addIconButton("rss", "订阅", () => this.toggleFeeds());
+		// 「阅读原文」只对 Feed 文章有意义：非 Feed 源下由 CSS 收走（is-feed-only-control）
+		this.railOriginalBtn = this.sideNav.addIconButton("external-link", "在浏览器打开原文", () => this.openCurrentFeedOriginal());
+		this.railOriginalBtn.addClass("is-feed-only-control");
+		// 「保存为笔记」：把当前文章（尚未抓全文时先抓）落成一篇 Markdown 到 vault，
+		// 图片按 Obsidian 的「附件默认位置」一并落盘（见 core/noteExporter.ts）
+		this.railSaveNoteBtn = this.sideNav.addIconButton("file-down", "保存为笔记", () => void this.saveCurrentFeedNote());
+		// `file-down` 是较新的 lucide 名，取不到时 setIcon 静默失败 → 按钮整个空白
+		paintIcon(this.railSaveNoteBtn, "file-down", "save");
+		this.railSaveNoteBtn.addClass("is-feed-only-control");
 		this.railAnnoBtn = this.sideNav.addIconButton("highlighter", "标注列表", () => this.toggleAnnotations());
-		this.sideNav.addIconButton("bookmark", "添加书签", () => this.openBookmarkModal());
+		// 「星标（收藏文章）」与「书签（收藏当前位置）」是两件事，但占功能轨上同一格：
+		// 书源只给书签（书没有「文章收藏」概念），Feed 源只给星标（文章的位置收藏没意义，
+		// 收藏整篇才是列表里「收藏」筛选与卡片上那颗星的口径）。两枚互斥，各挂一个开关类。
+		this.railStarBtn = this.sideNav.addIconButton("star", "收藏文章", () => void this.toggleCurrentFeedStar());
+		this.railStarBtn.addClass("is-feed-only-control");
+		const railBookmarkBtn = this.sideNav.addIconButton("bookmark", "添加书签", () => this.openBookmarkModal());
+		railBookmarkBtn.addClass("is-book-only-control");
 		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", "阅读外观", () => this.toggleAppearance());
 		this.railSearchBtn = this.sideNav.addIconButton("search", "搜索正文", () => this.toggleSearch());
+		// 「阅读设备」：只对本地 HTML（网页原样通道）有意义 —— 固定宽度 / min-width 的桌面页面
+		// 在手机上会横向溢出，而 frame 内 touch-action:pan-y 把横滑让给了原生侧栏手势，
+		// 右半页永远够不着（用户报的「手机上打开 HTML 看不全」）。这枚按钮把整页按设备视口
+		// 重排后再缩放到阅读区宽度。非 HTML 书由 CSS 收走（is-html-only-control）。
+		this.railDeviceBtn = this.sideNav.addIconButton("monitor-smartphone", "阅读设备", () => this.cycleWebDevice());
+		this.railDeviceBtn.addClass("is-html-only-control");
 		this.sideNav.addSeparator();
 		// 全沉浸入口保留在工具栏；点按唤出后同一枚 scan 按钮可直接退出。
 		this.fullImmersionBtn = this.sideNav.addIconButton("scan", "全沉浸模式", () => this.toggleFullImmersion());
@@ -2134,13 +2412,14 @@ export class UNreaderView extends ItemView {
 		this.setupAnnoAutoClose();
 		this.syncNativeHeader();
 		// 窄屏首次渲染后再次校正一次（布局尚未完成时 clientWidth 可能为 0）
-		requestAnimationFrame(() => this.updatePinButtonVisibility());
+		window.requestAnimationFrame(() => this.updatePinButtonVisibility());
 	}
 
 	private showEmpty(): void {
 		this.loadingToken++;
 		this.rootEl?.removeClass("has-book");
 		this.rootEl?.removeClass("is-feed-source");
+		this.rootEl?.removeClass("is-html-source");
 		this.endRestoring();
 		this.rootEl?.addClass("is-empty");
 		this.emptyEl?.show();
@@ -2258,7 +2537,7 @@ export class UNreaderView extends ItemView {
 
 	private getDevicePresetId(): string | null {
 		try {
-			return localStorage.getItem(UNreaderView.DEVICE_PRESET_KEY);
+			return window.localStorage.getItem(UNreaderView.DEVICE_PRESET_KEY);
 		} catch {
 			return null;
 		}
@@ -2266,8 +2545,8 @@ export class UNreaderView extends ItemView {
 
 	private setDevicePresetId(id: string | null): void {
 		try {
-			if (id) localStorage.setItem(UNreaderView.DEVICE_PRESET_KEY, id);
-			else localStorage.removeItem(UNreaderView.DEVICE_PRESET_KEY);
+			if (id) window.localStorage.setItem(UNreaderView.DEVICE_PRESET_KEY, id);
+			else window.localStorage.removeItem(UNreaderView.DEVICE_PRESET_KEY);
 		} catch { /* ignore */ }
 	}
 
@@ -2411,7 +2690,7 @@ export class UNreaderView extends ItemView {
 				ext: f.extension.toLowerCase(),
 				read: () => this.app.vault.readBinary(f),
 			}));
-		new BackgroundImageModal(this.app, [...shared, ...library], pick => this.applyBackgroundImage(pick, field)).open();
+		new BackgroundImageModal(this.app, [...shared, ...library], pick => void this.applyBackgroundImage(pick, field)).open();
 	}
 
 	/** 从系统文件选择器挑选背景图片：选定后与库内来源走同一应用流程
@@ -2419,7 +2698,7 @@ export class UNreaderView extends ItemView {
 	private pickSystemImage(field: "backgroundImage" | "backgroundImageLight" | "backgroundImageDark"): void {
 		// 清理上次取消对话框留下的隐藏 input
 		this.contentEl.querySelectorAll("input.unreader-bg-file-input").forEach(el => el.remove());
-		const input = document.createElement("input");
+		const input = createEl("input");
 		input.type = "file";
 		input.accept = "image/png,image/jpeg,image/webp,image/gif,image/bmp,image/svg+xml";
 		input.addClass("unreader-bg-file-input");
@@ -2445,7 +2724,7 @@ export class UNreaderView extends ItemView {
 			if (!ref) {
 				const buf = await pick.read();
 				if (buf.byteLength > 2 * 1024 * 1024) {
-					new Notice("图片超过 2MB，请选择较小的图片");
+					new Notice("图片体积超过 2 兆字节，请选择较小的图片");
 					return;
 				}
 				ref = await this.plugin.resourceStore.importImage({ name: pick.name, ext: pick.ext, buf });
@@ -2510,7 +2789,7 @@ export class UNreaderView extends ItemView {
 	private pickSystemFont(): void {
 		// 清理上次取消对话框留下的隐藏 input（取消不会触发 change，句柄留在这里）
 		this.contentEl.querySelectorAll("input.unreader-font-file-input").forEach(el => el.remove());
-		const input = document.createElement("input");
+		const input = createEl("input");
 		input.type = "file";
 		input.accept = ".ttf,.otf,.woff,.woff2,font/ttf,font/otf,font/woff,font/woff2";
 		input.addClass("unreader-font-file-input");
@@ -2546,12 +2825,12 @@ export class UNreaderView extends ItemView {
 			// 报「太大」，在移动端就是白白制造一次内存峰值（vault 文件有 stat.size、
 			// 系统文件有 File.size，两边都拿得到）。没有 size 时才退化为读完再判。
 			if (!inPlace && pick.size != null && pick.size > MAX_FONT_BYTES) {
-				new Notice("字体文件超过 40MB，请换用体积更小的版本");
+				new Notice("字体文件超过 40 兆字节，请换用体积更小的版本");
 				return;
 			}
 			const buf = inPlace ? null : await pick.read();
 			if (buf && buf.byteLength > MAX_FONT_BYTES) {
-				new Notice("字体文件超过 40MB，请换用体积更小的版本");
+				new Notice("字体文件超过 40 兆字节，请换用体积更小的版本");
 				return;
 			}
 			const path = inPlace ?? await importFontFile(this.app, FONTS_FOLDER, pick.name, ext, buf as ArrayBuffer);
@@ -2619,21 +2898,30 @@ export class UNreaderView extends ItemView {
 			if (!name || !name.trim()) return;
 			const trimmed = name.trim().slice(0, 32);
 			const existing = this.plugin.presetStore.list().find(p => p.name === trimmed);
-			if (existing) {
-				if (!window.confirm(`已存在名为“${trimmed}”的预设，是否覆盖？`)) return;
-				existing.appearance = { ...this.plugin.settings.appearance };
-				existing.createdAt = Date.now();
-				this.plugin.presetStore.upsert(existing);
-			} else {
-				this.plugin.presetStore.upsert({
-					id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-					name: trimmed,
-					appearance: { ...this.plugin.settings.appearance },
-					createdAt: Date.now(),
-				});
-			}
-			new Notice(`已保存预设“${trimmed}”`);
-			if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+			// 覆盖已有预设是破坏性操作，先问一次。`window.confirm()` 被上架规则禁止
+			// （同步阻塞、样式与 Obsidian 无关），统一走 ConfirmModal。
+			void (async (): Promise<void> => {
+				if (existing && !await confirmAction(this.app, {
+					title: "覆盖预设",
+					body: `已存在名为“${trimmed}”的预设，是否覆盖？`,
+					cta: "覆盖",
+					destructive: true,
+				})) return;
+				if (existing) {
+					existing.appearance = { ...this.plugin.settings.appearance };
+					existing.createdAt = Date.now();
+					this.plugin.presetStore.upsert(existing);
+				} else {
+					this.plugin.presetStore.upsert({
+						id: `${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+						name: trimmed,
+						appearance: { ...this.plugin.settings.appearance },
+						createdAt: Date.now(),
+					});
+				}
+				new Notice(`已保存预设“${trimmed}”`);
+				if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+			})();
 		});
 		modal.open();
 	}
@@ -2666,7 +2954,7 @@ export class UNreaderView extends ItemView {
 		// 若面板打开，同步其当前值（延后到 change 事件链外重开，
 		// 避免下拉框在自身 change 处理中被销毁重建导致后续无法选择）
 		if (this.appearancePanel?.isOpen()) {
-			setTimeout(() => {
+			window.setTimeout(() => {
 				if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
 			}, 0);
 		}
@@ -2676,11 +2964,19 @@ export class UNreaderView extends ItemView {
 	private deleteAppearancePreset(id: string): void {
 		const preset = this.plugin.presetStore.get(id);
 		if (!preset) return;
-		if (!window.confirm(`确定删除预设“${preset.name}”？`)) return;
-		void this.plugin.presetStore.remove(id);
-		if (this.getDevicePresetId() === id) this.setDevicePresetId(null);
-		new Notice(`已删除预设“${preset.name}”`);
-		if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+		void (async (): Promise<void> => {
+			const ok = await confirmAction(this.app, {
+				title: "删除预设",
+				body: `确定删除预设“${preset.name}”？`,
+				cta: "删除",
+				destructive: true,
+			});
+			if (!ok) return;
+			void this.plugin.presetStore.remove(id);
+			if (this.getDevicePresetId() === id) this.setDevicePresetId(null);
+			new Notice(`已删除预设“${preset.name}”`);
+			if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+		})();
 	}
 
 	private renameAppearancePreset(id: string): void {
@@ -2700,12 +2996,20 @@ export class UNreaderView extends ItemView {
 	private updateAppearancePreset(id: string): void {
 		const preset = this.plugin.presetStore.get(id);
 		if (!preset) return;
-		if (!window.confirm(`用当前外观覆盖预设“${preset.name}”？`)) return;
-		preset.appearance = { ...this.plugin.settings.appearance };
-		preset.createdAt = Date.now();
-		this.plugin.presetStore.upsert(preset);
-		new Notice(`已更新预设“${preset.name}”`);
-		if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+		void (async (): Promise<void> => {
+			const ok = await confirmAction(this.app, {
+				title: "覆盖预设",
+				body: `用当前外观覆盖预设“${preset.name}”？`,
+				cta: "覆盖",
+				destructive: true,
+			});
+			if (!ok) return;
+			preset.appearance = { ...this.plugin.settings.appearance };
+			preset.createdAt = Date.now();
+			this.plugin.presetStore.upsert(preset);
+			new Notice(`已更新预设“${preset.name}”`);
+			if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+		})();
 	}
 
 	private refreshSideNavCounts(): void {
@@ -2726,9 +3030,9 @@ export class UNreaderView extends ItemView {
 	/** 脚注气泡：锚定在注标旁的干净弹窗，只有脚注内容，无头部/按钮/提示 */
 	private mountFootnoteBubble(anchor?: { x: number; y: number }): { backdrop: HTMLElement; bubble: HTMLElement; content: HTMLElement } {
 		this.closeFootnotePopup();
-		const backdrop = document.createElement("div");
+		const backdrop = createDiv();
 		backdrop.className = "unreader-footnote-backdrop unreader-footnote-bubble-backdrop";
-		const bubble = document.createElement("div");
+		const bubble = createDiv();
 		bubble.className = "unreader-footnote-bubble";
 		const content = bubble.createDiv({ cls: "unreader-footnote-content" });
 		backdrop.appendChild(bubble);
@@ -2764,7 +3068,7 @@ export class UNreaderView extends ItemView {
 			dismiss();
 		};
 		this.footnoteBackdrop = backdrop;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			backdrop.addClass("is-open");
 			this.positionFootnoteBubble(bubble, anchor);
 		});
@@ -2810,7 +3114,7 @@ export class UNreaderView extends ItemView {
 		this.footnoteAutoCloseTimer = window.setTimeout(() => {
 			this.footnoteAutoCloseTimer = null;
 			this.closeFootnotePopup();
-		}, 350) as unknown as number;
+		}, 350);
 	}
 
 	private cancelFootnoteAutoClose(): void {
@@ -2887,7 +3191,7 @@ export class UNreaderView extends ItemView {
 		this.footnoteBackdrop = null;
 		backdrop.removeClass("is-open");
 		const view = this.activeFootnoteView;
-		setTimeout(() => {
+		window.setTimeout(() => {
 			if (view) {
 				try {
 					view.close();
@@ -3076,7 +3380,7 @@ export class UNreaderView extends ItemView {
 
 	private dismissHover(): void {
 		if (this.hoverRaf) {
-			cancelAnimationFrame(this.hoverRaf);
+			window.cancelAnimationFrame(this.hoverRaf);
 			this.hoverRaf = 0;
 		}
 		if (this.hoverAnchorEl) {
@@ -3124,12 +3428,15 @@ export class UNreaderView extends ItemView {
 		return !!(this.appearancePanel?.isOpen() || this.sideNav?.isPanelOpen() || annoBlocking);
 	}
 
-	/** 滚动方向 → 常态隐藏/唤出（下滑隐藏、上滑唤出）。全沉浸完全冻结。
+	/** 滚动方向 → 常态隐藏/唤出。全沉浸完全冻结。
 	 *
-	 *  两个开关各管一段、互不连坐（本轮修——用户报「滑动隐藏的设计没有涵盖到
-	 *  移动端，原生界面还是按自己那套隐现」）：
-	 *   · 「滑动自动隐藏」管**插件工具层**（`chrome-hidden`）；
-	 *   · 「接管原生界面」管 **Obsidian 页首/底栏**（`nativeScrollHidden`）。
+	 *  两个开关各管一段、互不连坐：
+	 *   · 「滑动自动隐藏」管**插件工具层**（`chrome-hidden`，下滑藏、上滑唤）；
+	 *   · 「接管原生界面」管 **Obsidian 页首/底栏**（`nativeScrollHidden`）——
+	 *     只**向下滚动置藏**、**向上滚动不复位**（用户 2026-09-20 要求：「开着接管
+	 *     原生界面时，那些工具元素应该随着向下滚动隐藏，但是不应该随着向上滚动出现，
+	 *     就像桌面端一样」）。被滚动藏起后只由显式唤出恢复：点按正文空白 / 退出视图 /
+	 *     外观变更 / 退出全沉浸。
 	 *  只开后者时，工具栏保持常显、原生界面照样随滚动让位；
 	 *  两个都关时滚动什么都不做。 */
 	private handleScrollActivity(direction: "up" | "down"): void {
@@ -3151,7 +3458,8 @@ export class UNreaderView extends ItemView {
 			if (takeOverNative) this.nativeScrollHidden = true;
 		} else {
 			if (scrollHide) this.rootEl?.removeClass("chrome-hidden");
-			if (takeOverNative) this.nativeScrollHidden = false;
+			// 「接管原生界面」不在这里复位：向上滚动不把原生界面顶出来（只藏不自动显）。
+			// 复位只走显式唤出：handleTapZone / releaseNativeNav / 外观变更 / 退出全沉浸。
 		}
 		this.syncNativeNav(direction === "down" ? "scroll-down" : "scroll-up");
 	}
@@ -3311,7 +3619,7 @@ export class UNreaderView extends ItemView {
 			const container = (this.app as unknown as { dom?: { appContainerEl?: HTMLElement } })
 				.dom?.appContainerEl ?? null;
 			const name = (n: Node): string => {
-				if (!(n instanceof HTMLElement)) return "";
+				if (!n.instanceOf(HTMLElement)) return "";
 				if (n.hasClass("mobile-navbar")) return "底栏 mobile-navbar";
 				if (n.hasClass("mobile-toolbar") || n.hasClass("mobile-toolbar-spacer")) return "工具条 mobile-toolbar";
 				return "";
@@ -4080,7 +4388,7 @@ export class UNreaderView extends ItemView {
 		this.progressTopTimer = window.setTimeout(() => {
 			this.progressTopTimer = null;
 			this.syncProgressTop();
-		}, 360) as unknown as number;
+		}, 360);
 	}
 
 	/** 页首背景板诊断的「上次快照 + 上次记录时刻」（节流用，见 logHeaderBandDiag） */
@@ -4207,7 +4515,11 @@ export class UNreaderView extends ItemView {
 	 *  异常时按「活动」处理：宁可漏清理（有 layout-change 通道兜）也不误伤自己的沉浸态。 */
 	private isSelfActive(): boolean {
 		try {
-			const active = this.app.workspace.activeLeaf;
+			// `Workspace.activeLeaf` 官方标了 deprecated（推荐 getActiveViewOfType），但这里判的
+			// 是「**本 leaf** 是否活动」：同一 leaf 换成别的视图时活动视图已经不是 UNreaderView
+			// 了，getActiveViewOfType 在那条路上退回不了「非活动」，而这正是我们要的 false。
+			// 按结构类型读字段，理由记在上面。
+			const active = (this.app.workspace as unknown as { activeLeaf?: WorkspaceLeaf | null }).activeLeaf;
 			if (active?.view === this) return true;
 			// activeLeaf 明确指向别的视图 → 本视图已失活，判据确定
 			if (active?.view) return false;
@@ -4288,6 +4600,9 @@ export class UNreaderView extends ItemView {
 		this.rootEl?.addClass("chrome-hidden");
 		this.rootEl?.removeClass("chrome-revealed");
 		this.syncFullImmersionPresentation();
+		// 先压哨兵再同步原生导航：Android 返回键的处理器读的是 leaf 历史，
+		// 任何一处 async 抖动都会让「按返回」落回官方的「再按一次退出 app」。
+		this.pushImmersionHistoryGuard();
 		this.syncNativeNav("full-immersion-enter");
 	}
 
@@ -4334,7 +4649,72 @@ export class UNreaderView extends ItemView {
 		this.rootEl?.removeClass("full-immersion-revealed");
 		this.rootEl?.removeClass("full-immersion-show-toc");
 		this.rootEl?.removeClass("full-immersion-show-progress");
+		this.popImmersionHistoryGuard();
 		this.syncFullImmersionPresentation();
+	}
+
+	/** 进入全沉浸时压一条「返回哨兵」到本 leaf 的导航历史。
+	 *
+	 *  ## 为什么需要它
+	 *
+	 *  手机端的「返回」不是一条插件能直接订阅的事件：
+	 *    · Android 系统返回键由 Obsidian 自己接（Capacitor `backButton`），处理顺序是
+	 *      「关模态框 → 收侧栏 → `activeLeaf.history.back()` → 否则提示再按一次退出 app」；
+	 *    · 移动端页首的返回箭头、桌面端 `app:go-back` 命令同样走 `leaf.history.back()`；
+	 *    · `window.history.back/forward/go` 也被官方重定向到同一个 leaf 历史。
+	 *  三条路最终都是 `leaf.history.back()`，而它只在 `backHistory` 非空时才生效。
+	 *  **阅读器视图 `navigation === false`，官方从不给它记历史** —— 于是全沉浸里按返回
+	 *  要么去收侧栏、要么直接落到「再按一次退出 app」的提示上，用户在意的「先退出全沉浸」
+	 *  被整条跳过（用户报障：手机上退不出这个模式）。
+	 *
+	 *  压一条哨兵进来，`backHistory.length > 0` 立刻成立 → 官方那条 `history.back()`
+	 *  会回退到哨兵本身 → `setState` 收到带标记的状态（见那里的检测）→ 退出全沉浸。
+	 *  返回键的语义因此变成「先退全沉浸，还在书里」，再按一次才回到官方的常态处理。
+	 *
+	 *  ## 降级
+	 *
+	 *  `leaf.history` / `pushState` / `getViewState` 都是官方未公开或结构敏感的成员，
+	 *  任何一步取不到就**静默跳过**：最坏结果是「手机返回不再能退出全沉浸」，
+	 *  绝不能影响进入全沉浸本身，也绝不能抛到调用方。 */
+	private pushImmersionHistoryGuard(): void {
+		if (this.immersionHistoryGuard) return;
+		try {
+			const leaf = this.leaf as unknown as {
+				getViewState?: () => Record<string, unknown>;
+				getEphemeralState?: () => unknown;
+				history?: { pushState?: (state: unknown) => void };
+			} | null | undefined;
+			const history = leaf?.history;
+			if (!leaf || typeof history?.pushState !== "function") return;
+			const viewState = leaf.getViewState?.();
+			if (!viewState || typeof viewState !== "object") return;
+			const inner = viewState.state && typeof viewState.state === "object"
+				? viewState.state as Record<string, unknown>
+				: {};
+			const entry = {
+				title: this.titleText || "全沉浸",
+				icon: "scan",
+				state: { ...viewState, state: { ...inner, [IMMERSION_HISTORY_GUARD_KEY]: true } },
+				eState: typeof leaf.getEphemeralState === "function" ? leaf.getEphemeralState() : null,
+			};
+			history.pushState(entry);
+			this.immersionHistoryGuard = entry;
+		} catch { /* ignore */ }
+	}
+
+	/** 退出全沉浸时回收哨兵：留在栈里的话，用户之后按返回会先「回到哨兵」——
+	 *  表现为返回键白按一次（视图原地重放一遍）。只在它仍是栈顶时回收：
+	 *  全沉浸期间若已发生过别的导航，栈顶就不是我们这一条了，动它会破坏官方历史。 */
+	private popImmersionHistoryGuard(): void {
+		const guard = this.immersionHistoryGuard;
+		this.immersionHistoryGuard = null;
+		if (!guard) return;
+		try {
+			const leaf = this.leaf as unknown as { history?: { backHistory?: unknown[] } } | null | undefined;
+			const back = leaf?.history?.backHistory;
+			if (!Array.isArray(back)) return;
+			if (back[back.length - 1] === guard) back.pop();
+		} catch { /* ignore */ }
 	}
 
 	/** 供命令面板/快捷键使用；进入与退出共用同一条路径。 */
@@ -4345,9 +4725,11 @@ export class UNreaderView extends ItemView {
 
 	/**
 	 * 同步功能轨上「开关型」按钮的**作用中**高亮：目录 / 标注列表 / 阅读外观 / 搜索正文
-	 * 各自对应的面板或浮层开着时，那枚按钮常亮（样式与沉浸模式按钮同一套 `.is-active`）。
+	 * 各自对应的面板或浮层开着时，那枚按钮常亮（样式与沉浸模式按钮同一套 `.is-active`）；
+	 * 星标（Feed 专属）同理 —— 它没有面板，亮的是「当前文章已收藏」这个内容状态。
 	 *
-	 * 状态一律**现读**（面板自己的 `isOpen()` / 目录面板的 `isPanelOpen()`），不在各调用点
+	 * 状态一律**现读**（面板自己的 `isOpen()` / 目录面板的 `isPanelOpen()` / 星标读当前
+	 * 文章的 `state.starredAt`），不在各调用点
 	 * 分别切类 —— 面板自带关闭按钮、点外面、鼠标移开自动关、重渲染这些路径都会绕过调用方，
 	 * 漏一条就会留下「面板已关、按钮还亮着」的假高亮。
 	 * 各面板在开合的唯一收口处回调过来（`AnnotationsPanel.show/hide`、`AppearancePanel.open/close`、
@@ -4363,6 +4745,46 @@ export class UNreaderView extends ItemView {
 		this.railAnnoBtn?.toggleClass("is-active", panelOpen && !shelfMode && !feedsMode);
 		this.railAppearanceBtn?.toggleClass("is-active", !!this.appearancePanel?.isOpen());
 		this.railSearchBtn?.toggleClass("is-active", this.searchOpen);
+		// 星标：已收藏 = 实心星 + 高亮底（`.is-starred` 只加图标填充，颜色沿用 `.is-active`）；
+		// 无障碍名也跟着状态走 —— 读屏与悬浮提示读的是「点下去会发生什么」。
+		const starred = this.currentFeedEntry?.state.starredAt != null;
+		this.railStarBtn?.toggleClass("is-active", starred);
+		this.railStarBtn?.toggleClass("is-starred", starred);
+		this.railStarBtn?.setAttribute("aria-label", starred ? "取消收藏" : "收藏文章");
+		this.syncDeviceButton();
+	}
+
+	/** 「阅读设备」按钮：点击按档位表循环（自动 → 手机 → 平板 → 桌面 → 自动）。
+	 *  只有本地 HTML（网页原样通道）才看得到这枚按钮（CSS 按 `is-html-source` 收显），
+	 *  所以这里不必再判书型；档位本身也只对 webLayout 生效（见 adapter.setWebDevice）。 */
+	private cycleWebDevice(): void {
+		const next = nextWebDevice(this.adapter.getWebDevice());
+		this.adapter.setWebDevice(next);
+		this.plugin.settings.webDeviceMode = next;
+		void this.plugin.persistData();
+		this.syncDeviceButton();
+	}
+
+	/** 设备按钮的图标与无障碍名跟随当前档位（图标即档位：手机/平板/桌面），
+	 *  钉了档位（非 auto）时点亮 —— 「跟随窗口宽度」与「钉死成某台设备」是两种状态，
+	 *  不给区分的常亮按钮在手机上没有可读性。 */
+	private syncDeviceButton(): void {
+		const btn = this.railDeviceBtn;
+		if (!btn) return;
+		const cur = this.adapter.getWebDevice();
+		const step = WEB_DEVICE_STEPS[cur];
+		// 只有 auto 的 `monitor-smartphone` 算新图标（较新的 lucide 才有），
+		// 其余三枚都是 lucide 早期就有的老名字；统一退到最老的 `monitor`
+		paintIcon(btn, step.icon, "monitor");
+		btn.setAttribute("aria-label", `阅读设备：${step.label} · 点击切换`);
+		btn.toggleClass("is-active", cur !== "auto");
+	}
+
+	/** root 上的 `is-html-source` 类：设备模式按钮的显隐唯一判据（见 styles.css）。
+	 *  判据是**当前这本**是不是网页原样通道（同一个 adapter 会换书，所以不能只在
+	 *  视图创建时算一次）；与 `is-feed-source` 同一时机：开书落定后加、清空时摘。 */
+	private syncHtmlSourceClass(): void {
+		this.rootEl?.toggleClass("is-html-source", this.adapter.isWebLayout());
 	}
 
 	/** 快速打开本插件的设置页（Obsidian 设置 → UNreader） */
@@ -4440,7 +4862,7 @@ export class UNreaderView extends ItemView {
 		if (!file) return;
 		try { this.hoverAnchorEl?.remove(); } catch { // ignore
 		}
-		this.hoverAnchorEl = document.createElement("div");
+		this.hoverAnchorEl = createDiv();
 		this.hoverAnchorEl.className = "unreader-hover-anchor";
 		// position:absolute / pointer-events:none 由 .unreader-hover-anchor 类提供（styles.css）
 		try {
@@ -4469,7 +4891,7 @@ export class UNreaderView extends ItemView {
 			hoverParent: this,
 			targetEl: this.hoverAnchorEl,
 			linktext,
-		} as unknown as Record<string, unknown>);
+		});
 	}
 
 	private showNativePreview(hl: StoredHighlight, anchorEl: HTMLElement): void {
@@ -4477,7 +4899,7 @@ export class UNreaderView extends ItemView {
 		if (!file) return;
 		try { this.hoverAnchorEl?.remove(); } catch { // ignore
 		}
-		this.hoverAnchorEl = document.createElement("div");
+		this.hoverAnchorEl = createDiv();
 		this.hoverAnchorEl.className = "unreader-hover-anchor";
 		// position:absolute / pointer-events:none 由 .unreader-hover-anchor 类提供（styles.css）
 		const rect = anchorEl.getBoundingClientRect();
@@ -4497,7 +4919,7 @@ export class UNreaderView extends ItemView {
 			hoverParent: this,
 			targetEl: this.hoverAnchorEl,
 			linktext: `${this.notePath}#^hl${hl.id}`,
-		} as unknown as Record<string, unknown>);
+		});
 	}
 
 	/* ---------------- highlight hover preview / click jump ---------------- */
@@ -4513,7 +4935,7 @@ export class UNreaderView extends ItemView {
 		// 若已有 range，直接选中并弹出；否则仅跳转后由 click 通路处理
 		if (range) {
 			try {
-				const doc = range.startContainer.ownerDocument as Document | null;
+				const doc = range.startContainer.ownerDocument;
 				if (doc?.getSelection) {
 					const sel = doc.getSelection();
 					if (sel) {
@@ -4558,8 +4980,8 @@ export class UNreaderView extends ItemView {
 			return;
 		}
 		if (this.hoveredId === hl.id && this.hoverPopover) return;
-		if (this.hoverRaf) cancelAnimationFrame(this.hoverRaf);
-		this.hoverRaf = requestAnimationFrame(() => {
+		if (this.hoverRaf) window.cancelAnimationFrame(this.hoverRaf);
+		this.hoverRaf = window.requestAnimationFrame(() => {
 			this.hoverRaf = 0;
 			if (!hl) return;
 			this.hoveredId = hl.id;
@@ -4578,7 +5000,7 @@ export class UNreaderView extends ItemView {
 		this.selectionToolbar.hide();
 		// 自动选中整块高亮文本
 		try {
-			const rangeDoc = (hit.range.startContainer.ownerDocument as Document | null) ?? (e.target as HTMLElement)?.ownerDocument ?? null;
+			const rangeDoc = (hit.range.startContainer.ownerDocument) ?? (e.target as HTMLElement)?.ownerDocument ?? null;
 			if (rangeDoc?.getSelection) {
 				const sel = rangeDoc.getSelection();
 				if (sel) {
@@ -4644,15 +5066,20 @@ export class UNreaderView extends ItemView {
 				const target = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>("a[href]") : null;
 				const href = target?.href ?? "";
 				if (/^https?:/i.test(href)) {
+					// **只吞掉这次点击，不在这里打开**：打开动作已收口到引擎的
+					// frame 点击链路（`engineAdapter.handleAnchorTap` → `externalLink`），
+					// 四种源共用一条；这里再 open 一次就是双开（系统浏览器弹两个标签）。
+					// 保留 preventDefault/stopPropagation：① 与引擎那条同源的「绝不让
+					// 章节 iframe 自己导航」双保险；② 不让这次点击继续落到下面
+					// 「命中高亮 → 弹标注气泡」的分支上（点链接不该弹高亮气泡）。
 					e.preventDefault();
 					e.stopPropagation();
-					this.openExternalUrl(href);
 					return;
 				}
 			}
 			const hit = this.adapter.getHighlightAt((e as MouseEvent).clientX, (e as MouseEvent).clientY);
 			if (hit && this.annotations.highlights.some(h => h.anchor === hit.anchor)) {
-				this.handleAnnotationClick(e as MouseEvent);
+				this.handleAnnotationClick(e);
 				return;
 			}
 			// 点击非高亮区域，若高亮气泡处于显示态则关闭（点击其他地方自动关闭）
@@ -4660,7 +5087,7 @@ export class UNreaderView extends ItemView {
 			// 模态框开着时不把焦点往书页里拉（同 focusContent 的判据，见 core/modalFocusGate）
 			if (!hasCoreModal()) doc.defaultView?.focus();
 		});
-		doc.addEventListener("mousemove", e => this.handleAnnotationHover(e as MouseEvent, doc));
+		doc.addEventListener("mousemove", e => this.handleAnnotationHover(e, doc));
 		// mouseleave 不主动关闭原生弹窗，交由官方距离判定，避免移向弹窗时消失
 		doc.addEventListener("keyup", e => {
 			if (!e.ctrlKey && !e.metaKey) 
@@ -4669,7 +5096,7 @@ export class UNreaderView extends ItemView {
 		doc.addEventListener("pointerdown", () => {
 		});
 		doc.addEventListener("pointerup", () => {
-			setTimeout(() => this.captureSelection(doc, index), 0);
+			window.setTimeout(() => this.captureSelection(doc, index), 0);
 		});
 		doc.addEventListener("scroll", () => {
 			// 编辑评论时不让路：键盘弹起会让容器滚动被 clamp，书页跟着「滚动」一次，
@@ -4681,16 +5108,16 @@ export class UNreaderView extends ItemView {
 		doc.addEventListener("selectionchange", () => this.mirrorSelectionFrom(doc));
 	}
 
-	private openExternalUrl(url: string): void {
-		if (!/^https?:/i.test(url)) return;
-		if (Platform.isDesktopApp) {
-			try {
-				const { shell } = require("electron") as { shell: { openExternal: (value: string) => Promise<void> } };
-				void shell.openExternal(url);
-				return;
-			} catch { /* 回退浏览器 */ }
+	/** Feed 文章的「阅读原文」：入口在功能轨按钮上，点击直接交系统默认浏览器。
+	 *  正文里刻意不再注入这条链接 —— `srcdoc` iframe 内点击必须靠事件拦截才能
+	 *  阻止导航，撤掉后这一条链路的复杂度归零。 */
+	private openCurrentFeedOriginal(): void {
+		const url = this.currentFeedEntry?.url;
+		if (!url) {
+			new Notice("这篇文章没有原文链接");
+			return;
 		}
-		window.open(url, "_blank", "noopener,noreferrer");
+		openExternalLink(url);
 	}
 
 	/* ---------------- 主文档选区镜像 ---------------- */
@@ -4698,7 +5125,7 @@ export class UNreaderView extends ItemView {
 	private mirrorSelectionFrom(doc: Document): void {
 		if (this.mirrorPending) return;
 		this.mirrorPending = true;
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.mirrorPending = false;
 			if (!this.rootEl?.isConnected) return;
 			const sel = doc.getSelection();
@@ -4721,7 +5148,7 @@ export class UNreaderView extends ItemView {
 			return;
 		}
 		if (!this.mirrorEl || !this.mirrorEl.isConnected) {
-			this.mirrorEl = document.createElement("span");
+			this.mirrorEl = createSpan();
 			this.mirrorEl.setAttribute("aria-hidden", "true");
 			// 全部离屏样式在 .unreader-clip-mirror 类里（styles.css）
 			this.mirrorEl.className = "unreader-clip-mirror";
@@ -5081,8 +5508,11 @@ export class UNreaderView extends ItemView {
 			cancelable: true,
 		});
 		try {
-			Object.defineProperty(clone, "keyCode", { get: () => e.keyCode });
-			Object.defineProperty(clone, "which", { get: () => e.keyCode });
+			// `keyCode` / `which` 已被标准废弃，但 Obsidian 自己的热键链仍在读它们 ——
+			// 这里转发正是为此。按结构类型取值，别让这条「不得不读」一直挂在废弃清单里。
+			const legacy = e as unknown as { keyCode?: number };
+			Object.defineProperty(clone, "keyCode", { get: () => legacy.keyCode });
+			Object.defineProperty(clone, "which", { get: () => legacy.keyCode });
 			// 标记合成事件：window 级兜底翻页监听据此跳过，防止无限转发循环
 			(clone as KeyboardEvent & { __unreaderForwarded?: boolean }).__unreaderForwarded = true;
 		} catch { /* ignore */ }
@@ -5195,6 +5625,17 @@ export class UNreaderView extends ItemView {
 		const ev = e as KeyboardEvent & { __unreaderHandled?: boolean };
 		if (ev.__unreaderHandled) return;
 		ev.__unreaderHandled = true;
+		// Esc：全沉浸的键盘出口。宿主焦点那一半已由 onOpen 的 window keydown 处理，
+		// 这里补的是**焦点在书页 iframe 内**的一半 —— iframe 的键盘事件不冒泡到宿主
+		// window，既到不了官方 keymap 也到不了那条兜底，用户按 Esc 毫无反应。
+		// 模态框开着时不抢（先让官方关掉弹窗，再按一次才退模式）。
+		if (e.key === "Escape") {
+			if (this.fullImmersion && !hasCoreModal()) {
+				e.preventDefault();
+				this.exitFullImmersion();
+			}
+			return;
+		}
 		// 章节级快捷键：Alt / Ctrl / Cmd + 左右箭头 → 上下章，即使有修饰键也优先处理
 		if ((e.altKey || e.ctrlKey || e.metaKey) && (e.key === "ArrowLeft" || e.key === "ArrowRight")) {
 			e.preventDefault();
@@ -5271,7 +5712,7 @@ export class UNreaderView extends ItemView {
 	private wireFrameDoc(doc: Document): void {
 		if ((doc as unknown as { __unreaderWired?: boolean }).__unreaderWired) return;
 		(doc as unknown as { __unreaderWired?: boolean }).__unreaderWired = true;
-		doc.addEventListener("mousemove", e => this.handleAnnotationHover(e as MouseEvent, doc));
+		doc.addEventListener("mousemove", e => this.handleAnnotationHover(e, doc));
 		// mouseleave 不主动关闭原生弹窗，交由官方距离判定，避免移向弹窗时消失
 		doc.addEventListener("keyup", e => {
 			if (!e.ctrlKey && !e.metaKey) 

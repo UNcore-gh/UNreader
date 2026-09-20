@@ -123,8 +123,8 @@
    transform 0.3s ease-in-out），让插件元素与原生底栏/页首同起同落。 */
 .unreader-root.chrome-hidden .unreader-back-btn,
 .unreader-root.chrome-hidden .unreader-nav .unreader-nav-page {
-	opacity: 0 !important;
-	pointer-events: none !important;
+	opacity: 0;
+	pointer-events: none;
 }
 
 
@@ -143,50 +143,53 @@
 .unreader-root.is-full-immersion .unreader-highlight-popover,
 .unreader-root.is-full-immersion .unreader-bookmark-inline,
 .unreader-root.is-full-immersion .unreader-chapter-hint {
-	display: none !important;
-	pointer-events: none !important;
+	display: none;
+	pointer-events: none;
 }
 
 .unreader-root.is-full-immersion .unreader-nav-nodes {
-	opacity: 0 !important;
-	visibility: hidden !important;
-	pointer-events: none !important;
+	opacity: 0;
+	visibility: hidden;
+	pointer-events: none;
 }
 
 .unreader-root.is-full-immersion:not(.full-immersion-show-progress) .unreader-progress {
-	display: none !important;
+	display: none;
 }
 
 /* 全沉浸允许保留右缘目录短轨与其正常面板；面板关闭后短轨仍在，
    但没有任何隐藏的点击热区。 */
 .unreader-root.is-full-immersion.full-immersion-show-toc .unreader-nav-nodes {
-	opacity: 1 !important;
-	visibility: visible !important;
-	pointer-events: auto !important;
+	opacity: 1;
+	visibility: visible;
+	pointer-events: auto;
 }
 .unreader-root.is-full-immersion.full-immersion-show-toc .unreader-nav-panel.is-open {
-	display: flex !important;
-	pointer-events: auto !important;
+	display: flex;
+	pointer-events: auto;
 }
 
 /* 用户主动开启“点击屏幕显示界面”后，点按可临时恢复常态工具层；
    这只影响插件 chrome，不改变全沉浸目录/进度两个显式例外。 */
 .unreader-root.is-full-immersion.full-immersion-revealed .unreader-actions {
-	display: flex !important;
-	pointer-events: auto !important;
+	display: flex;
+	pointer-events: auto;
 }
 .unreader-root.is-full-immersion.full-immersion-revealed .unreader-back-btn {
-	display: flex !important;
-	pointer-events: none !important;
+	display: flex;
+	pointer-events: none;
 }
 .unreader-root.is-full-immersion.full-immersion-revealed .unreader-back-btn.is-visible {
-	pointer-events: auto !important;
+	pointer-events: auto;
 }
 .unreader-root.is-full-immersion.full-immersion-revealed .unreader-nav .unreader-nav-page.is-visible {
-	display: block !important;
-	pointer-events: auto !important;
+	display: block;
+	pointer-events: auto;
 }
 
+/* 全沉浸的唯一常驻出口：**只有一枚图标**（无底框、无圆角、无阴影、无悬停底色）。
+   它直接压在正文上，所以只靠颜色与不透明度与背景拉开层次。
+   落点（桌面）是左上角安全边距；手机/平板另有下移规则，见下方 `body.is-phone` 段。 */
 .unreader-full-immersion-exit {
 	position: absolute;
 	top: calc(env(safe-area-inset-top, 0px) + calc(6 * var(--ur-u)));
@@ -199,24 +202,37 @@
 	height: calc(24 * var(--ur-u));
 	padding: 0;
 	border: none;
-	border-radius: 50%;
-	background: var(--background-secondary);
+	background: none;
+	box-shadow: none;
 	color: var(--icon-color);
-	opacity: 0.5;
-	box-shadow: 0 2px 8px rgba(0, 0, 0, 0.10);
-	transition: opacity 0.12s ease, background-color 0.12s ease, color 0.12s ease;
+	/* 无底框后 0.5 在浅色主题的正文上几乎看不见；0.7 是「不抢正文、但一眼能找到」的档 */
+	opacity: 0.7;
+	transition: opacity 0.12s ease, color 0.12s ease;
 }
 .unreader-full-immersion-exit.is-visible {
 	display: flex;
 }
 .unreader-full-immersion-exit:hover {
-	background-color: var(--background-modifier-hover);
 	color: var(--icon-color-hover);
-	opacity: 0.9;
+	opacity: 1;
 }
 .unreader-full-immersion-exit .svg-icon {
 	width: calc(13 * var(--ur-u));
 	height: calc(13 * var(--ur-u));
+}
+
+/* 手机 / 平板：让到**页首盒下沿之下**（安全区 + 页首高）。
+
+   旧写法只有 `env(safe-area-inset-top)`，而 Android WebView 上它恒为 0
+   → 按钮落在 y≈6px、正压进系统状态栏，手指够不到（2026-09-20 用户报障）。
+   官方页首的盒高公式是 `--view-header-top-offset + --view-header-height`
+   （= `max(safe-area, 12px)` + 52px，iPhone 刘海则是 59px + 52px），落到它
+   下面既避开系统状态栏，也避开官方页首自己那排按钮；沉浸模式下页首被收走，
+   这个落点就是「页首刚让出来的那条带的下沿」，视觉上也仍是页首位置。 */
+body.is-phone .unreader-full-immersion-exit,
+body.is-tablet .unreader-full-immersion-exit {
+	top: calc(var(--view-header-top-offset, 0px) + var(--view-header-height, 52px) + calc(8 * var(--ur-u)));
+	left: calc(env(safe-area-inset-left, 0px) + calc(10 * var(--ur-u)));
 }
 
 /* ---------- 沉浸模式：顶栏白板修复 + view-header 隐藏 ----------
@@ -591,9 +607,9 @@ body .unreader-body {
 
 /* 左缘功能轨：滚动时隐藏；但钉住/展开状态下保留（用户显式固定则不打扰） */
 .unreader-root.chrome-hidden .unreader-actions:not(.is-pinned):not(.is-expanded) {
-	opacity: 0 !important;
-	pointer-events: none !important;
-	transform: translateX(calc(-100% + 6px)) translateY(-50%) !important;
+	opacity: 0;
+	pointer-events: none;
+	transform: translateX(calc(-100% + 6px)) translateY(-50%);
 	transition: opacity 0.18s ease, transform 0.2s ease;
 }
 
@@ -1215,7 +1231,11 @@ body.is-phone .unreader-stage {
 	padding-right: 0;
 }
 
-.unreader-stage foliate-view {
+/* 用插件自有类而非 `foliate-view` 标签名：自定义元素名会被 stylelint 的
+   `selector-type-no-unknown` 判为「未知类型选择器」（上架预警），而 `:is(foliate-view)`
+   只是换个写法、规则照样报。类名由 engineAdapter 在元素**创建时**打上（`FOLIATE_VIEW_CLASS`），
+   命中范围与原来的后代标签选择器完全一致。 */
+.unreader-stage .unreader-foliate-view {
 	display: block;
 	width: 100%;
 	height: 100%;
@@ -1399,6 +1419,21 @@ body.is-phone .unreader-stage {
 body:not(.is-phone) .unreader-continuous {
 	padding-left: max(var(--ur-pad-left, 64px), var(--ur-pad-center));
 	padding-right: max(var(--ur-pad-right, 42px), var(--ur-pad-center));
+}
+
+/* 网页原样通道（本地 HTML，见 core/htmlBook.ts 文件头口径③）：取消版心封顶与左右内边距。
+   网页的宽度语义是「铺满视口」—— 要不要留白、留多少，由页面自己的 `max-width`/`margin:auto`
+   决定，阅读器的边距设置在这里是纯粹的外来干预。
+   `--ur-read-max` 给一个远大于任何视口的值：上面 `--ur-pad-center` 的
+   `max(0px, calc((100% - var(--ur-read-max)) / 2))` 因此恒为 0，桌面端那条
+   `max(用户边距, 居中留白)` 两侧一起落到 0（手机端断点里的 padding 简写读的是
+   `--ur-pad-left/right`，同样被这里覆盖）。
+   用**类**而不是行内变量：行内值会跨书残留 —— 同一份阅读器「先看 EPUB 再看 HTML」时，
+   上一本按外观设置写下的 64px 会盖住这里，网页仍然带着版心。 */
+.unreader-continuous.unreader-web {
+	--ur-read-max: 100000px;
+	--ur-pad-left: 0px;
+	--ur-pad-right: 0px;
 }
 
 @supports (width: 1cqi) {
@@ -1762,7 +1797,7 @@ body:not(.is-phone) .unreader-continuous {
 	text-align: right;
 }
 
-.unreader-footnote-content foliate-view {
+.unreader-footnote-content .unreader-foliate-view {
 	display: block;
 	width: 100%;
 	height: 100%;
@@ -1779,13 +1814,15 @@ body:not(.is-phone) .unreader-continuous {
 	width: 340px;
 	max-width: calc(100% - 70px);
 	max-height: min(70vh, 540px);
-	display: flex;
 	flex-direction: column;
 	padding: 14px 16px 10px;
 	background-color: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--radius-l);
 	box-shadow: 0 8px 28px rgba(0, 0, 0, 0.14), 0 4px 12px rgba(0, 0, 0, 0.10);
+	/* 默认收起：展开态由 `.is-open` 打开（那里的 display:flex 才是生效的那条）。
+	   这里**不要**再写一条 display:flex —— 会被同一块末尾的 display:none 覆盖，
+	   是纯死声明，且 stylelint 报 "Unexpected duplicate display"。 */
 	display: none;
 	/* 内容一律在面板内滚动，杜绝窄面板下内容外溢造成“四处滑动” */
 	overflow: hidden;
@@ -2325,18 +2362,20 @@ body.is-tablet .unreader-anno-panel {
 	border-bottom-color: var(--background-modifier-border);
 }
 
-/* 同一抽屉内的书架 / 标注模式切换；不另建侧边栏，保留原有钉住与尺寸状态。 */
-.unreader-anno-brand {
-	display: flex;
-	align-items: baseline;
-	gap: 7px;
+/* 同一抽屉内的书架 / 标注模式切换；不另建侧边栏，保留原有钉住与尺寸状态。
+   头部标题 = 当前页面名（书名 / 订阅文章名），没有打开页面时才退回模式名。
+   min-width:0 + 省略号：长书名不许把右侧的模式切换与钉住按钮挤出面板。 */
+.unreader-anno-title {
+	flex: 1 1 auto;
 	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
 }
 
-.unreader-anno-mode-label {
-	font-size: var(--font-ui-smaller);
+.unreader-anno-title.is-placeholder {
+	color: var(--text-muted);
 	font-weight: 500;
-	color: var(--text-faint);
 }
 
 .unreader-anno-mode-switch {
@@ -2854,7 +2893,7 @@ body.is-tablet .unreader-anno-panel {
 }
 
 .unreader-anno-page.is-hidden {
-	display: none !important;
+	display: none;
 }
 
 /* 书签就地重命名：名称行换成输入框 */
@@ -2879,7 +2918,7 @@ body.is-tablet .unreader-anno-panel {
 }
 
 .unreader-anno-excerpt.is-hidden {
-	display: none !important;
+	display: none;
 }
 
 .unreader-anno-row--highlight {
@@ -3110,7 +3149,7 @@ body.is-tablet .unreader-anno-panel {
 }
 
 .unreader-anno-expand.is-hidden {
-	display: none !important;
+	display: none;
 }
 
 .unreader-anno-row:hover .unreader-anno-expand,
@@ -3129,8 +3168,8 @@ body.is-tablet .unreader-anno-panel {
 /* 复制成功反馈：图标短暂变为 ✓，主色强调 */
 .unreader-anno-action.is-copied {
 	color: var(--text-accent);
-	opacity: 1 !important;
-	transform: scale(1) !important;
+	opacity: 1;
+	transform: scale(1);
 }
 
 .unreader-anno-row.is-expanded {
@@ -3208,13 +3247,13 @@ body.is-tablet .unreader-anno-panel {
 }
 
 .unreader-pin-btn.is-hidden {
-	display: none !important;
+	display: none;
 }
 
 /* JS 会根据 pinThreshold 动态添加 is-hidden；此处仅保留极窄兜底 */
 @media (max-width: 380px) {
 	.unreader-pin-btn {
-		display: none !important;
+		display: none;
 	}
 }
 
@@ -3240,11 +3279,11 @@ body.is-tablet .unreader-anno-panel {
 	right: auto;
 	top: auto;
 	bottom: auto;
-	transform: none !important;
+	transform: none;
 	flex: 0 0 var(--ur-anno-w);
 	width: var(--ur-anno-w);
 	max-width: var(--ur-anno-w);
-	box-shadow: none !important;
+	box-shadow: none;
 	border-right: 1px solid rgba(0, 0, 0, 0.07);
 }
 
@@ -3301,12 +3340,12 @@ body.is-tablet .unreader-anno-panel {
 }
 
 .unreader-anno-pin.is-hidden {
-	display: none !important;
+	display: none;
 }
 
 @media (max-width: 380px) {
 	.unreader-anno-pin {
-		display: none !important;
+		display: none;
 	}
 }
 
@@ -3540,6 +3579,13 @@ body.is-mobile .unreader-kb-safe .modal {
 .unreader-actions .unreader-nav-action.is-active {
 	background-color: var(--background-modifier-active-hover);
 	color: var(--text-accent);
+}
+
+/* 星标（Feed 文章收藏）：已收藏时把描边星填实。lucide 给的 `fill="none"` 是**表现属性**，
+   任何 CSS 声明都压得住它，所以只需要一条 fill 规则；填充色取 currentColor，也就是上面
+   `.is-active` 的 `--text-accent` —— 浅色/深色/自定义主题自动跟随，不引入新颜色。 */
+.unreader-actions .unreader-nav-action.is-starred .svg-icon {
+	fill: currentColor;
 }
 
 .unreader-actions .unreader-nav-action .svg-icon {
@@ -3823,9 +3869,9 @@ body.is-tablet .unreader-search {
 /* 浮动目录面板 */
 .unreader-nav-nodes .unreader-nav-panel,
 .unreader-actions .unreader-nav-panel {
-	background-color: #ffffff !important;
-	color: #222222 !important;
-	border: none !important;
+	background-color: #ffffff;
+	color: #222222;
+	border: none;
 }
 .unreader-nav-nodes .unreader-nav-panel .unreader-nav-row,
 .unreader-nav-nodes .unreader-nav-panel .unreader-nav-row-text,
@@ -3833,64 +3879,64 @@ body.is-tablet .unreader-search {
 .unreader-actions .unreader-nav-panel .unreader-nav-row,
 .unreader-actions .unreader-nav-panel .unreader-nav-row-text,
 .unreader-actions .unreader-nav-panel .unreader-nav-row-page {
-	color: #333333 !important;
+	color: #333333;
 }
 .unreader-nav-panel .unreader-nav-row:hover {
-	background-color: #f2f2f2 !important;
+	background-color: #f2f2f2;
 }
 .unreader-nav-panel .unreader-nav-row.is-active {
-	background-color: #eef1fb !important;
-	color: #3a5bd0 !important;
+	background-color: #eef1fb;
+	color: #3a5bd0;
 }
 .unreader-nav-count {
 	/* 浅色档也必须走 token：这里是「次要但需要读」的数字，深色那条用的就是 --text-muted
 	   （写死 #8a8a8a 白底只有 3.45，且自定义浅色主题不会跟着变）。回归 npm run test:theme-audit。 */
-	color: var(--text-muted) !important;
+	color: var(--text-muted);
 }
 
 /* 左下角功能按钮轨 */
 .unreader-actions,
 .unreader-actions:hover,
 .unreader-actions.is-expanded {
-	background-color: #ffffff !important;
+	background-color: #ffffff;
 }
 .unreader-actions-trigger,
 .unreader-actions .unreader-nav-action {
-	color: #555555 !important;
+	color: #555555;
 }
 .unreader-actions-trigger:hover,
 .unreader-actions .unreader-nav-action:hover {
-	background-color: #f2f2f2 !important;
-	color: #222222 !important;
+	background-color: #f2f2f2;
+	color: #222222;
 }
 
 /* 高亮与书签标注面板（含其头部、卡片行、正文文字） */
 .unreader-anno-panel,
 .unreader-anno-panel .unreader-toc-header {
-	background-color: #ffffff !important;
-	color: #222222 !important;
-	border-right-color: rgba(0, 0, 0, 0.08) !important;
+	background-color: #ffffff;
+	color: #222222;
+	border-right-color: rgba(0, 0, 0, 0.08);
 }
 .unreader-anno-panel .unreader-toc-header {
-	border-bottom-color: rgba(0, 0, 0, 0.08) !important;
+	border-bottom-color: rgba(0, 0, 0, 0.08);
 }
 .unreader-anno-row {
-	background-color: #ffffff !important;
-	color: #333333 !important;
-	border-color: rgba(0, 0, 0, 0.08) !important;
+	background-color: #ffffff;
+	color: #333333;
+	border-color: rgba(0, 0, 0, 0.08);
 }
 .unreader-anno-row:hover {
-	background-color: #f7f7f7 !important;
-	border-color: rgba(0, 0, 0, 0.12) !important;
+	background-color: #f7f7f7;
+	border-color: rgba(0, 0, 0, 0.12);
 }
 .unreader-anno-excerpt,
 .unreader-anno-comment {
-	color: #333333 !important;
+	color: #333333;
 }
 .unreader-anno-section {
 	/* 同上：#777777 在白底是 4.48（差一点点不够 AA），且不跟随主题 —— 与深色那条统一走
 	   --text-muted（基础规则里的 --text-faint 是更弱的兜底）。 */
-	color: var(--text-muted) !important;
+	color: var(--text-muted);
 }
 
 /* ---------- 深色模式：以上浮层改用 Obsidian 深色表面，文字浅色，随主题适配 ---------- */
@@ -3901,11 +3947,11 @@ body.is-tablet .unreader-search {
 .theme-dark .unreader-actions.is-expanded,
 .theme-dark .unreader-anno-panel,
 .theme-dark .unreader-anno-panel .unreader-toc-header {
-	background-color: var(--background-secondary) !important;
-	color: var(--text-normal) !important;
-	border-right-color: var(--background-modifier-border) !important;
-	border-bottom-color: var(--background-modifier-border) !important;
-	border-color: var(--background-modifier-border) !important;
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	border-right-color: var(--background-modifier-border);
+	border-bottom-color: var(--background-modifier-border);
+	border-color: var(--background-modifier-border);
 }
 .theme-dark .unreader-nav-nodes .unreader-nav-panel .unreader-nav-row,
 .theme-dark .unreader-nav-nodes .unreader-nav-panel .unreader-nav-row-text,
@@ -3918,63 +3964,63 @@ body.is-tablet .unreader-search {
 .theme-dark .unreader-anno-row,
 .theme-dark .unreader-anno-excerpt,
 .theme-dark .unreader-anno-comment {
-	color: var(--text-normal) !important;
+	color: var(--text-normal);
 }
 .theme-dark .unreader-anno-row {
-	background-color: var(--background-primary) !important;
-	border-color: var(--background-modifier-border) !important;
+	background-color: var(--background-primary);
+	border-color: var(--background-modifier-border);
 }
 .theme-dark .unreader-nav-panel .unreader-nav-row:hover,
 .theme-dark .unreader-actions-trigger:hover,
 .theme-dark .unreader-actions .unreader-nav-action:hover,
 .theme-dark .unreader-anno-row:hover {
-	background-color: var(--background-modifier-hover) !important;
-	color: var(--text-normal) !important;
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
 }
 .theme-dark .unreader-actions .unreader-nav-action.is-active {
-	background-color: var(--background-modifier-active-hover) !important;
-	color: var(--text-accent) !important;
+	background-color: var(--background-modifier-active-hover);
+	color: var(--text-accent);
 }
 .theme-dark .unreader-nav-panel .unreader-nav-row.is-active {
-	background-color: color-mix(in srgb, var(--interactive-accent) 18%, transparent) !important;
-	color: var(--text-accent) !important;
+	background-color: color-mix(in srgb, var(--interactive-accent) 18%, transparent);
+	color: var(--text-accent);
 }
 .theme-dark .unreader-nav-panel .unreader-nav-row.is-preview {
-	background-color: var(--background-modifier-hover) !important;
+	background-color: var(--background-modifier-hover);
 }
 .theme-dark .unreader-nav-count,
 .theme-dark .unreader-anno-section {
-	color: var(--text-muted) !important;
+	color: var(--text-muted);
 }
 
 /* 外观设置面板：浅色=白色，深色=Obsidian 深色表面 */
 .unreader-appearance-panel {
-	background-color: #ffffff !important;
-	color: #222222 !important;
-	border-color: rgba(0, 0, 0, 0.09) !important;
+	background-color: #ffffff;
+	color: #222222;
+	border-color: rgba(0, 0, 0, 0.09);
 }
 .unreader-appearance-panel .unreader-appearance-header,
 .unreader-appearance-panel .unreader-appearance-color-header,
 .unreader-appearance-panel .unreader-appearance-label,
 .unreader-appearance-panel .unreader-appearance-value {
-	color: #222222 !important;
+	color: #222222;
 }
 .unreader-appearance-panel .unreader-appearance-color-text {
-	background-color: #ffffff !important;
-	color: #333333 !important;
-	border-color: rgba(0, 0, 0, 0.12) !important;
+	background-color: #ffffff;
+	color: #333333;
+	border-color: rgba(0, 0, 0, 0.12);
 }
 .unreader-appearance-panel .unreader-appearance-row[data-disabled="true"] {
-	color: #999999 !important;
+	color: #999999;
 }
 .unreader-appearance-panel .unreader-appearance-hint {
-	background-color: #f5f5f5 !important;
-	color: #555555 !important;
+	background-color: #f5f5f5;
+	color: #555555;
 }
 .unreader-appearance-panel .unreader-appearance-preset-btn {
-	background-color: #ffffff !important;
-	color: #333333 !important;
-	border-color: rgba(0, 0, 0, 0.12) !important;
+	background-color: #ffffff;
+	color: #333333;
+	border-color: rgba(0, 0, 0, 0.12);
 }
 .unreader-appearance-panel button,
 .unreader-appearance-panel .unreader-appearance-reset,
@@ -3982,17 +4028,17 @@ body.is-tablet .unreader-search {
 .unreader-appearance-panel .unreader-appearance-footer button,
 .unreader-appearance-panel .unreader-appearance-preset-btn,
 .unreader-appearance-panel .unreader-appearance-preset-btn.mod-cta {
-	background-color: #ffffff !important;
-	color: #333333 !important;
-	border-color: rgba(0, 0, 0, 0.12) !important;
+	background-color: #ffffff;
+	color: #333333;
+	border-color: rgba(0, 0, 0, 0.12);
 }
 .unreader-appearance-panel button:hover {
-	background-color: #f2f2f2 !important;
-	color: #222222 !important;
+	background-color: #f2f2f2;
+	color: #222222;
 }
 .unreader-appearance-panel .unreader-appearance-seg button.is-active {
-	background-color: #ffffff !important;
-	color: var(--text-accent) !important;
+	background-color: #ffffff;
+	color: var(--text-accent);
 	font-weight: 600;
 	box-shadow: inset 0 -2px 0 var(--interactive-accent);
 }
@@ -4002,16 +4048,16 @@ body.is-tablet .unreader-search {
 .unreader-appearance-panel .dropdown,
 .unreader-settings select,
 .unreader-settings .dropdown {
-	background-color: #ffffff !important;
-	color: #333333 !important;
-	border: 1px solid rgba(0, 0, 0, 0.12) !important;
-	background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxNCcgaGVpZ2h0PScxNCcgdmlld0JveD0nMCAwIDI0IDI0JyBmaWxsPSdub25lJyBzdHJva2U9JyUyMzQ0NDQ0NCcgc3Ryb2tlLXdpZHRoPScyLjUnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCc+PHBvbHlsaW5lIHBvaW50cz0nNiA5IDEyIDE1IDE4IDknLz48L3N2Zz4=") !important;
-	background-repeat: no-repeat !important;
-	background-position: right 8px center !important;
-	background-size: 14px !important;
+	background-color: #ffffff;
+	color: #333333;
+	border: 1px solid rgba(0, 0, 0, 0.12);
+	background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxNCcgaGVpZ2h0PScxNCcgdmlld0JveD0nMCAwIDI0IDI0JyBmaWxsPSdub25lJyBzdHJva2U9JyUyMzQ0NDQ0NCcgc3Ryb2tlLXdpZHRoPScyLjUnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCc+PHBvbHlsaW5lIHBvaW50cz0nNiA5IDEyIDE1IDE4IDknLz48L3N2Zz4=");
+	background-repeat: no-repeat;
+	background-position: right 8px center;
+	background-size: 14px;
 	-webkit-appearance: none;
 	appearance: none;
-	padding-right: 26px !important;
+	padding-right: 26px;
 }
 
 /* 钉住标注面板的按钮：钉住时用「最强对比的文字色」画图标、无背景高亮。
@@ -4019,37 +4065,37 @@ body.is-tablet .unreader-search {
    也写成 `#000000`，深色页首底（--background-secondary ≈ #161616）上图标等于隐形
    （实测 computed color = rgb(0, 0, 0)，对比度 1.09）。回归见 test:shelf-dark 的 P 组。 */
 .unreader-anno-pin.is-active {
-	background-color: transparent !important;
-	color: #000000 !important;
+	background-color: transparent;
+	color: #000000;
 }
 .theme-dark .unreader-anno-pin.is-active {
-	background-color: transparent !important;
-	color: var(--text-normal) !important;
+	background-color: transparent;
+	color: var(--text-normal);
 }
 
 /* ---------- 深色模式：外观面板随 Obsidian 深色主题适配 ---------- */
 .theme-dark .unreader-appearance-panel {
-	background-color: var(--background-secondary) !important;
-	color: var(--text-normal) !important;
-	border-color: var(--background-modifier-border) !important;
+	background-color: var(--background-secondary);
+	color: var(--text-normal);
+	border-color: var(--background-modifier-border);
 }
 .theme-dark .unreader-appearance-panel .unreader-appearance-header,
 .theme-dark .unreader-appearance-panel .unreader-appearance-color-header,
 .theme-dark .unreader-appearance-panel .unreader-appearance-label,
 .theme-dark .unreader-appearance-panel .unreader-appearance-value {
-	color: var(--text-normal) !important;
+	color: var(--text-normal);
 }
 .theme-dark .unreader-appearance-panel .unreader-appearance-color-text {
-	background-color: var(--background-primary) !important;
-	color: var(--text-normal) !important;
-	border-color: var(--background-modifier-border) !important;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	border-color: var(--background-modifier-border);
 }
 .theme-dark .unreader-appearance-panel .unreader-appearance-row[data-disabled="true"] {
-	color: var(--text-faint) !important;
+	color: var(--text-faint);
 }
 .theme-dark .unreader-appearance-panel .unreader-appearance-hint {
-	background-color: var(--background-modifier-hover) !important;
-	color: var(--text-muted) !important;
+	background-color: var(--background-modifier-hover);
+	color: var(--text-muted);
 }
 .theme-dark .unreader-appearance-panel button,
 .theme-dark .unreader-appearance-panel .unreader-appearance-reset,
@@ -4057,17 +4103,17 @@ body.is-tablet .unreader-search {
 .theme-dark .unreader-appearance-panel .unreader-appearance-footer button,
 .theme-dark .unreader-appearance-panel .unreader-appearance-preset-btn,
 .theme-dark .unreader-appearance-panel .unreader-appearance-preset-btn.mod-cta {
-	background-color: transparent !important;
-	color: var(--text-normal) !important;
-	border-color: var(--background-modifier-border) !important;
+	background-color: transparent;
+	color: var(--text-normal);
+	border-color: var(--background-modifier-border);
 }
 .theme-dark .unreader-appearance-panel button:hover {
-	background-color: var(--background-modifier-hover) !important;
-	color: var(--text-normal) !important;
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
 }
 .theme-dark .unreader-appearance-panel .unreader-appearance-seg button.is-active {
-	background-color: transparent !important;
-	color: var(--text-accent) !important;
+	background-color: transparent;
+	color: var(--text-accent);
 	font-weight: 600;
 	box-shadow: inset 0 -2px 0 var(--interactive-accent);
 }
@@ -4075,19 +4121,19 @@ body.is-tablet .unreader-search {
 .theme-dark .unreader-appearance-panel .dropdown,
 .theme-dark .unreader-settings select,
 .theme-dark .unreader-settings .dropdown {
-	background-color: var(--background-primary) !important;
-	color: var(--text-normal) !important;
-	border: 1px solid var(--background-modifier-border) !important;
-	background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxNCcgaGVpZ2h0PScxNCcgdmlld0JveD0nMCAwIDI0IDI0JyBmaWxsPSdub25lJyBzdHJva2U9JyUyM2NjY2NjYycgc3Ryb2tlLXdpZHRoPScyLjUnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCc+PHBvbHlsaW5lIHBvaW50cz0nNiA5IDEyIDE1IDE4IDknLz48L3N2Zz4=") !important;
-	background-repeat: no-repeat !important;
-	background-position: right 8px center !important;
-	background-size: 14px !important;
+	background-color: var(--background-primary);
+	color: var(--text-normal);
+	border: 1px solid var(--background-modifier-border);
+	background-image: url("data:image/svg+xml;base64,PHN2ZyB4bWxucz0naHR0cDovL3d3dy53My5vcmcvMjAwMC9zdmcnIHdpZHRoPScxNCcgaGVpZ2h0PScxNCcgdmlld0JveD0nMCAwIDI0IDI0JyBmaWxsPSdub25lJyBzdHJva2U9JyUyM2NjY2NjYycgc3Ryb2tlLXdpZHRoPScyLjUnIHN0cm9rZS1saW5lY2FwPSdyb3VuZCcgc3Ryb2tlLWxpbmVqb2luPSdyb3VuZCc+PHBvbHlsaW5lIHBvaW50cz0nNiA5IDEyIDE1IDE4IDknLz48L3N2Zz4=");
+	background-repeat: no-repeat;
+	background-position: right 8px center;
+	background-size: 14px;
 	-webkit-appearance: none;
 	appearance: none;
-	padding-right: 26px !important;
+	padding-right: 26px;
 }
 .theme-dark .unreader-anno-pin.is-active:hover {
-	background-color: var(--background-modifier-hover) !important;
+	background-color: var(--background-modifier-hover);
 }
 
 /* 高亮与书签侧边栏正文统一使用所选阅读字体 */
@@ -4103,7 +4149,7 @@ body.is-tablet .unreader-search {
 .theme-dark .unreader-anno-comment,
 .theme-dark .unreader-anno-row,
 .theme-dark .unreader-anno-row .unreader-anno-texts {
-	font-family: var(--anno-font-family, var(--font-text)) !important;
+	font-family: var(--anno-font-family, var(--font-text));
 }
 
 /* ---------- 背景图片选择弹窗（库内列表 + 系统选择） ---------- */
@@ -4217,7 +4263,7 @@ body.is-tablet .unreader-search {
 /* 隐藏触发系统文件选择器的原生 input（背景图片 / 字体导入共用同一手法） */
 .unreader-bg-file-input,
 .unreader-font-file-input {
-	display: none !important;
+	display: none;
 }
 
 
@@ -4357,7 +4403,20 @@ body.is-tablet .unreader-search {
 
 .unreader-root.is-feed-source .unreader-nav,
 .unreader-root.is-feed-source .is-book-only-control {
-	display: none !important;
+	display: none;
+}
+
+/* Feed 专属按钮（如功能轨上的「在浏览器打开原文」）：非 Feed 源下一律收走。
+   反向规则：正文里已不再注入「阅读原文」链接，入口只在这枚按钮上。 */
+.unreader-root:not(.is-feed-source) .is-feed-only-control {
+	display: none;
+}
+
+/* 网页（本地 HTML）专属按钮：如功能轨上的「阅读设备」档位切换。
+   非 HTML 书一律收走——EPUB/TXT 的版式由阅读器控制，塞一个固定布局视口
+   只会把正文挤成一条窄带。判定按「当前这本」而非视图（同一个阅读视图会换书）。 */
+.unreader-root:not(.is-html-source) .is-html-only-control {
+	display: none;
 }
 
 .unreader-anno-panel.is-feeds .unreader-toc-scroll {
@@ -4372,19 +4431,66 @@ body.is-tablet .unreader-search {
 	padding: 10px 12px 8px;
 }
 
-.unreader-feed-summary {
+/* 工具栏左端：订阅源选择按钮（按钮 + 菜单，不是原生 select —— 菜单能标出「已停用」）。
+   flex 收紧 + 标签省略号：长订阅名不许把右侧那两枚图标按钮挤出面板。 */
+.unreader-feed-source-btn {
 	display: flex;
 	align-items: center;
-	flex-wrap: wrap;
-	gap: 5px;
+	gap: 6px;
+	flex: 0 1 auto;
 	min-width: 0;
-	font-size: 0.78em;
-	line-height: 1.35;
+	max-width: 100%;
+	height: 30px;
+	padding: 0 9px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: 7px;
+	background: var(--background-primary);
 	color: var(--text-muted);
+	font-size: 0.78em;
+	box-shadow: none;
 }
 
-.unreader-feed-summary-sep {
-	opacity: 0.48;
+.unreader-feed-source-btn:hover:not(:disabled) {
+	color: var(--text-normal);
+	background: var(--background-modifier-hover);
+}
+
+.unreader-feed-source-btn:disabled {
+	opacity: 0.55;
+}
+
+.unreader-feed-source-icon,
+.unreader-feed-source-chevron {
+	display: flex;
+	align-items: center;
+	flex: 0 0 auto;
+}
+
+.unreader-feed-source-icon .svg-icon,
+.unreader-feed-source-chevron .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+.unreader-feed-source-chevron {
+	opacity: 0.6;
+}
+
+.unreader-feed-source-label {
+	min-width: 0;
+	overflow: hidden;
+	white-space: nowrap;
+	text-overflow: ellipsis;
+}
+
+.unreader-feed-source-flag {
+	flex: 0 0 auto;
+	padding: 0 5px;
+	border-radius: 4px;
+	background: var(--background-modifier-hover);
+	color: var(--text-faint);
+	font-size: 0.92em;
+	line-height: 16px;
 }
 
 .unreader-feed-actions {
@@ -4430,7 +4536,6 @@ body.is-tablet .unreader-search {
 	color: var(--text-normal);
 }
 
-.unreader-feed-source-select,
 .unreader-shelf-sort {
 	min-width: 0;
 	height: 30px;
@@ -4438,9 +4543,66 @@ body.is-tablet .unreader-search {
 	font-size: 0.78em;
 }
 
-.unreader-feed-source-select {
-	grid-column: 1 / -1;
-	height: 30px;
+/* 订阅管理面板（RSS 工具栏「设置」按钮）：一条订阅一行，
+   标题 + 地址 + [启用开关 | 刷新 | 重命名 | 删除]。 */
+.unreader-feed-manager-bar {
+	display: flex;
+	flex-wrap: wrap;
+	gap: 8px;
+	margin-bottom: 10px;
+}
+
+.unreader-feed-manager-bar button {
+	display: flex;
+	align-items: center;
+	gap: 6px;
+	height: 32px;
+}
+
+.unreader-feed-manager-bar-icon {
+	display: flex;
+	align-items: center;
+}
+
+.unreader-feed-manager-bar-icon .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+.unreader-feed-manager-list .setting-item {
+	padding: 11px 0;
+}
+
+.unreader-feed-manager-list .setting-item:first-child {
+	border-top: none;
+}
+
+.unreader-feed-manager-row .setting-item-name,
+.unreader-feed-manager-row .setting-item-description {
+	overflow-wrap: anywhere;
+}
+
+.unreader-feed-manager-row.is-disabled .setting-item-name {
+	color: var(--text-muted);
+}
+
+.unreader-feed-manager-error {
+	margin-top: 4px;
+	color: var(--text-error);
+	font-size: var(--font-ui-smaller);
+	overflow-wrap: anywhere;
+}
+
+.unreader-feed-manager-empty {
+	padding: 16px 2px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.unreader-feed-manager-hint {
+	margin-top: 12px;
+	color: var(--text-faint);
+	font-size: var(--font-ui-smaller);
 }
 
 .unreader-feed-list {
@@ -4461,6 +4623,15 @@ body.is-tablet .unreader-search {
 	background: var(--background-primary);
 	cursor: pointer;
 	transition: border-color 120ms ease, background-color 120ms ease, transform 120ms ease;
+	content-visibility: auto;
+	contain-intrinsic-size: 0 132px;
+}
+
+.unreader-feed-load-more {
+	flex: 0 0 1px;
+	width: 100%;
+	height: 1px;
+	pointer-events: none;
 }
 
 .unreader-feed-card:hover {
@@ -4642,6 +4813,14 @@ body.is-tablet .unreader-search {
 	color: var(--text-muted);
 }
 
+.unreader-feed-empty-actions {
+	display: flex;
+	flex-wrap: wrap;
+	justify-content: center;
+	gap: 8px;
+	margin-top: 6px;
+}
+
 .unreader-feed-candidate-list {
 	display: flex;
 	flex-direction: column;
@@ -4703,4 +4882,953 @@ body.is-phone .unreader-feed-filter {
 
 .theme-dark .unreader-feed-card:hover {
 	background: var(--background-secondary);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+   UN 系列设计同步（2026-09-20）
+
+   需求原话：「读取兄弟项目 UNmemos 的设计方案（这是 UN 系列要维持的设计方案），
+   并同步到当前项目的相关设置中：(a) 输入框、按钮（特别是按钮）以及按钮上的配色；
+   (b) 侧边栏、悬浮输入面板等。」
+
+   ── 一、UNmemos 那一套是什么（`UNmemos/src/styles.css` 的 `--memos-*` 层）──
+     · 面：悬浮面板一律**不透明近白**（亮色 `#ffffff` / `#fafbfc`；深色由
+       `--background-primary` 混白而来）。亮色主题里「比正文白面暗一档的灰面板」
+       是这套设计最早被换掉的东西 —— UNreader 的标注抽屉/目录面板/功能轨已经换过
+       （见上方「浮层主题适配：浅色=白色」段），本轮把**搜索框**（唯一漏网的）与
+       深浅两档的**投影/圆角**收齐。
+     · 边：轮廓不靠 1px 描边，改**同位置的柔和双层投影**（1px 环 + 大范围低透明度
+       抬起）。书架卡片上一轮已经按这个口径做了（「不用设置边框，在边框的位置添加
+       阴影，营造出半悬浮的感觉」），本轮把其余浮层与卡片统一进来。
+     · 形：圆角三档 6 / 10 / 14（小控件 6、面板 10、大面板 14）。
+     · 色：**可点元素一律用「强调色淡染面 + 强调色前景」表达悬停/激活**
+       （`rgba(primary, .08)` 悬停、`.14` 激活）；只有**主按钮**才是实心强调色 +
+       `--text-on-accent`（导航项激活态同款）。这是 UN 系列最容易一眼认出的特征：
+       中性灰的悬停面 → 强调色淡染面。
+     · 悬浮按钮：无边框、淡底色 + 柔和投影，悬停只加深底色与投影、**不做位移**
+       （位移会让密集按钮排在悬停时抖）。
+
+   ── 二、落点：全部走 `--ur-*` 令牌（与 `--memos-*` 一一对应）──
+     ⚠️ 令牌挂 `body` 而不是 `.unreader-root`：弹窗与设置页不在阅读器子树里，而这两处
+     也在同步范围内（按钮/输入框的大头就在弹窗里）。前缀 `--ur-` 只可能被本插件读到。
+
+   ── 三、深浅两套是**两条独立块**，不是「一条 + 深色覆写」──
+     主题块里的 `.theme-dark .unreader-x`（0,2,0）会压过后写的单类规则（0,1,0）——
+     特异性优先于源序。写成「后置覆写」会在深色下静默失效，所以每条需要覆盖已有
+     深色规则的样式，这里都补一条同样选择器形态的 `body.theme-dark` 版本。
+
+   ── 四、为什么可以写死 `#ffffff`（亮色档）──
+     与书架卡片同源：亮色档的面**刻意钉白**（主题带暖色偏时也钉），深色档一律由
+     `--background-primary` 派生。`npm run test:theme-audit` 的深色档「近白面」判据
+     就是钉这件事的（亮色档没有这条判据，只看对比度）。
+   ═══════════════════════════════════════════════════════════════════════════ */
+
+/* ---------- 1. 设计令牌 ---------- */
+body {
+	/* 圆角三档 */
+	--ur-radius-sm: 6px;
+	--ur-radius: 10px;
+	--ur-radius-lg: 14px;
+	/* 面：亮色钉白（近白 = 面板里的次级面，例如输入框底） */
+	--ur-surface: #ffffff;
+	--ur-surface-soft: #fafbfc;
+	--ur-surface-hover: #f2f4f6;
+	/* 投影：1px 环（替掉描边）+ 大范围低透明度抬起，两层 */
+	--ur-ring: rgba(15, 23, 42, 0.06);
+	--ur-card-shadow: 0 0 0 1px var(--ur-ring), 0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 8px rgba(15, 23, 42, 0.04);
+	--ur-card-shadow-hover: 0 0 0 1px rgba(15, 23, 42, 0.09), 0 6px 18px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+	--ur-panel-shadow: 0 0 0 1px var(--ur-ring), 0 10px 30px rgba(15, 23, 42, 0.13), 0 2px 8px rgba(15, 23, 42, 0.06);
+	--ur-drawer-shadow: 8px 0 32px rgba(15, 23, 42, 0.1), 2px 0 8px rgba(15, 23, 42, 0.06);
+	/* 悬浮按钮：淡底色 + 柔和投影（无边框） */
+	--ur-btn-bg: rgba(255, 255, 255, 0.82);
+	--ur-btn-bg-hover: #ffffff;
+	--ur-btn-shadow: 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07);
+	--ur-btn-shadow-hover: 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1);
+	/* 强调色淡染档（悬停 .08 / 激活 .14），与 UNmemos 的两个档位一一对应 */
+	--ur-accent-hover: color-mix(in srgb, var(--interactive-accent) 8%, transparent);
+	--ur-accent-soft: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+	--ur-accent-soft-hover: color-mix(in srgb, var(--interactive-accent) 22%, transparent);
+	--ur-focus-ring: 0 0 0 3px color-mix(in srgb, var(--interactive-accent) 15%, transparent);
+	/* 标注弹框的背板（遮住正文，但看得见正文轮廓） */
+	--ur-scrim: rgba(15, 23, 42, 0.24);
+	--ur-on-scrim-shadow: 0 18px 48px rgba(15, 23, 42, 0.28), 0 4px 12px rgba(15, 23, 42, 0.18);
+}
+
+body.theme-dark {
+	/* 深色：面由 --background-primary 混白派生（比原生 secondary 亮一档的浮起面），
+	   投影减半 —— 暗背景里深投影对比过强，会把浮层糊成一坨。 */
+	--ur-surface: color-mix(in srgb, var(--background-primary) 84%, #ffffff);
+	--ur-surface-soft: color-mix(in srgb, var(--background-primary) 90%, #ffffff);
+	--ur-surface-hover: color-mix(in srgb, var(--background-primary) 74%, #ffffff);
+	--ur-ring: var(--background-modifier-border);
+	--ur-card-shadow: 0 0 0 1px var(--ur-ring), 0 1px 2px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.16);
+	--ur-card-shadow-hover: 0 0 0 1px var(--background-modifier-border-hover, var(--ur-ring)), 0 6px 18px rgba(0, 0, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.2);
+	--ur-panel-shadow: 0 0 0 1px var(--ur-ring), 0 12px 32px rgba(0, 0, 0, 0.42), 0 2px 8px rgba(0, 0, 0, 0.28);
+	--ur-drawer-shadow: 8px 0 32px rgba(0, 0, 0, 0.34), 2px 0 8px rgba(0, 0, 0, 0.24);
+	--ur-btn-bg: rgba(255, 255, 255, 0.08);
+	--ur-btn-bg-hover: rgba(255, 255, 255, 0.16);
+	--ur-btn-shadow: 0 1px 1px rgba(0, 0, 0, 0.22), 0 1px 3px rgba(0, 0, 0, 0.13);
+	--ur-btn-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.17);
+	--ur-scrim: rgba(0, 0, 0, 0.46);
+	--ur-on-scrim-shadow: 0 18px 48px rgba(0, 0, 0, 0.5), 0 4px 12px rgba(0, 0, 0, 0.36);
+}
+
+/* ---------- 2. 悬浮面板：统一圆角与投影 ---------- */
+
+/* 正文搜索：这一块此前是唯一没进「浅色=白色」清单的浮层（亮色主题下仍是灰面板），
+   本轮补齐 —— 面 + 大圆角 + UN 的双层投影。 */
+.unreader-search {
+	background-color: var(--ur-surface);
+	border: none;
+	border-radius: var(--ur-radius-lg);
+	box-shadow: var(--ur-panel-shadow);
+}
+
+/* 浮动目录面板 / 功能轨 / 外观面板：面已经在上面换过，这里只统一投影与圆角 */
+.unreader-nav-nodes .unreader-nav-panel,
+.unreader-actions .unreader-nav-panel {
+	border-radius: var(--ur-radius);
+	box-shadow: var(--ur-panel-shadow);
+}
+
+.unreader-actions,
+.unreader-actions:hover,
+.unreader-actions.is-expanded {
+	border: none;
+	box-shadow: var(--ur-panel-shadow);
+}
+
+.unreader-appearance-panel {
+	border: none;
+	border-radius: var(--ur-radius-lg);
+	box-shadow: var(--ur-panel-shadow);
+}
+
+/* 抽屉（目录 / 标注）：全高贴边，圆角不适用；换的是侧向投影与那条描边的颜色 */
+.unreader-toc-panel {
+	background-color: var(--ur-surface);
+	border-right: 1px solid var(--background-modifier-border);
+	box-shadow: var(--ur-drawer-shadow);
+}
+
+.unreader-toc-panel.is-open {
+	box-shadow: var(--ur-drawer-shadow);
+}
+
+body.theme-dark .unreader-toc-panel {
+	background-color: var(--background-secondary);
+}
+
+.unreader-anno-panel.is-open {
+	box-shadow: var(--ur-drawer-shadow);
+}
+
+body.theme-dark .unreader-anno-panel.is-open {
+	box-shadow: var(--ur-drawer-shadow);
+}
+
+/* ---------- 3. 按钮：强调色淡染的悬停/激活 + 悬浮按钮形态 ---------- */
+
+/* 功能轨（左缘按钮排）：图标钮的悬停/激活统一走「强调色淡染 + 强调色图标」。
+   中性灰悬停面（旧 #f2f2f2）在这一套里只留给纯容器。 */
+.unreader-actions-trigger:hover,
+.unreader-actions .unreader-nav-action:hover,
+.unreader-actions .unreader-nav-action.is-active,
+.theme-dark .unreader-actions-trigger:hover,
+.theme-dark .unreader-actions .unreader-nav-action:hover,
+.theme-dark .unreader-actions .unreader-nav-action.is-active {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+/* 页码按钮是文字不是图标：底色同样淡染，字色保持可读的正文色 */
+.unreader-actions .unreader-nav-action.is-page-btn:hover {
+	color: var(--text-accent);
+}
+
+/* 直接子级不再各自上色（旧规则把图标色写死成 #555555/#222222） */
+.unreader-actions-trigger,
+.unreader-actions .unreader-nav-action,
+.theme-dark .unreader-actions-trigger,
+.theme-dark .unreader-actions .unreader-nav-action {
+	color: var(--icon-color);
+}
+
+/* 通用图标钮（抽屉头部、面板里的 ✕ / ⚙ / ⟳）：同款淡染悬停 */
+.unreader-clickable-icon:hover,
+.unreader-search-btn:hover,
+.unreader-anno-action:hover,
+.unreader-anno-pin:hover,
+.unreader-appearance-reset:hover {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+/* 搜索框内的按钮 / 抽屉头部图标：静息态不要底色（它们在白面上，投影是多余的） */
+.unreader-search-btn {
+	background: transparent;
+	border-radius: var(--ur-radius-sm);
+}
+
+/* 侧边栏模式切换（书 / 标）：激活段 = **实心强调色 + --text-on-accent**
+   （UNmemos 侧边栏导航项的激活态原样）。⚠️ 前景色必须是 `--text-on-accent` 而不是
+   `#ffffff`：自定义主题把 accent 换成亮色时会成对改这个 token，写死白就会读不出来
+   （test:theme-audit 的自定义档正是这么逼出来的）。 */
+.unreader-anno-mode-btn.is-active,
+.theme-dark .unreader-anno-mode-btn.is-active {
+	background: var(--interactive-accent);
+	color: var(--text-on-accent);
+	box-shadow: 0 1px 3px color-mix(in srgb, var(--interactive-accent) 40%, transparent);
+}
+
+.unreader-anno-mode-switch {
+	border-radius: var(--ur-radius-sm);
+}
+
+/* 目录面板行 / 搜索命中行 / 标注卡片：悬停淡染（把写死的 #f2f2f2、#eef1fb、
+   #3a5bd0 一并换成令牌 —— 自定义浅色主题下这些硬编码值本来是不跟的） */
+.unreader-nav-panel .unreader-nav-row:hover,
+.unreader-nav-nodes .unreader-nav-panel .unreader-nav-row:hover,
+body.theme-dark .unreader-nav-panel .unreader-nav-row:hover,
+body.theme-dark .unreader-nav-nodes .unreader-nav-panel .unreader-nav-row:hover {
+	background-color: var(--ur-accent-hover);
+}
+
+.unreader-nav-panel .unreader-nav-row.is-active,
+.theme-dark .unreader-nav-panel .unreader-nav-row.is-active {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+.unreader-search-row.is-active {
+	background: var(--ur-accent-soft);
+}
+
+/* 外观面板的按钮：UN 的悬浮按钮（无边框、淡底色 + 柔和投影），悬停只加深 */
+.unreader-appearance-panel button,
+.unreader-appearance-panel .unreader-appearance-reset,
+.unreader-appearance-panel .unreader-appearance-seg button,
+.unreader-appearance-panel .unreader-appearance-footer button,
+.unreader-appearance-panel .unreader-appearance-preset-btn,
+body.theme-dark .unreader-appearance-panel button,
+body.theme-dark .unreader-appearance-panel .unreader-appearance-reset,
+body.theme-dark .unreader-appearance-panel .unreader-appearance-seg button,
+body.theme-dark .unreader-appearance-panel .unreader-appearance-footer button,
+body.theme-dark .unreader-appearance-panel .unreader-appearance-preset-btn {
+	background-color: var(--ur-btn-bg);
+	border: none;
+	border-radius: var(--ur-radius-sm);
+	box-shadow: var(--ur-btn-shadow);
+	color: var(--text-normal);
+	transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unreader-appearance-panel button:hover,
+.unreader-appearance-panel .unreader-appearance-preset-btn:hover,
+body.theme-dark .unreader-appearance-panel button:hover,
+body.theme-dark .unreader-appearance-panel .unreader-appearance-preset-btn:hover {
+	background-color: var(--ur-btn-bg-hover);
+	box-shadow: var(--ur-btn-shadow-hover);
+	color: var(--text-normal);
+}
+
+/* 分段控件（行内/滚动、浅色/深色…）的激活段：淡染 + 强调色文字 + 同色描边圈，
+   不用下划线（下划线是 Obsidian 的 tab 语言，UN 系列用面表达选中）。 */
+.unreader-appearance-panel .unreader-appearance-seg button.is-active,
+.theme-dark .unreader-appearance-panel .unreader-appearance-seg button.is-active {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+	font-weight: 600;
+	box-shadow: inset 0 0 0 1px color-mix(in srgb, var(--interactive-accent) 32%, transparent);
+}
+
+/* 侧栏底部 / 弹窗里的实体按钮，两档：
+   `.mod-cta` = 实心强调色 + `--text-on-accent`（主按钮）
+   其余 = 幽灵按钮（描边 + 次要文字），与 UNmemos 的 .memos-btn 两档同构。
+   消费者是本插件自己的容器类（`.unreader-tag-buttons` 是书签/跳页弹窗的按钮行，
+   `.unreader-feed-manager-bar`/`.unreader-empty` 在订阅与书架空态，
+   `.unreader-hl-pop-comment-row` 在标注评论弹框）——**不要**写 `.modal button`
+   这类 Obsidian 自己的类，那会连带改掉用户其余插件的弹窗。 */
+.unreader-tag-buttons button,
+.unreader-feed-manager-bar button,
+.unreader-empty button,
+.unreader-hl-pop-comment-row button {
+	background-color: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-muted);
+	font-weight: 500;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unreader-tag-buttons button:hover,
+.unreader-feed-manager-bar button:hover,
+.unreader-empty button:hover,
+.unreader-hl-pop-comment-row button:hover {
+	background-color: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	color: var(--text-normal);
+}
+
+.unreader-tag-buttons button.mod-cta,
+.unreader-feed-manager-bar button.mod-cta,
+.unreader-empty button.mod-cta,
+.unreader-hl-pop-comment-row button.mod-cta,
+.unreader-anno-comment-save {
+	background-color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: 600;
+}
+
+.unreader-tag-buttons button.mod-cta:hover,
+.unreader-feed-manager-bar button.mod-cta:hover,
+.unreader-empty button.mod-cta:hover,
+.unreader-hl-pop-comment-row button.mod-cta:hover,
+.unreader-anno-comment-save:hover {
+	background-color: color-mix(in srgb, var(--interactive-accent) 86%, var(--text-normal));
+	color: var(--text-on-accent);
+}
+
+.unreader-anno-comment-cancel {
+	background-color: transparent;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-muted);
+	font-weight: 500;
+}
+
+.unreader-anno-comment-cancel:hover {
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* 设置页的按钮：同一套两档（用户点名「特别是按钮」，而设置页是最后一个还留着
+   原生皮肤的大头）。`.unreader-settings` 是**我们自己的**容器类（settings.ts 里
+   `containerEl.addClass("unreader-settings")`），所以写它安全；**不要**写
+   `.modal button` / `.setting-item button` 这类官方或半官方类，那会连带改掉用户
+   其余插件的弹窗与设置页。
+   `.mod-warning`（破坏性按钮，如「清空媒体缓存」）**故意排除在外**：它的红底是
+   Obsidian 用来表达「危险」的语义色，改成幽灵按钮会把这个语义抹掉，只统一圆角。 */
+.unreader-settings button {
+	border-radius: var(--ur-radius-sm);
+	font-weight: 500;
+}
+
+.unreader-settings button:not(.mod-cta):not(.mod-warning) {
+	background-color: transparent;
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.unreader-settings button:not(.mod-cta):not(.mod-warning):hover {
+	background-color: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	color: var(--text-normal);
+}
+
+.unreader-settings button.mod-cta {
+	background-color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: 600;
+}
+
+.unreader-settings button.mod-cta:hover {
+	background-color: color-mix(in srgb, var(--interactive-accent) 86%, var(--text-normal));
+	color: var(--text-on-accent);
+}
+
+/* ---------- 4. 输入框：一个外壳 + 聚焦时的强调色光环 ---------- */
+
+/* 搜索栏 = UNmemos 的「搜索是一整个分段控件」口径：外壳描边 + 圆角，
+   输入框与按钮都无边框地坐在里面；聚焦时外壳换强调色描边 + 3px 光环。 */
+.unreader-search-bar {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	margin: 8px;
+	padding: 3px 6px 3px 10px;
+	transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+
+.unreader-search-bar:focus-within {
+	border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+	box-shadow: var(--ur-focus-ring);
+}
+
+.unreader-search-input,
+.unreader-tag-input,
+.unreader-anno-comment-input,
+.unreader-anno-rename-input,
+.unreader-appearance-color-text {
+	background-color: var(--ur-surface-soft);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-normal);
+	transition: border-color 0.15s ease, box-shadow 0.15s ease, background-color 0.15s ease;
+}
+
+.unreader-search-input {
+	background: transparent;
+	border: none;
+	box-shadow: none;
+}
+
+.unreader-tag-input,
+.unreader-anno-comment-input,
+.unreader-anno-rename-input,
+.unreader-appearance-color-text {
+	padding: 6px 9px;
+}
+
+.unreader-tag-input:focus,
+.unreader-anno-comment-input:focus,
+.unreader-anno-rename-input:focus,
+.unreader-appearance-color-text:focus {
+	background-color: var(--ur-surface);
+	border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+	box-shadow: var(--ur-focus-ring);
+	outline: none;
+}
+
+/* 设置页（不在阅读器子树里，所以这一条不能合并进上面那组）*/
+.unreader-settings input[type="text"],
+.unreader-settings input[type="number"],
+.unreader-settings input[type="search"],
+.unreader-settings textarea {
+	background-color: var(--ur-surface-soft);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-normal);
+}
+
+.unreader-settings input[type="text"]:focus,
+.unreader-settings input[type="number"]:focus,
+.unreader-settings input[type="search"]:focus,
+.unreader-settings textarea:focus {
+	border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+	box-shadow: var(--ur-focus-ring);
+	outline: none;
+}
+
+/* 下拉框统一圆角（浅色档那一堆写死的 #ffffff/#333333 保留：它们是「浅色钉白」的一部分，
+   只在圆角与聚焦上与输入框对齐） */
+.unreader-settings select,
+.unreader-settings .dropdown,
+.unreader-appearance-panel select,
+.unreader-appearance-panel .dropdown {
+	border-radius: var(--ur-radius-sm);
+}
+
+.unreader-settings select:focus,
+.unreader-appearance-panel select:focus {
+	box-shadow: var(--ur-focus-ring);
+}
+
+/* 搜索面板里的结果行：悬停淡染，命中高亮保留（它是「文字被找到」的语义色） */
+.unreader-search-row:hover {
+	background: var(--ur-accent-hover);
+}
+
+/* ---------- 5. 侧边栏（标注抽屉 / 书架） ---------- */
+
+/* 卡片：描边 → 同位置投影（与书架卡片同一口径）。深色档保持原样
+   （test:shelf-dark 的 D7 断言深色卡片的首层环必须是 --background-modifier-border）。 */
+.unreader-anno-row {
+	border: none;
+	background-color: var(--ur-surface);
+	box-shadow: var(--ur-card-shadow);
+}
+
+.unreader-anno-row:hover {
+	background-color: var(--ur-surface);
+	box-shadow: var(--ur-card-shadow-hover);
+}
+
+.unreader-anno-row.is-editing,
+.unreader-anno-row.is-expanded {
+	box-shadow: var(--ur-card-shadow-hover);
+}
+
+/* 深色档：卡片描边同样换成 1px 环（与书架卡片深色档同一口径）。
+   ⚠️ 这条必须显式写：主题里的 `.theme-dark .unreader-anno-row` 只覆写 border-color，
+   border-style 由上面那条 `border: none` 负责 —— 不补环，深色卡片就一点轮廓都不剩。 */
+body.theme-dark .unreader-anno-row {
+	background-color: var(--background-primary);
+	box-shadow: 0 0 0 1px var(--background-modifier-border);
+}
+
+body.theme-dark .unreader-anno-row:hover {
+	background-color: var(--background-modifier-hover);
+	box-shadow: 0 0 0 1px var(--background-modifier-border-hover, var(--background-modifier-border)), 0 4px 16px rgba(0, 0, 0, 0.24);
+}
+
+/* 抽屉头部 / 底部的分隔线走主题描边色（原先浅色写死 rgba(0,0,0,.05/.06/.08)） */
+.unreader-anno-panel .unreader-toc-header {
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.unreader-anno-footer {
+	border-top: 1px solid var(--background-modifier-border);
+}
+
+.unreader-anno-comment-editor {
+	background: var(--ur-surface-soft);
+	border: none;
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border);
+	border-radius: var(--ur-radius);
+}
+
+.unreader-appearance-hint {
+	background-color: var(--ur-surface-soft);
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-muted);
+}
+
+/* ---------- 6. 标注评论：从「工具条里挤出来的输入框」改成弹框 ---------- */
+/* 用户原话：「优化当前项目标注功能的输入框。现在这个标注框有些太丑了，样式要简约大方。
+   可以直接将其做成一个弹框。」
+
+   改法（**不改容器 DOM 契约**）：两个浮层（正文选中工具条 / 高亮浮窗）在评论编辑区展开
+   时给容器加 `.is-comment-open`，把这一格从「工具条旁边长出来的一小块」变成**居中的
+   弹框**：容器自身底色/描边/投影清零，内容换成背板（`.unreader-comment-scrim`，
+   挡住正文但看得见轮廓）+ 卡片（标题行 / 引用行 / 输入区 / 取消·保存）。
+   为什么沿用同一个容器而不是新建一个独立的浮层：定位、键盘重排（`boundsResolver` +
+   `subscribeKeyboardGeometry`）、「编辑期不许被背景活动收走」这几条既有契约全部挂在
+   容器上，换容器等于把这些回归面整体重写一遍（见上方两条评论编辑区注释与
+   `npm run test:comment-mobile` / `test:comment-relocate`）。 */
+
+.unreader-selection-toolbar.is-comment-open,
+.unreader-highlight-popover.is-comment-open {
+	padding: 0;
+	background: transparent;
+	border: none;
+	box-shadow: none;
+	overflow: visible;
+}
+
+/* 背板：`inset` 给一个远超任何窗口的负值，让它铺满 `.unreader-body`
+   （body 是 position:relative + overflow:hidden，正好把它裁在阅读区里，
+   不会盖到 Obsidian 自己的页首/侧栏）。z-index:-1 让它在容器自己的层叠上下文里
+   排到内容之下（容器是 z-index:30 的层叠上下文，所以整块仍压在正文之上）。 */
+.unreader-comment-scrim {
+	position: absolute;
+	inset: -4000px;
+	z-index: -1;
+	background: var(--ur-scrim);
+	opacity: 0;
+	transition: opacity 140ms ease;
+	pointer-events: none;
+}
+
+.unreader-selection-toolbar.is-comment-open .unreader-comment-scrim,
+.unreader-highlight-popover.is-comment-open .unreader-comment-scrim {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+/* 评论卡片 = 弹框本体（圆角 14、近白面、双层投影 —— 与其余浮层同一套） */
+.unreader-selbar-comment {
+	position: relative;
+	width: min(430px, calc(100vw - 44px));
+	max-width: 100%;
+	padding: 12px 14px 12px;
+	gap: 10px;
+	background-color: var(--ur-surface);
+	border-radius: var(--ur-radius-lg);
+	box-shadow: var(--ur-on-scrim-shadow);
+	box-sizing: border-box;
+}
+
+/* 极窄可用区（手机横屏 / iPad 分屏 + 键盘，可用高度 < 240px）：卡片自身的固定开销
+   （标题行 + 引用行 + 按钮行 + 内边距与行距）就要吃掉 ~150px，硬压输入区只会把按钮行
+   顶到键盘下面。所以先让**引用行退场**、内边距与行距各收一档 —— 输入框与按钮行才是
+   必须留住的。档位由 `fitCommentHeight` 施加（`is-tight` 与它写的内联 min/max-height
+   是一对，收起时必须一起清，见 `resetCommentMetrics`）。 */
+.unreader-selbar-comment.is-tight {
+	padding: 10px 12px;
+	gap: 8px;
+}
+
+.unreader-selbar-comment.is-tight .unreader-comment-quote {
+	display: none;
+}
+
+/* 标题行：左侧写清「在给什么写评论」，右侧一个关闭键（与取消等价） */
+.unreader-comment-head {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+	min-width: 0;
+}
+
+.unreader-comment-title {
+	flex: 1 1 auto;
+	min-width: 0;
+	font-size: var(--font-ui-small);
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.unreader-comment-close {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 24px;
+	height: 24px;
+	flex: 0 0 auto;
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: background-color 120ms ease, color 120ms ease;
+}
+
+.unreader-comment-close:hover {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+.unreader-comment-close .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+/* 被标注的原文：两行截断 + 强调色竖条。弹框把正文压暗了，这一行是「别写错地方」的锚点。 */
+.unreader-comment-quote {
+	display: -webkit-box;
+	-webkit-line-clamp: 2;
+	-webkit-box-orient: vertical;
+	overflow: hidden;
+	padding-left: 8px;
+	border-left: 2px solid color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+	font-size: var(--font-ui-smaller);
+	line-height: 1.5;
+	color: var(--text-muted);
+	word-break: break-word;
+}
+
+.unreader-comment-quote:empty {
+	display: none;
+}
+
+/* 输入区：面板底 + 极淡内描边；聚焦时强调色描边 + 3px 光环（与插件里所有输入框同口径） */
+.unreader-selection-toolbar .unreader-hl-pop-comment,
+.unreader-highlight-popover .unreader-hl-pop-comment {
+	width: 100%;
+	min-height: 88px;
+	max-height: 200px;
+	padding: 9px 11px;
+	resize: none;
+	font-size: var(--font-ui-small);
+	line-height: 1.6;
+	background-color: var(--ur-surface-soft);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius);
+	color: var(--text-normal);
+	box-sizing: border-box;
+}
+
+.unreader-selection-toolbar .unreader-hl-pop-comment:focus,
+.unreader-highlight-popover .unreader-hl-pop-comment:focus {
+	background-color: var(--ur-surface);
+	border-color: color-mix(in srgb, var(--interactive-accent) 55%, transparent);
+	box-shadow: var(--ur-focus-ring);
+	outline: none;
+}
+
+.unreader-hl-pop-comment-row {
+	display: flex;
+	justify-content: flex-end;
+	gap: 8px;
+}
+
+.unreader-hl-pop-comment-row button {
+	padding: 5px 14px;
+	font-size: var(--font-ui-smaller);
+	border-radius: var(--ur-radius-sm);
+	font-weight: 500;
+}
+
+body.theme-dark .unreader-selbar-comment {
+	background-color: var(--ur-surface);
+}
+
+/* 移动端：弹框贴键盘之上（bounds 已裁掉键盘与键盘上方的原生栏，居中即在其内），
+   宽度收到视口内，圆角略降一档 —— 小屏上 14px 圆角吃掉的行宽太显眼。 */
+body.is-phone .unreader-selbar-comment,
+body.is-tablet .unreader-selbar-comment {
+	width: min(430px, calc(100vw - 28px));
+	border-radius: var(--ur-radius);
+}
+
+body.is-phone .unreader-selection-toolbar .unreader-hl-pop-comment,
+body.is-phone .unreader-highlight-popover .unreader-hl-pop-comment {
+	min-height: 76px;
+}
+
+/* ---------- 7. 弹窗面板：本插件自己的弹窗（`UnreaderModal` 基类） ---------- */
+
+/* 类挂在哪：`src/ui/modalSkin.ts` 的 `UnreaderModal` 基类在**构造期**给官方 `.modal`
+   元素加上 `unreader-modal`（Obsidian 的 `Modal` 构造函数里就把 DOM 建好了 ——
+   app.js `this.modalEl = this.containerEl.createDiv("modal")` —— 所以不会先渲染一帧
+   原生皮肤）。本插件所有 `Modal` 子类都继承它：新建弹窗漏写类 = 皮肤静默退回原生，
+   这类漏写在评审里看不见，收成基类后就不存在「谁忘了加」这个问题。
+   写 `.unreader-modal` = 写**我们自己的**容器类（与 `.unreader-settings` 同性质）；
+   **绝不**改写成官方 `.modal` —— 那会连带改掉官方与用户其余插件的所有弹窗。
+   面/边/形全部走第 1 节令牌：亮色钉白、深色由 `--background-primary` 派生（官方
+   app.css 里没有深色档的 `.modal` 覆写，所以不需要再补一条 `body.theme-dark`）。
+   唯一的例外见下面那条同形深色规则（防的是**用户的主题/snippet**改 `.modal`）。 */
+.unreader-modal {
+	background-color: var(--ur-surface);
+	/* 「边」= 同位置的 1px 环 + 大范围低透明度抬起，替掉官方 `.modal` 的
+	   `border: var(--modal-border-width) solid var(--modal-border-color)` */
+	border: none;
+	border-radius: var(--ur-radius-lg);
+	box-shadow: var(--ur-panel-shadow);
+}
+
+/* 同上：用户主题里若有 `body.theme-dark .modal { … }`（0,2,0），单类规则（0,1,0）
+   会被它压回去 —— 补一条**同选择器形态**的深色块，靠源序（插件样式表在主题之后）
+   赢回来。值取同一个令牌，深浅两档本就由令牌分流，这里不是第二处改色。 */
+body.theme-dark .unreader-modal {
+	background-color: var(--ur-surface);
+}
+
+/* 弹窗里的按钮：第 3 节那套两档，这里只是把**范围**扩到「本插件弹窗内的一切按钮」。
+   此前只有挂了自有按钮行类的弹窗吃到 UN 配色，`modal-button-container` 里的按钮
+   （取消 / 确定 / 添加订阅 / 删除订阅 / 导入 / 迁移…）还是官方原生皮肤 ——
+   面板换了脸、按钮还是旧的，正是这一步要收的尾。
+   `.mod-warning` 与设置页、第 3 节同口径**故意排除**：红底是 Obsidian 表达「危险」的
+   语义色（「删除订阅」就是它），改成幽灵按钮会把语义抹掉，只统一圆角。 */
+.unreader-modal button {
+	border-radius: var(--ur-radius-sm);
+	font-weight: 500;
+}
+
+.unreader-modal button:not(.mod-cta):not(.mod-warning) {
+	background-color: transparent;
+	border: 1px solid var(--background-modifier-border);
+	color: var(--text-muted);
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unreader-modal button:not(.mod-cta):not(.mod-warning):hover {
+	background-color: var(--background-modifier-hover);
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	color: var(--text-normal);
+}
+
+.unreader-modal button.mod-cta {
+	background-color: var(--interactive-accent);
+	border-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: 600;
+}
+
+.unreader-modal button.mod-cta:hover {
+	background-color: color-mix(in srgb, var(--interactive-accent) 86%, var(--text-normal));
+	color: var(--text-on-accent);
+}
+
+/* ---------- 8. RSS / 书架残余按钮与卡片收尾 ---------- */
+
+/* 订阅工具栏左端：仍是文字次按钮，但不再使用旧的中性描边皮肤；悬停统一走
+   UN 的面色反馈。限定在本插件自己的按钮类上，不碰 Obsidian 原生工具栏。 */
+.unreader-feed-source-btn {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	background-color: transparent;
+	color: var(--text-muted);
+	font-weight: 500;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.unreader-feed-source-btn:hover:not(:disabled) {
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+/* RSS 工具栏图标钮与卡片内图标钮：静息透明，悬停/激活走强调色淡染。 */
+.unreader-feed-action {
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-muted);
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.unreader-feed-action:hover {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+/* 全部 / 未读 / 收藏：做成三段筛选控件。选中态用强调色淡染 + 强调色文字，
+   不再用普通的主题混合色。 */
+.unreader-feed-filter-btn {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	background-color: transparent;
+	color: var(--text-muted);
+	font-weight: 500;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unreader-feed-filter-btn:hover {
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.unreader-feed-filter-btn.is-active,
+.unreader-feed-filter-btn.is-active:hover {
+	border-color: color-mix(in srgb, var(--interactive-accent) 38%, transparent);
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+	font-weight: 600;
+}
+
+/* 订阅空态的两个按钮此前没有命中 `.unreader-empty button`：单独补齐同一套
+   主/次按钮层级。 */
+.unreader-feed-empty-actions button {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	background-color: transparent;
+	color: var(--text-muted);
+	font-weight: 500;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.unreader-feed-empty-actions button:hover:not(:disabled) {
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.unreader-feed-empty-actions button.mod-cta {
+	border-color: var(--interactive-accent);
+	background-color: var(--interactive-accent);
+	color: var(--text-on-accent);
+	font-weight: 600;
+}
+
+.unreader-feed-empty-actions button.mod-cta:hover:not(:disabled) {
+	border-color: color-mix(in srgb, var(--interactive-accent) 86%, var(--text-normal));
+	background-color: color-mix(in srgb, var(--interactive-accent) 86%, var(--text-normal));
+	color: var(--text-on-accent);
+}
+
+/* 文章卡片操作：与侧边栏图标按钮共用强调色悬停；下载是文字次按钮。 */
+.unreader-feed-inline-action {
+	border-radius: var(--ur-radius-sm);
+	color: var(--text-faint);
+	transition: background-color 0.15s ease, color 0.15s ease;
+}
+
+.unreader-feed-inline-action:hover {
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+.unreader-feed-download {
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius-sm);
+	background-color: transparent;
+	color: var(--text-muted);
+	font-weight: 500;
+	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+}
+
+.unreader-feed-download:hover:not(:disabled) {
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	background-color: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.unreader-feed-download:disabled {
+	opacity: 0.58;
+}
+
+/* 订阅管理行的刷新 / 重命名 / 删除是纯图标按钮。这里用高于第 7 节通用弹窗
+   规则的特异性，把误加的幽灵描边收回，只保留强调色淡染悬停；危险色由图标
+   语义本身（trash-2）表达，不改按钮底色。 */
+.unreader-modal .unreader-feed-manager-row .setting-item-control button {
+	border: 0;
+	border-radius: var(--ur-radius-sm);
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-muted);
+}
+
+.unreader-modal .unreader-feed-manager-row .setting-item-control button:hover {
+	border-color: transparent;
+	background-color: var(--ur-accent-soft);
+	color: var(--text-accent);
+}
+
+/* 候选订阅源不是普通弹窗按钮，而是一张可选择的卡片。第 7 节的
+   `.unreader-modal button:not(...)` 特异性更高，因此这里显式写到同级并靠源序收尾。 */
+.unreader-modal .unreader-feed-candidate-list button.unreader-feed-candidate {
+	border: 0;
+	border-radius: 8px;
+	background-color: var(--ur-surface-soft);
+	box-shadow: var(--ur-card-shadow);
+	color: var(--text-normal);
+	font-weight: 500;
+	transition: background-color 0.15s ease, box-shadow 0.15s ease, transform 0.15s ease;
+}
+
+.unreader-modal .unreader-feed-candidate-list button.unreader-feed-candidate:hover:not(:disabled) {
+	border-color: transparent;
+	background-color: var(--ur-surface-hover);
+	box-shadow: var(--ur-card-shadow-hover);
+	color: var(--text-normal);
+	transform: translateY(-1px);
+}
+
+.unreader-modal .unreader-feed-candidate-list button.unreader-feed-candidate:active:not(:disabled) {
+	transform: translateY(0);
+}
+
+.unreader-modal .unreader-feed-candidate-list button.unreader-feed-candidate:disabled {
+	opacity: 0.58;
+}
+
+/* RSS 文章卡片与书籍卡片同皮：白面、8px 圆角、无实体边框，轮廓由 1px 阴影环
+   和柔和投影承担；悬停只加深阴影并抬升 1px，当前项换成 2px 强调色环。 */
+.unreader-feed-card {
+	border: 0;
+	border-radius: 8px;
+	background-color: var(--ur-surface);
+	box-shadow: var(--ur-card-shadow);
+	transition: transform 140ms ease, box-shadow 140ms ease, background-color 140ms ease;
+}
+
+.unreader-feed-card:hover {
+	border-color: transparent;
+	background-color: var(--ur-surface);
+	box-shadow: var(--ur-card-shadow-hover);
+	transform: translateY(-1px);
+}
+
+.unreader-feed-card:active {
+	transform: translateY(0);
+}
+
+.unreader-feed-card.is-current {
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 38%, transparent), 0 6px 18px rgba(15, 23, 42, 0.1);
+}
+
+body.theme-dark .unreader-feed-card {
+	border: 0;
+	background-color: var(--background-primary);
+	box-shadow: 0 0 0 1px var(--background-modifier-border), 0 5px 18px rgba(0, 0, 0, 0.34), 0 1px 3px rgba(0, 0, 0, 0.2);
+}
+
+body.theme-dark .unreader-feed-card:hover {
+	background-color: var(--background-primary);
+	box-shadow: 0 0 0 1px var(--background-modifier-border-hover, var(--background-modifier-border)), 0 12px 28px rgba(0, 0, 0, 0.42), 0 2px 6px rgba(0, 0, 0, 0.24);
+}
+
+body.theme-dark .unreader-feed-card.is-current {
+	box-shadow: 0 0 0 2px color-mix(in srgb, var(--interactive-accent) 46%, transparent), 0 6px 18px rgba(0, 0, 0, 0.4);
 }

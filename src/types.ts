@@ -207,6 +207,11 @@ export interface BookPosition {
 
 export type BookshelfSortMode = "scan" | "recent" | "manual"
 
+/** 本地 HTML（网页原样通道）的**设备模式**：给 frame 一个固定的布局视口宽度，
+ *  再把整页按比例缩放到阅读区宽度 —— 模拟「以这台设备打开这个网页」。
+ *  `auto` = 不给固定视口，跟随阅读区宽度（老口径）。见 engineAdapter.setWebDevice。 */
+export type WebDeviceMode = "auto" | "phone" | "tablet" | "desktop"
+
 /** 书架卡片所需的轻量数据；封面与无封面时的首行文字另行按需加载。 */
 export interface BookshelfEntry {
 	path: string
@@ -237,6 +242,8 @@ export interface FeedSubscription {
 	lastError: string | null
 	etag: string | null
 	lastModified: string | null
+	/** 停用的订阅不参与刷新，文章也不再进入「全部」聚合列表（缺省 = 启用）。 */
+	enabled: boolean
 }
 
 export interface FeedEnclosure {
@@ -317,6 +324,18 @@ export interface UNreaderSettings {
 	bookshelfManualOrder: string[]
 	/** 置顶书籍路径。 */
 	bookshelfPinned: string[]
+	/** 书架（书籍管理侧边栏）与「打开书籍」列表要**排除的文件夹**（库内相对路径）。
+	 *
+	 *  命中者不出现在这两个列表里，**但文件本身不受任何影响**：文件树 / 链接 / 原生入口
+	 *  照常能打开，进度、标注、置顶也全部保留 —— 排除只是「别在书籍列表里占位」。
+	 *  判定在 `core/bookExclusions.ts`，只挂在收集书籍这一层。 */
+	bookshelfExcludedFolders: string[]
+	/** 是否把 Obsidian「排除文件」里的条目也当作书架的排除项（**默认开**）。
+	 *
+	 *  默认值与平台无关、恒为 true，所以不需要 `hideChromeOnScrollSet` 那种「用户是否
+	 *  显式设置过」标记（那个标记存在是因为它的默认值按平台分叉，桌面端写入的默认值会经
+	 *  同步压住移动端的默认开启）；读法统一写 `!== false` 即可兼容老数据。 */
+	bookshelfFollowObsidianExclusions: boolean
 	positions: Record<string, BookPosition>
 	appearance: AppearanceSettings
 	appearancePresets: AppearancePreset[]
@@ -342,6 +361,8 @@ export interface UNreaderSettings {
 	 *  「用户是否显式设置过」标记（那个标记存在是因为它的默认值按平台分叉，
 	 *  桌面端写入的默认值会经同步压住移动端的默认开启）。 */
 	excludeNotesFromSearch: boolean
+	/** 本地 HTML 阅读时的设备模式（布局视口档位）。HTML 之外的书型忽略此项。 */
+	webDeviceMode: WebDeviceMode
 	/** RSS/Atom/JSON Feed 阅读设置。 */
 	feeds: FeedSettings
 }
@@ -350,6 +371,8 @@ export const DEFAULT_SETTINGS: UNreaderSettings = {
 	bookshelfSortMode: "scan",
 	bookshelfManualOrder: [],
 	bookshelfPinned: [],
+	bookshelfExcludedFolders: [],
+	bookshelfFollowObsidianExclusions: true,
 	positions: {},
 	appearance: { ...DEFAULT_APPEARANCE },
 	appearancePresets: [],
@@ -358,6 +381,7 @@ export const DEFAULT_SETTINGS: UNreaderSettings = {
 	pinThreshold: 720,
 	debugLog: false,
 	excludeNotesFromSearch: true,
+	webDeviceMode: "auto",
 	feeds: {
 		refreshOnOpen: true,
 		markReadOnOpen: true,

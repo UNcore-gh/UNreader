@@ -1,50 +1,39 @@
 /**
- * HTML → foliate「合成 book」。
+ * 本地 HTML → foliate「合成 book」（**网页原样**通道）。
  *
- * 与 TXT（`txtBook.ts`）共用一条通道：返回一个鸭子类型的 book 对象
- * （`sections[i] = { id:number, load(): blobURL, createDocument(), size }` + 扁平 `toc`），
- * `view.open()` 的三条鸭子判据（字符串 / 有 `arrayBuffer` / `isDirectory`）一条都不命中
- * → 原样赋给 `view.book`，不走 makeBook。于是 engineAdapter 里「非 EPUB」的整套能力
- * （连续滚动、fake CFI 基准、`epubcfi(/6/N!,/1:pct)` 进度、标注、目录、章节轨）对 HTML
- * **零改动**继承 —— 判据写法一律是 `!== "epub"`（见 engineAdapter.bookFormat 的注释）。
+ * ## 口径（2026-09-20 改版，之前是「切章 + 丢作者 CSS 的书本化重排」）
+ * HTML **不**按书的形态重排，而是「网页打开什么样就什么样」：
+ *  ① **整篇 = 一节**，绝不按标题切章。切章会把一篇网页拆进多个 iframe —— 跨段 CSS
+ *     选择器（`body > .wrap + .foot`、`.post p:first-child`）、`position:fixed/sticky`
+ *     页头、文档级背景、页内锚点的天然连续性全部失真，而且「一章」这个切分对网页
+ *     本来就无意义（`<h2>` 是排版层级，不是书的分卷）；
+ *  ② **作者 CSS 一律保留**：`<style>` / `<link rel=stylesheet>` / 内联 `style` 全部原样
+ *     进入章节文档。阅读器的字体/字号/行距/配色只作为 **`:where()` 零特异性兜底**
+ *     （见 engineAdapter 的 WebFrameCss）—— 作者写过任何一条相关声明，作者赢；
+ *  ③ 宿主容器在网页模式下**取消版心封顶与左右内边距**（见 engineAdapter.applyWebHostLayout），
+ *     页面自己的 `max-width`/`margin:auto` 说了算。
  *
- * `__unreaderTxt` 是 detectFormat 分流的**唯一**标记，语义是「我们造的合成书」而非
- * 「这个文件是 txt」（feed 文章同样打着它，见 feedBookFactory.ts）—— 这里照打。
+ * 外壳仍是「合成书」（与 txtBook.ts / feedBookFactory.ts 同形状，标 `__unreaderWebLayout`），
+ * 所以**阅读器能力照旧**：连续滚动、进度、位置恢复、标注与高亮全都可用 —— 放弃的只是
+ * 「把网页重排成书」。engineAdapter 侧凡是「非 EPUB」的判据一律写 `!== "epub"`。
  *
- * ## 三条硬约束（与 txtBook 完全一致，改动前先读那边的文件头）
- *  ① `resolveHref` 必须**同步**；② section 绝不能带 `cfi` 字段（会与 fake CFI 基准分叉）；
- *  ③ `toc` 必须**扁平**（带 subitems 会被 mergePartTitles 当成 EPUB 分部标题页）。
+ * ## 仍然不执行脚本（安全红线，不是排版取舍）
+ * 章节 iframe 用 `srcdoc` 注入、与本插件**同源**，且**没有 `sandbox` 属性**，Obsidian
+ * 的 CSP 也不限制 `script-src`（见 engineAdapter.renderSection 的注释）。本地 HTML 是
+ * 不可信输入（剪藏 / 别人给的文件 / 下载的页面），执行里面的 `<script>` 等于「打开一份
+ * 文件 = 让它在 vault 里以完整同源权限运行」。所以 `<script>`、`on*`、表单控件、
+ * `<meta http-equiv=refresh>`（会把 iframe 整个导航走）一律摘掉。
+ * 代价：靠 JS 渲染正文的页面（SPA、无限滚动、懒加载图）只能看到静态骨架。
+ * 样式表**不在此列** —— CSS 不构成代码执行面，且「网页原样」本来就以它为核心。
  *
- * ## 净化是红线，不是可选项
- * 章节 iframe 用 `srcdoc` 注入、与本插件**同源**，且**没有 `sandbox` 属性**，Obsidian 的
- * CSP 也不限制 `script-src`（见 engineAdapter.renderSection 的注释）。也就是说文件里一段
- * `<script>` 就等于在 vault 里以完整同源权限执行任意代码 —— 本地 HTML 往往来自「别人给的
- * 文件」或「网页剪藏」，这是**不可信输入**。所以进 body 的每个节点都要过两步：先按元素/
- * 属性白名单手工摘（脚本、事件处理器、表单、iframe…），再由 DOMPurify 收尾
- * （与 feed 文章同一条净化链，见 articleExtractor.ts）。
+ * ## 相对资源必须在合成阶段烧进 HTML
+ * 章节是 `about:srcdoc` → **没有 base URL**，`<img src="assets/a.png">` 直接裂图。
+ * 所以 `<img>`（惰性属性与 `srcset` 候选都算在内）、`<link rel=stylesheet>`、媒体 `<source>`/`<track>`、
+ * SVG 的 `<image>`/`<feImage>`，以及 `<style>` 与内联 `style` 里的 `url()`/`@import` 都在这里
+ * 改写成 vault 资源 URL（解析器由调用方注入，见 bookService.createVaultResourceResolver）。
+ * **`#foo` 形态的 CSS 引用（SVG 滤镜/渐变）必须原样保留**，否则会把图形打散。
  *
- * ## 作者 CSS 一律丢弃（刻意，不是偷懒）
- * `<style>` / `<link rel=stylesheet>` / 内联 `style` 全部摘掉，只保留语义结构（标题、段落、
- * 列表、表格、图片、锚点）。理由按重要性排序：
- *  ① **安全**：样式表是 `url()`、`@import`、旧式 `expression()` 的载体，留着等于开一条
- *     我们控制不了的取图/取字链路；
- *  ② **外观系统**：字号/行距/字体/主题是本插件的产品核心，而作者 CSS 的选择器特异性普遍
- *     高于阅读器的元素选择器（`injectFrameCss` 后插入只赢平局）→ 保留它等于「打开某些
- *     文件时外观设置部分失灵」，深浅色覆盖也会被作者硬编码颜色顶掉；
- *  ③ **一致性**：feed 文章走的正是这条路（`sanitizeArticleHtml` 同样不留 style/link）。
- *  代价是版式类信息（浮动、分栏、居中、缩进）丢失，正文按阅读器自己的版心重排 —— 这是
- *  「阅读」而不是「复刻网页」。语义标签全留，所以 `<pre>`、表格、图注仍然可读
- *  （必要的语义基线由 section 自带的 `HTML_BASE_CSS` 兜住，见下）。
- *
- * ## 相对资源必须在这里改写掉
- * 章节是 srcdoc（`about:srcdoc`）→ **没有 base URL**，`<img src="assets/a.png">` 直接裂图；
- * 而 EPUB/MOBI 那套资源改写（foliate 的 zip loader / `rewriteResourcesLocal`）对本模块不
- * 适用（`book.loadBlob` 不存在，那道闸门一进就 early return）。故资源解析由调用方注入
- * （`HtmlBookOptions.resolveResource`），**在合成阶段就把 URL 烧进 HTML**。解析不到的资源
- * 按 feed 的做法直接摘掉（留个裂图占位不如不显示）。
- *
- * 本模块**不依赖 Obsidian**（与 txtBook 一致）：vault 侧的解析器由调用方注入
- * （见 `bookService.createVaultResourceResolver`），所以这里全套是纯函数 + DOM API。
+ * 本模块**不依赖 Obsidian**（与 txtBook 一致）：全套是纯函数 + DOM API。
  */
 import DOMPurify from "dompurify";
 import { decodeTxt, titleFromFileName } from "./txtBook";
@@ -68,6 +57,8 @@ interface HtmlSection {
 export interface HtmlBook {
 	/** 见文件头：这是「合成书」标记，不是「这个文件是 txt」 */
 	readonly __unreaderTxt: true
+	/** **网页原样**标记：engineAdapter 据此换掉 frame 样式与宿主版心（见文件头） */
+	readonly __unreaderWebLayout: true
 	metadata: { title: string; author: string; language: string }
 	toc: HtmlTocItem[]
 	sections: HtmlSection[]
@@ -80,7 +71,7 @@ export interface HtmlBook {
 
 export interface HtmlBookOptions {
 	/** 把文档里的**相对**路径解析成可用 URL（vault 侧实现）。
-	 *  返回 null / 不注入 = 解析不到 → 该资源会被摘掉。 */
+	 *  返回 null / 不注入 = 解析不到 → 该 `<img>` 会被摘掉（CSS 里的引用保持原样）。 */
 	resolveResource?: (raw: string) => string | null
 }
 
@@ -92,88 +83,56 @@ export interface HtmlPreview {
 
 /* ---------------- 可调常量 ---------------- */
 
-/** 单节硬上限（字）：超过就在块边界再切。与 txtBook 同因 —— 每节一个 iframe，
- *  整本书塞进一个 iframe 会在开书时卡死主线程（详见 txtBook.MAX_SECTION_CHARS）。 */
-const MAX_SECTION_CHARS = 12000
-
-/** 参与切章的标题级别。h1/h2 当「章」；h3+ 太碎，只作块内结构（与 txtBook 的
- *  「章/回/节」一级口径对齐，否则一篇带 30 个小标题的文章会被切成 30 个假章节）。 */
-const SECTION_HEADINGS = new Set(["H1", "H2"])
-
-/** `contentRoot` 允许下钻的容器标签与最大层数。
- *  网页剪藏/导出工具的主流形态是 `<body><div id="content">…全部正文…</div></body>`；
- *  不下钻就永远找不到顶层标题 → 切不出章节、目录全空、整篇塞进一个 iframe。 */
-const WRAPPER_TAGS = new Set(["DIV", "MAIN", "ARTICLE", "SECTION"])
-const WRAPPER_MAX_DEPTH = 4
-
-/** 惰性图片的真图属性（网页剪藏里非常常见，`src` 往往只是 1px 占位）。 */
-const LAZY_SRC_ATTRS = ["data-src", "data-original", "data-lazy-src"]
-
-/** 整棵摘掉的元素：可执行 / 可联网 / 与正文无关。
- *  `<svg>` 与 `<math>` 也在列 —— 保它们要把整套 SVG 标签与属性白名单搬进来，
- *  而阅读场景里 SVG 绝大多数是图标（真图是 `<img>`），收益不抵风险面。 */
+/** 整棵摘掉：可执行 / 可自导航 / 与「看网页」无关。
+ *  ⚠️ `style` 与 `link[rel=stylesheet]` **刻意不在列** —— 保留作者 CSS 是本通道的核心。
+ *  `svg` / `math` 也不在列：它们交给 DOMPurify 的 svg / mathMl profile 兜底
+ *  （手工按标签名摘会把整棵子树连同图形一起删掉，而 SVG 图标在剪藏里极常见）。 */
 const DROP_SELECTOR = [
-	"script", "style", "link", "meta", "base", "title", "noscript", "template",
+	"script", "base", "noscript", "template",
 	"iframe", "frame", "frameset", "object", "embed", "applet",
 	"form", "input", "button", "select", "option", "optgroup", "textarea",
-	"canvas", "dialog", "slot", "svg", "math",
+	"dialog", "slot",
 ].join(",")
 
-/** DOMPurify 收尾白名单：比 feed 那套宽一档（多了 figure/details/表格语义），
- *  但**不含** style/link/script/iframe —— 白名单是最后一道，收窄永远比放宽安全。 */
-const ALLOWED_TAGS = [
-	"article", "section", "div", "p", "h1", "h2", "h3", "h4", "h5", "h6",
-	"ul", "ol", "li", "dl", "dt", "dd", "blockquote", "pre", "code", "kbd", "samp", "var",
-	"hr", "br", "figure", "figcaption", "picture",
-	"img", "audio", "video", "source",
-	"table", "caption", "colgroup", "col", "thead", "tbody", "tfoot", "tr", "th", "td",
-	"strong", "b", "em", "i", "u", "s", "del", "ins", "mark", "small", "sub", "sup", "span",
-	"a", "details", "summary", "abbr", "cite", "q", "time", "address", "aside", "footer", "header", "main", "nav",
-]
+/** `<head>` 里允许保留的 `meta` 白名单（其余一律丢）。
+ *  `meta[http-equiv]` 全部不要：`refresh` 会导航、`Content-Security-Policy` 会拦住我们
+ *  注入的样式。`color-scheme` 留（它确实影响 UA 默认配色，属于「网页原样」的一部分）。
+ *  **`meta[charset]` 刻意不留**：文本已经过 `decodeTxt` 的字节嗅探解码，产物恒为 UTF-8
+ *  字符串；作者那份声明则常与实际字节不符（老中文站点保存下来的页面写 `gb2312` 是常态，
+ *  而我们为了保真把 `<meta charset>` 照搬进 srcdoc，等于**用一个错误编码去解析 UTF-8 字节**
+ *  —— 整页乱码）。统一交给 headString 声明 `utf-8`。 */
+const HEAD_META_KEEP = new Set(["color-scheme"])
 
-/** 属性白名单：保留 `id`（页内锚点跳转要用）与 `class`（无 CSS 时无害，且便于将来
- *  接入作者样式）；`style` **不在列**（见文件头「作者 CSS 一律丢弃」）。 */
-const ALLOWED_ATTR = [
-	"id", "class", "href", "src", "alt", "title", "width", "height", "colspan", "rowspan",
-	"datetime", "cite", "controls", "preload", "poster", "type", "loading", "decoding",
-	"referrerpolicy", "start", "reversed", "value", "span", "open", "lang", "dir", "role",
+/** `html` / `body` 上允许保留的属性。`style` 在列（作者可能整页设底色）。 */
+const ROOT_ATTRS = new Set(["class", "id", "style", "lang", "dir"])
+
+/** DOMPurify 收尾时额外放行的属性：资源改写阶段由我们写上去的那些
+ *  （svg profile 的默认表不一定覆盖 `loading` / `decoding` / `referrerpolicy`）。 */
+const EXTRA_ATTR = [
+	"loading", "decoding", "referrerpolicy", "srcset", "sizes", "media", "type",
+	"controls", "preload", "poster", "colspan", "rowspan", "start", "reversed",
+	"datetime", "cite", "open", "target", "rel", "download",
 ]
 
 /**
  * URI 白名单：DOMPurify 默认只认 `http(s)/mailto/tel/callto/sms/cid/xmpp` 与相对路径，
  * **`app://` 会被当作非法协议直接把属性摘掉** —— 而「相对资源 → vault 资源 URL」这条
  * 链路改写出来的正是 `app://local/…`（桌面）与 `capacitor://localhost/…`（移动端），
- * 于是「改写成功但属性被净化掉」＝ 图片全部裂图（探针 H3 抓到过的真实故障）。
- * 这里在默认白名单基础上只放行这两个 Obsidian 自己的资源协议。
+ * 于是「改写成功但属性被净化掉」＝ 图片全部裂图。
  * **刻意不放 `file:`**：桌面端 `file://` 能读本地磁盘，没有放行它的理由。
  */
 const ALLOWED_URI_REGEXP =
 	/^(?:(?:https?|mailto|tel|callto|sms|cid|xmpp|data|blob|app|capacitor):|[^a-z]|[a-z+.-]+(?:[^a-z+.\-:]|$))/i
 
-/** 章节自带的语义基线：只补「阅读器主题没覆盖、而丢掉作者 CSS 后浏览器默认样式又难看」
- *  的那几处。主题 CSS（contFrameCss）用 `!important` 管字体/字号/行距/颜色/段距，
- *  永远盖在本表之上；这里只碰它没表态的元素。 */
-const HTML_BASE_CSS = `
-pre{white-space:pre-wrap;overflow-wrap:anywhere}
-code,kbd,samp{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace;font-size:.92em}
-pre code{font-size:1em}
-table{display:block;max-width:100%;overflow-x:auto;border-collapse:collapse}
-th,td{padding:.32em .62em;border:1px solid color-mix(in srgb,currentColor 22%,transparent);text-indent:0!important}
-caption{caption-side:top;font-size:.9em;opacity:.75;padding:.3em 0}
-figure{margin:1.2em 0}
-figcaption{font-size:.86em;opacity:.72;text-indent:0!important}
-hr{border:0;border-top:1px solid color-mix(in srgb,currentColor 20%,transparent);margin:1.6em 0}
-blockquote{margin:1em 0;padding:.15em 0 .15em 1em;border-left:3px solid color-mix(in srgb,currentColor 24%,transparent);opacity:.92}
-ul,ol{padding-inline-start:1.5em}
-dd{margin-inline-start:1.5em}
-details{margin:1em 0}
-summary{cursor:default;font-weight:600}
-audio,video{max-width:100%}
-`;
+/** 惰性图片的真图属性（剪藏里非常常见，`src` 往往只是 1px 占位）。 */
+const LAZY_SRC_ATTRS = ["data-src", "data-original", "data-lazy-src"]
 
 const CJK_RE = /[\u3400-\u4dbf\u4e00-\u9fff\uf900-\ufaff]/
 const EXCERPT_CHARS = 160
 const TITLE_MAX_CHARS = 80
+
+/** 预览取正文时忽略的元素（保留 `<style>` 之后，`textContent` 会把 CSS 一起带出来）。 */
+const TEXT_SKIP = new Set(["STYLE", "SCRIPT", "NOSCRIPT", "TEMPLATE", "TITLE", "HEAD"])
 
 /* ---------------- 小工具 ---------------- */
 
@@ -186,16 +145,98 @@ function elementOf(node: Node | null): Element | null {
 	return node && node.nodeType === Node.ELEMENT_NODE ? node as Element : null
 }
 
-/** 相对/绝对/内联资源 → 可直接写进 src 的 URL；解析不到返回 null。 */
+function escapeAttr(value: string): string {
+	return value.replace(/&/g, "&amp;").replace(/"/g, "&quot;").replace(/</g, "&lt;")
+}
+
+function attrString(el: Element | null, allowed: Set<string>): string {
+	if (!el) return ""
+	let out = ""
+	for (const attr of Array.from(el.attributes)) {
+		const name = attr.name.toLowerCase()
+		if (!allowed.has(name)) continue
+		out += ` ${name}="${escapeAttr(attr.value)}"`
+	}
+	return out
+}
+
+/**
+ * 相对/绝对/内联资源 → 可直接写进 `src`/`href` 的 URL；解析不到返回 null。
+ *
+ * `#foo` 必须原样返回：它是**页内引用**（SVG 的 `filter="url(#blur)"`、
+ * `fill="url(#grad)"`、页内锚点），当成相对路径去 vault 里找必然找不到，
+ * 替换掉就会把图形/锚点打断。
+ */
 function resolveUrl(raw: string | null, resolveResource?: (raw: string) => string | null): string | null {
 	const value = (raw ?? "").trim()
 	if (!value) return null
-	if (/^(?:data:|blob:)/i.test(value)) return value
+	if (value.startsWith("#")) return value
+	if (/^(?:data:|blob:|about:)/i.test(value)) return value
 	if (/^https?:/i.test(value)) return value
 	if (value.startsWith("//")) return `https:${value}`
-	// 其余一律当相对路径：只有上层注入了 vault 解析器才可能成功（见文件头）
-	return resolveResource ? resolveResource(value) : null
+	// 其余一律当相对路径：只有上层注入了 vault 解析器才可能成功
+	if (!resolveResource) return null
+	try { return resolveResource(value) } catch { return null }
 }
+
+/** CSS 里的 `url(...)`：三种引号形态（双引号 / 单引号 / 裸） */
+const CSS_URL_RE = /url\(\s*(?:"([^"]*)"|'([^']*)'|([^)'"]*))\s*\)/gi
+/** `@import "x.css"`（`@import url(x.css)` 已被上面的 url() 规则覆盖） */
+const CSS_IMPORT_RE = /@import\s+(?:"([^"]*)"|'([^']*)')/gi
+
+/**
+ * 改写一段 CSS 文本里的资源引用（`<style>` 正文与内联 `style` 属性共用）。
+ *
+ * **解析不到时保持原样**，不替换成 `none`：`url()` 出现在逗号列表里
+ * （`background-image:url(a),url(b)`、`cursor:url(x),auto`）时替换成 `none`
+ * 会改变语义结构；留着原样只是这一条加载失败，浏览器自己会放弃。
+ */
+function rewriteCss(raw: string, resolveResource?: (raw: string) => string | null): string {
+	if (!resolveResource || !raw) return raw
+	let out = raw.replace(CSS_URL_RE, (match, dq, sq, bare) => {
+		const value = String(dq ?? sq ?? bare ?? "").trim()
+		if (!value || value.startsWith("#")) return match
+		const url = resolveUrl(value, resolveResource)
+		return url && url !== value ? `url("${url}")` : match
+	})
+	out = out.replace(CSS_IMPORT_RE, (match, dq, sq) => {
+		const value = String(dq ?? sq ?? "").trim()
+		if (!value) return match
+		const url = resolveUrl(value, resolveResource)
+		return url && url !== value ? `@import "${url}"` : match
+	})
+	return out
+}
+
+/** `srcset` 拆成候选（`"a.png 1x, b.png 2x"` → `{url, descriptor}` 列表）。
+ *  拆出来是为了两用：逐条改写（下面），以及「`src` 全不可解析时从候选里找一条生路」
+ *  （见 cleanDocument ④）—— 后者需要的是**候选本身**，不是改写后的字符串。 */
+function srcsetParts(value: string): Array<{ url: string; descriptor: string }> {
+	const out: Array<{ url: string; descriptor: string }> = []
+	for (const part of value.split(",").map(s => s.trim()).filter(Boolean)) {
+		const space = part.search(/\s/)
+		if (space === -1) out.push({ url: part, descriptor: "" })
+		else out.push({ url: part.slice(0, space), descriptor: part.slice(space) })
+	}
+	return out
+}
+
+/** `srcset="a.png 1x, b.png 2x"` → 逐候选改写（多倍图在网页里是常态）。
+ *  解析不到的**单条候选**原样留着：整串丢给浏览器，它自己会跳过取不到的候选。 */
+function rewriteSrcset(value: string, resolveResource?: (raw: string) => string | null): string {
+	if (!resolveResource || !value.trim()) return value
+	const parts = srcsetParts(value)
+	if (!parts.length) return value
+	return parts.map(p => (resolveUrl(p.url, resolveResource) ?? p.url) + p.descriptor).join(", ")
+}
+
+/** SVG 里会引用**外部资源**的元素。用 `localName` 比对而不是选择器：`feImage` 是驼峰，
+ *  而类型选择器对**外来元素**是大小写敏感的，写死容易在某条路径上静默漏掉。
+ *  `use` **刻意不在列**：DOMPurify 把它放进了 `svgDisallowed`（上游针对 mXSS 的加固，
+ *  见 purify 的 ALL_SVG_TAGS），走到净化那一步整棵都会被摘掉 —— 给它做改写只是写一段
+ *  永远看不见的代码。代价是 sprite 图标在这个通道里会缺失，这是**已知取舍**，
+ *  不为它去放开上游的安全默认值（探针 H9 用一条断言把这个取舍钉住）。 */
+const SVG_REF_TAGS = new Set(["image", "feImage"])
 
 function guessLanguage(text: string): string {
 	const sample = text.slice(0, 20000)
@@ -205,7 +246,7 @@ function guessLanguage(text: string): string {
 	return cjk / sample.length > 0.05 ? "zh" : "en"
 }
 
-/* ---------------- 解析 + 净化 ---------------- */
+/* ---------------- 解析 + 元数据 ---------------- */
 
 interface ParsedDocument {
 	doc: Document
@@ -219,9 +260,8 @@ interface ParsedDocument {
  * 编码走 `decodeTxt` 那套（BOM → UTF-16 嗅探 → 严格 UTF-8 → GB18030 → windows-1252）：
  * 中文 HTML 里 GBK/GB18030 存量不小，而 `<meta charset>` 常年与实际字节不符、
  * **且在「先解码成字符串再 DOMParser」这条路上根本不起作用**（DOMParser 拿到的是已经
- * 解码好的字符串），所以只能靠字节嗅探。
- *
- * 元数据必须在净化**之前**读：净化会摘掉 `<title>`/`<meta>`。
+ * 解码好的字符串），所以只能靠字节嗅探。产物一侧的声明由 headString 统一写成 utf-8
+ *  （见 HEAD_META_KEEP）—— 作者那份声明常与实际字节不符，留着只会让 srcdoc 按错编码解析。
  */
 function parseDocument(buffer: ArrayBuffer, fallbackName: string): ParsedDocument {
 	const { text } = decodeTxt(buffer)
@@ -238,63 +278,114 @@ function parseDocument(buffer: ArrayBuffer, fallbackName: string): ParsedDocumen
 	return { doc, title: title.slice(0, TITLE_MAX_CHARS), author: author.slice(0, TITLE_MAX_CHARS) }
 }
 
+/* ---------------- 净化（只去代码面，不去样式） ---------------- */
+
 /**
- * 就地净化 + 资源改写。两步都必须在切章**之前**做完：
- *  - 净化后 DOM 里不再有 `on*` 属性/脚本，后续任何序列化都不可能带出去；
- *  - 资源 URL 要烧进 HTML 文本（srcdoc 没有 base URL，见文件头）。
+ * 就地清理：摘掉可执行 / 可导航 / 与正文无关的节点，改写资源 URL。
+ *
+ * 顺序无关紧要，但**都必须在 DOMPurify 收尾之前**做完：收尾那一步是
+ * 「按白名单重写字符串」，重写之后手上的 DOM 就与产物无关了。
  */
 function cleanDocument(doc: Document, resolveResource?: (raw: string) => string | null): void {
-	const body = doc.body
-	if (!body) return
+	const head = doc.head
 
-	// ① 整棵摘掉危险/无关元素
+	// ① 整棵摘掉危险/无关元素（head 与 body 一起扫；`script` 也会命中 SVG 里的同名节点）
 	for (const el of Array.from(doc.querySelectorAll(DROP_SELECTOR))) el.remove()
 
-	// ② 属性：`on*` 是「留下的标签」重新变成可执行代码的唯一通道，style 见文件头
-	for (const el of Array.from(body.querySelectorAll("*"))) {
+	// ② head 收敛到白名单：title / charset / color-scheme / style / link[rel~=stylesheet]
+	if (head) {
+		for (const el of Array.from(head.children)) {
+			const tag = el.tagName
+			if (tag === "STYLE" || tag === "TITLE") continue
+			if (tag === "LINK") {
+				const rel = (el.getAttribute("rel") ?? "").toLowerCase()
+				if (rel.split(/\s+/).includes("stylesheet")) continue
+			}
+			if (tag === "META") {
+				// `meta[charset]` 不在白名单里 ⇒ 落入下面的 `el.remove()`（见 HEAD_META_KEEP）
+				const name = (el.getAttribute("name") ?? "").toLowerCase()
+				if (HEAD_META_KEEP.has(name)) continue
+			}
+			el.remove()
+		}
+	}
+
+	// ③ 属性：`on*` 是「留下的标签」重新变成可执行代码的唯一通道；
+	//    `srcdoc`/`formaction`/`ping` 是残留的注入与信标面；`autoplay` 让开书即出声。
+	for (const el of Array.from(doc.querySelectorAll("*"))) {
 		for (const attr of Array.from(el.attributes)) {
 			const name = attr.name.toLowerCase()
-			if (name.startsWith("on") || name === "style" || name === "srcdoc" || name === "formaction") {
+			if (name.startsWith("on") || name === "srcdoc" || name === "formaction" || name === "ping" || name === "autoplay") {
 				el.removeAttribute(attr.name)
 			}
 		}
 	}
 
-	// ③ 图片：src / 惰性属性 里取第一个能解析的；一个都解析不到就摘掉整个 <img>。
-	//    `srcset`/`sizes` 一律去掉 —— 候选列表里全是原始相对路径，留着就是裂图源。
+	// ④ 图片：src / 惰性属性 / `srcset` 候选里取第一个能解析的当 `src`；
+	//    三处都解析不到才摘掉整个 <img>（少看一条通道就会把浏览器里看得见的图弄没）。
+	//    `srcset`/`sizes` 另外逐候选改写（直接丢掉会让响应式图退化成单倍图）。
 	for (const img of Array.from(doc.querySelectorAll("img"))) {
 		let url: string | null = null
 		for (const raw of [img.getAttribute("src"), ...LAZY_SRC_ATTRS.map(a => img.getAttribute(a))]) {
 			url = resolveUrl(raw, resolveResource)
 			if (url) break
 		}
+		const srcset = img.getAttribute("srcset") ?? ""
+		// `src` 与惰性属性全不可解析时**不能直接判死**：`srcset` 才是候选来源。
+		// 只有 `srcset` 的 <img> 是合法写法（响应式图的常见形态），「src 指向本地缺失
+		// 路径、真图在 CDN 的 srcset 里」在剪藏里也常见 —— 浏览器里两张都看得见，
+		// 老实现却把它们整张摘掉。取第一个可解析的候选当 `src`，其余候选照旧逐条改写。
+		if (!url) {
+			for (const candidate of srcsetParts(srcset)) {
+				url = resolveUrl(candidate.url, resolveResource)
+				if (url) break
+			}
+		}
 		if (!url) { img.remove(); continue }
 		img.setAttribute("src", url)
-		img.removeAttribute("srcset")
-		img.removeAttribute("sizes")
 		for (const lazy of LAZY_SRC_ATTRS) img.removeAttribute(lazy)
+		if (srcset) img.setAttribute("srcset", rewriteSrcset(srcset, resolveResource))
 		img.setAttribute("loading", "lazy")
 		img.setAttribute("decoding", "async")
 		img.setAttribute("referrerpolicy", "no-referrer")
 	}
 
-	// ④ <picture><source srcset=…></picture>：source 只有 srcset（上一步已被丢），
-	//    留着是死节点；<img> 兜底节点还在，摘掉 source 不影响显示。
-	//    <video>/<audio> 的 <source src> 则要按媒体处理。
-	for (const source of Array.from(doc.querySelectorAll("source"))) {
-		const parent = source.parentElement
-		if (parent && parent.tagName === "PICTURE") { source.remove(); continue }
-		const url = resolveUrl(source.getAttribute("src"), resolveResource)
-		if (!url) { source.remove(); continue }
-		source.setAttribute("src", url)
-		source.removeAttribute("srcset")
+	// ⑤ <picture><source srcset>：按 srcset 改写；video/audio 的 <source src> 与
+	//    <track src>（字幕/章节）都按媒体资源处理
+	for (const source of Array.from(doc.querySelectorAll("source, track"))) {
+		const srcset = source.getAttribute("srcset")
+		if (srcset) source.setAttribute("srcset", rewriteSrcset(srcset, resolveResource))
+		const raw = source.getAttribute("src")
+		if (raw == null) continue
+		const url = resolveUrl(raw, resolveResource)
+		if (url) source.setAttribute("src", url)
+		else source.removeAttribute("src")
 	}
 
-	// ⑤ 媒体：直接挂在 video/audio 上的 src / poster
-	for (const media of Array.from(doc.querySelectorAll("video[src], audio[src]"))) {
-		const url = resolveUrl(media.getAttribute("src"), resolveResource)
-		if (url) media.setAttribute("src", url)
-		else media.removeAttribute("src")
+	// ⑥ SVG 里的资源引用：`<image>` / `<feImage>` 的 `href` 与 `xlink:href`
+	//    （`<use>` 见 SVG_REF_TAGS 的注释：上游净化会整棵摘掉它）。
+	//    相对路径在 srcdoc 里同样没有 base URL ⇒ 不改写就是裂图；
+	//    `#frag` 是**页内引用**（渐变、滤镜、符号），resolveUrl 原样返回 ⇒ 不动它。
+	//    解析不到时摘掉该属性：留着就是一条永远取不到的引用（浏览器只会画一个空位）。
+	for (const el of Array.from(doc.querySelectorAll("svg *"))) {
+		if (!SVG_REF_TAGS.has(el.localName)) continue
+		for (const attr of ["href", "xlink:href"]) {
+			const raw = (el.getAttribute(attr) ?? "").trim()
+			if (!raw || raw.startsWith("#")) continue
+			const url = resolveUrl(raw, resolveResource)
+			if (url) el.setAttribute(attr, url)
+			else el.removeAttribute(attr)
+		}
+	}
+
+	// ⑦ 媒体：直接挂在 video/audio 上的 src / poster
+	for (const media of Array.from(doc.querySelectorAll("video, audio"))) {
+		const raw = media.getAttribute("src")
+		if (raw != null) {
+			const url = resolveUrl(raw, resolveResource)
+			if (url) media.setAttribute("src", url)
+			else media.removeAttribute("src")
+		}
 		media.setAttribute("preload", "none")
 	}
 	for (const video of Array.from(doc.querySelectorAll("video[poster]"))) {
@@ -305,11 +396,29 @@ function cleanDocument(doc: Document, resolveResource?: (raw: string) => string 
 	// 既没有 src 也没有可播放子源的播放器：空壳，摘掉（否则正文里一块空白控件）
 	for (const media of Array.from(doc.querySelectorAll("video, audio"))) {
 		if (media.getAttribute("src")) continue
-		if (media.querySelector("source[src]")) continue
+		if (media.querySelector("source[src], source[srcset]")) continue
 		media.remove()
 	}
 
-	// ⑥ 链接：只留「页内锚点 + http(s) + mailto/tel」。
+	// ⑧ 样式表链接：相对路径必须在这里改写（srcdoc 无 base URL）。
+	//    `rel` 已由第 ② 步收敛，这里只处理 href；解析不到就摘掉整条 link
+	//    （留着只会去请求一个不存在的地址，白等一次网络超时）。
+	for (const link of Array.from(doc.querySelectorAll('link[href]'))) {
+		const url = resolveUrl(link.getAttribute("href"), resolveResource)
+		if (url) link.setAttribute("href", url)
+		else link.remove()
+	}
+
+	// ⑨ CSS 文本里的 url()/@import：<style> 正文 + 内联 style 属性
+	for (const style of Array.from(doc.querySelectorAll("style"))) {
+		style.textContent = rewriteCss(style.textContent ?? "", resolveResource)
+	}
+	for (const el of Array.from(doc.querySelectorAll("[style]"))) {
+		const css = el.getAttribute("style")
+		if (css) el.setAttribute("style", rewriteCss(css, resolveResource))
+	}
+
+	// ⑩ 链接：只留「页内锚点 + 绝对协议」。
 	//    库内相对链接（别的 .md/.html/图片）没有通路 —— 点下去只会把章节 iframe 导航走
 	//    （srcdoc 无 sandbox，导航真实发生，且没有返回入口），所以摘掉 href 留文字。
 	for (const anchor of Array.from(doc.querySelectorAll("a[href]"))) {
@@ -324,150 +433,89 @@ function cleanDocument(doc: Document, resolveResource?: (raw: string) => string 
 	}
 }
 
-/* ---------------- 切章 ---------------- */
-
-interface RawSection {
-	blocks: Element[]
-	title: string | null
-}
-
-/** 正文根：body 只有「单个容器子元素且无游离文本」时逐层下钻（见 WRAPPER_TAGS 注释）。 */
-function contentRoot(body: HTMLElement): HTMLElement {
-	let cur: HTMLElement = body
-	for (let depth = 0; depth < WRAPPER_MAX_DEPTH; depth++) {
-		const kids = Array.from(cur.children)
-		const only = kids.length === 1 ? kids[0] : undefined
-		if (!only || !WRAPPER_TAGS.has(only.tagName)) break
-		const strayText = Array.from(cur.childNodes).some(
-			n => n.nodeType === Node.TEXT_NODE && pick(n.nodeValue) !== "",
-		)
-		if (strayText) break
-		cur = only as HTMLElement
-	}
-	return cur
-}
-
-function blockChars(el: Element): number {
-	return (el.textContent ?? "").length || 1
-}
-
-function titleOfBlocks(blocks: Element[]): string | null {
-	const first = blocks[0]
-	if (!first || !SECTION_HEADINGS.has(first.tagName)) return null
-	const label = pick(first.textContent).slice(0, TITLE_MAX_CHARS)
-	return label || null
-}
-
-/** 按块预算贪心分组：单块超限时它独占一节（与 txtBook 的安全阀同口径 —— 宁可一节
- *  超限，也不把块切开，切开会在块中间制造假的分节边界）。 */
-function chunkBlocks(blocks: Element[]): RawSection[] {
-	const out: RawSection[] = []
-	let current: Element[] = []
-	let chars = 0
-	for (const block of blocks) {
-		const n = blockChars(block)
-		if (current.length && chars + n > MAX_SECTION_CHARS) {
-			out.push({ blocks: current, title: titleOfBlocks(current) })
-			current = []
-			chars = 0
-		}
-		current.push(block)
-		chars += n
-	}
-	if (current.length) out.push({ blocks: current, title: titleOfBlocks(current) })
-	return out
-}
-
-function splitIntoSections(blocks: Element[]): RawSection[] {
-	if (!blocks.length) return []
-	let headings = 0
-	for (const block of blocks) if (SECTION_HEADINGS.has(block.tagName)) headings++
-	// 阈值 2：只有一个 h1 的文档（文章正文就是这样）不该被切成「一章」
-	const useHeadings = headings >= 2
-	const groups: Element[][] = []
-	let current: Element[] = []
-	for (const block of blocks) {
-		if (useHeadings && current.length && SECTION_HEADINGS.has(block.tagName)) {
-			groups.push(current)
-			current = []
-		}
-		current.push(block)
-	}
-	if (current.length) groups.push(current)
-	return groups.flatMap(chunkBlocks)
-}
-
-/** 页内锚点跨节改写：`#foo` → `「foo 所在节的 index」#foo`。
- *
- *  为什么要改：切章后每个 `#foo` 只在**本节的文档**里找（engineAdapter.scrollToAnchorIn），
- *  而脚注/尾注/文中「见上文」这类锚点的目标常常落在别的节 —— 不改写就点了没反应。
- *  改写后的形态 `3#foo` 走 rewriteAnchors 的常规路径：resolveHref 取到 3 → 目标节内
- *  按 id 定位。查不到目标 id 的保持 `#foo` 原样（节内锚点仍然可用）。 */
-function rewriteCrossSectionAnchors(sections: RawSection[]): void {
-	const idToSection = new Map<string, number>()
-	// 注意包含**块自身**的 id：`#foo` 的常见目标是独占一段的 `<p id="foo">`，
-	// 而 querySelectorAll 只返回后代 —— 漏掉它会让整张映射表为空、锚点一条也改不掉
-	// （探针 H6 抓到过的真实故障）。
-	const scanIds = (block: Element, index: number): void => {
-		const own = block.getAttribute("id")
-		if (own && !idToSection.has(own)) idToSection.set(own, index)
-		for (const el of Array.from(block.querySelectorAll("[id]"))) {
-			const id = el.getAttribute("id")
-			if (id && !idToSection.has(id)) idToSection.set(id, index)
-		}
-	}
-	sections.forEach((section, index) => {
-		for (const block of section.blocks) scanIds(block, index)
-	})
-	if (!idToSection.size) return
-	sections.forEach((section, index) => {
-		for (const block of section.blocks) {
-			for (const anchor of Array.from(block.querySelectorAll('a[href^="#"]'))) {
-				const raw = anchor.getAttribute("href") ?? ""
-				const id = raw.slice(1)
-				if (!id) continue
-				const target = idToSection.get(id)
-				if (target == null || target === index) continue
-				anchor.setAttribute("href", `${target}#${id}`)
-			}
-		}
-	})
-}
-
-/* ---------------- 序列化 ---------------- */
-
 /**
- * 最后一道网：DOMPurify 按白名单重写一遍正文 HTML。
+ * DOMPurify 按白名单重写一遍 body 片段。
  *
  * 为什么手工摘过还要它：上面那遍是「按元素名/属性名删」的节点级清理，而**解析差异**
  * （属性名大小写与命名空间变体、嵌套畸形标签被浏览器重新解析成别的结构、mXSS 那类
- * 「净化后再次解析才现形」的构造）恰恰是这类清理的固有盲区。白名单重写能兜住它们，
- * 而且与 feed 文章用的是同一个库同一套用法（见 articleExtractor.ts）。
+ * 「净化后再次解析才现形」的构造）恰恰是这类清理的固有盲区 —— SVG/MathML 命名空间里
+ * 尤其多。白名单重写能兜住它们，而且与 feed 文章用的是同一个库同一套用法。
  *
- * 只处理**片段**（WHOLE_DOCUMENT:false）：这里拿到的就是若干块的 outerHTML 拼接，
- * 外壳由 sectionHtml 自己拼 —— 让 DOMPurify 补 `<html>/<head>` 会把我们的基线样式
- * 挤到它自己生成的 head 之外。
+ * `svg` / `svgFilters` / `mathMl` 三个 profile 是**刻意开**的：网页原样就要求 SVG 图标
+ * 能显示。它们的标签/属性白名单由 DOMPurify 维护（含 `foreignObject`、`<use>` 等
+ * 已知构造的处理），比我们自己搬一份 SVG 白名单可靠。
+ *
+ * `style` 用 `ADD_TAGS` 放行：DOMPurify 默认表里没有它，而它的内容（CSS 文本）
+ * DOMPurify **不做净化** —— 这没问题，CSS 不构成代码执行面，风险只有 `url()` 取图，
+ * 而作者 CSS 本来就要保留（见文件头）；URL 已在 cleanDocument 里改写。
  */
-function sanitizeBlocks(blocks: Element[]): string {
-	const inner = blocks.map(b => b.outerHTML).join("\n")
+function sanitizeBody(inner: string): string {
 	const clean = DOMPurify.sanitize(inner, {
-		ALLOWED_TAGS,
-		ALLOWED_ATTR,
+		USE_PROFILES: { html: true, svg: true, svgFilters: true, mathMl: true },
+		ADD_TAGS: ["style"],
+		ADD_ATTR: EXTRA_ATTR,
+		FORBID_TAGS: [
+			"script", "base", "noscript", "template", "iframe", "frame", "frameset",
+			"object", "embed", "applet", "form", "input", "button", "select", "option",
+			"optgroup", "textarea", "dialog", "slot", "link", "meta", "title", "html", "head",
+		],
+		FORBID_ATTR: ["srcdoc", "formaction", "ping", "autoplay", "http-equiv"],
 		ALLOWED_URI_REGEXP,
-		ALLOW_DATA_ATTR: false,
-		ALLOW_ARIA_ATTR: false,
 	});
 	return String(clean);
 }
 
-function sectionHtml(blocks: Element[]): string {
-	const inner = sanitizeBlocks(blocks)
-	return '<!DOCTYPE html><html><head><meta charset="utf-8">'
-		+ `<style id="unreader-html-base">${HTML_BASE_CSS}</style>`
-		+ `</head><body>${inner}</body></html>`
+/* ---------------- 序列化 ---------------- */
+
+/** `<head>` 产物：只序列化第 ② 步留下的那几类元素（顺序保持原样）。
+ *  `charset` 由我们**统一声明并放在最前**（作者的已在第 ② 步摘掉，见 HEAD_META_KEEP）：
+ *  产物是 UTF-8 字符串，作者写的是 gb2312 也好 utf-8 也好都不作数；
+ *  而且必须在前 1024 字节内才被编码嗅探认到，所以不能追加在队尾。 */
+function headString(doc: Document): string {
+	const out: string[] = ['<meta charset="utf-8">']
+	const head = doc.head
+	if (head) {
+		for (const el of Array.from(head.children)) {
+			const tag = el.tagName
+			if (tag === "STYLE" || tag === "TITLE" || tag === "LINK" || tag === "META") out.push(el.outerHTML)
+		}
+	}
+	return out.join("\n")
+}
+
+/**
+ * 一份完整文档 → 合成 section 的 HTML。
+ *
+ * **整篇一个文档，不做任何包装/切分**：`<head>` 原样带上（作者 CSS 就在里面），
+ * `<html>`/`<body>` 的属性原样带上（作者的 `class`/`style` 常挂在它们上面）。
+ *
+ * 拼字符串而不是操作 DOM：`innerHTML` 赋值会踩官方 lint 的 `no-unsanitized/method`
+ * （见 engineAdapter 里 `insertAdjacentHTML` 的同类处理）。所有片段要么来自 DOMPurify
+ * 的产物、要么是我们自己序列化的白名单元素；`html`/`body` 属性走 `attrString`
+ * 转义（值里带引号也不会破坏结构）。
+ */
+function documentHtml(doc: Document): string {
+	const cleanBody = sanitizeBody(doc.body?.innerHTML ?? "")
+	const htmlAttrs = attrString(doc.documentElement, ROOT_ATTRS)
+	const bodyAttrs = attrString(doc.body, ROOT_ATTRS)
+	return '<!DOCTYPE html>'
+		+ `<html${htmlAttrs}><head>${headString(doc)}</head>`
+		+ `<body${bodyAttrs}>${cleanBody}</body></html>`
 }
 
 /* ---------------- 书架预览 ---------------- */
+
+/** 可见文本（跳过 style/script 等，见 TEXT_SKIP） */
+function visibleText(el: Element): string {
+	let out = ""
+	for (const node of Array.from(el.childNodes)) {
+		if (node.nodeType === Node.TEXT_NODE) { out += node.nodeValue ?? ""; continue }
+		const child = elementOf(node)
+		if (!child || TEXT_SKIP.has(child.tagName)) continue
+		out += visibleText(child)
+	}
+	return out
+}
 
 function firstExcerpt(doc: Document): string | null {
 	for (const el of Array.from(doc.querySelectorAll("p, li, td, dd"))) {
@@ -477,12 +525,10 @@ function firstExcerpt(doc: Document): string | null {
 	const body = doc.body
 	if (!body) return null
 	for (const node of Array.from(body.childNodes)) {
-		const el = elementOf(node)
-		if (el && /^H[1-6]$/.test(el.tagName)) continue
 		const line = pick(node.textContent)
 		if (line) return line.slice(0, EXCERPT_CHARS)
 	}
-	const fallback = pick(body.textContent)
+	const fallback = pick(visibleText(body))
 	return fallback ? fallback.slice(0, EXCERPT_CHARS) : null
 }
 
@@ -490,7 +536,6 @@ function firstExcerpt(doc: Document): string | null {
  *  （卡片只显示文字，图片一律摘掉）。 */
 export function htmlPreview(buffer: ArrayBuffer, fallbackName = "未命名"): HtmlPreview {
 	const parsed = parseDocument(buffer, fallbackName)
-	cleanDocument(parsed.doc)
 	return { title: parsed.title, author: parsed.author, excerpt: firstExcerpt(parsed.doc) }
 }
 
@@ -508,6 +553,11 @@ export function isHtmlFile(file: File): boolean {
 /**
  * 把本地 HTML 的 File 变成 foliate 可用的合成 book。
  *
+ * **整篇一节**（见文件头口径①）：`sections` 恒为长度 1、`toc` 恒为空数组 ——
+ * 侧栏会走「从章节文档派生条目」那条路（与单 h1 的 TXT 行为一致）。
+ * 两个副产品是刻意的：① 目录面板对 HTML 没有多章导航；② 超长网页（几 MB 的剪藏）
+ * 整篇进一个 iframe，开书那一下比切章版本慢（换来的是一次渲染、零跨章缝隙）。
+ *
  * @param file 源自 vault 的文件（`bookService.readBookFile` 产出，name 带 .html/.htm）
  * @param options.resolveResource vault 侧注入的相对路径解析器（见文件头）
  */
@@ -517,64 +567,43 @@ export async function makeHtmlBook(file: File, options: HtmlBookOptions = {}): P
 	const parsed = parseDocument(buffer, file.name || "未命名")
 	const text = parsed.doc.body?.textContent ?? ""
 	cleanDocument(parsed.doc, options.resolveResource)
-
-	const body = parsed.doc.body
-	if (!body) throw new Error("HTML 文件没有可读正文")
-	const raw = splitIntoSections(Array.from(contentRoot(body).children))
-	const kept = raw.filter(section => pick(section.blocks.map(b => b.textContent ?? "").join(" ")) !== "")
-	if (!kept.length) throw new Error("HTML 文件没有可读文本")
-	rewriteCrossSectionAnchors(kept)
+	if (!parsed.doc.body) throw new Error("HTML 文件没有可读正文")
+	if (!pick(parsed.doc.body.textContent ?? "")) throw new Error("HTML 文件没有可读文本")
+	const html = documentHtml(parsed.doc)
 
 	const urls: string[] = []
-	const sections: HtmlSection[] = kept.map((section, index) => {
-		const html = sectionHtml(section.blocks)
-		const size = section.blocks.reduce((n, b) => n + blockChars(b), 0) || 1
-		let url: string | null = null
-		const urlOf = (): string => {
-			if (!url) {
-				url = URL.createObjectURL(new Blob([html], { type: "text/html" }))
-				urls.push(url)
-			}
-			return url
+	let url: string | null = null
+	const urlOf = (): string => {
+		if (!url) {
+			url = URL.createObjectURL(new Blob([html], { type: "text/html" }))
+			urls.push(url)
 		}
-		return {
-			id: index,
-			size,
-			// 与 txtBook/fb2 一致：**同步**返回 blob URL（engineAdapter 用 `await` 接收，
-			// 对字符串同样成立；这里不要改成 async —— 见文件头的同步约束）
-			load: urlOf,
-			createDocument: () => new DOMParser().parseFromString(html, "text/html"),
-		}
-	})
-
-	// 目录：每个「以 h1/h2 开头」的节一条（安全阀切出的续节不建条目，靠
-	// 「最近前驱目录条目」归到同一个章名下，与 MOBI/TXT 分节行为一致）。
-	const toc: HtmlTocItem[] = []
-	kept.forEach((section, index) => {
-		if (section.title) toc.push({ label: section.title, href: String(index) })
-	})
-	// 单节单条目的目录没有导航价值：整篇一节的文档（最常见形态）直接不留目录，
-	// 让侧栏走「从章节文档派生」那条路。
-	const flatToc = sections.length > 1 ? toc : []
-
-	const resolveHref = (href: string): { index: number } | null => {
-		const head = (href.split("#")[0] ?? "").trim()
-		if (!head) return { index: 0 }
-		const n = Number(head)
-		if (!Number.isInteger(n) || n < 0 || n >= sections.length) return null
-		return { index: n }
+		return url
 	}
 
 	return {
 		__unreaderTxt: true,
+		__unreaderWebLayout: true,
 		metadata: {
 			title: parsed.title || file.name || "未命名",
 			author: parsed.author,
 			language: pick(parsed.doc.documentElement.getAttribute("lang")) || guessLanguage(text),
 		},
-		toc: flatToc,
-		sections,
-		resolveHref,
+		// 整篇一节 ⇒ 没有目录条目：单条目的目录没有导航价值，交给侧栏的派生条目
+		toc: [],
+		sections: [{
+			id: 0,
+			size: html.length || 1,
+			// 与 txtBook/fb2 一致：**同步**返回 blob URL（engineAdapter 用 `await` 接收，
+			// 对字符串同样成立；这里不要改成 async —— 见 txtBook.ts 文件头的同步约束）
+			load: urlOf,
+			createDocument: () => new DOMParser().parseFromString(html, "text/html"),
+		}],
+		resolveHref: (href: string) => {
+			// 合成书只有一节：任何指向本节的形态都落到 0，其余（越界）交给空值
+			const head = (href.split("#")[0] ?? "").trim()
+			return head === "" || head === "0" ? { index: 0 } : null
+		},
 		splitTOCHref: (href: string) => {
 			const [a, b] = href.split("#")
 			return [Number(a), b == null ? 0 : Number(b)]
@@ -584,6 +613,7 @@ export async function makeHtmlBook(file: File, options: HtmlBookOptions = {}): P
 		destroy: () => {
 			for (const u of urls) { try { URL.revokeObjectURL(u) } catch { /* ignore */ } }
 			urls.length = 0
+			url = null
 		},
 	}
 }

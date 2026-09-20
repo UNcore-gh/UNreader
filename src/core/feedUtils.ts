@@ -132,6 +132,17 @@ export function normalizeEnclosure(value: FeedEnclosure | null | undefined): Fee
 	};
 }
 
+/** 「长期保留」的判据：星标，或动过笔（高亮 / 批注 / 书签，由 readerView 同步进
+ *  `state.hasAnnotations`）。**已读刻意不算** —— readAt 一旦参与豁免，读过的老文章
+ *  就会永久常驻，保留上限等于形同虚设。 */
+export function isPinnedFeedEntry(entry: FeedEntry): boolean {
+	return entry.state.starredAt != null || entry.state.hasAnnotations === true;
+}
+
+function byRecency(a: FeedEntry, b: FeedEntry): number {
+	return (b.publishedAt - a.publishedAt) || a.title.localeCompare(b.title);
+}
+
 export function mergeFeedEntries(existing: FeedEntry[], incoming: FeedEntry[], limit: number): FeedEntry[] {
 	const byId = new Map<string, FeedEntry>();
 	for (const entry of existing) byId.set(entry.id, entry);
@@ -175,7 +186,9 @@ export function mergeFeedEntries(existing: FeedEntry[], incoming: FeedEntry[], l
 			},
 		});
 	}
-	return [...byId.values()]
-		.sort((a, b) => (b.publishedAt - a.publishedAt) || a.title.localeCompare(b.title))
-		.slice(0, Math.max(1, limit));
+	// 裁剪：先按发布时间取最新的 N 篇，再把剩下的里面**星标 / 有笔记**的那些捞回来。
+	// 捞回来的条目可能与最新那段在时间上交错，所以合并后要重排一次，列表顺序仍严格按时间。
+	const sorted = [...byId.values()].sort(byRecency);
+	const keepCount = Math.max(1, limit);
+	return [...sorted.slice(0, keepCount), ...sorted.slice(keepCount).filter(isPinnedFeedEntry)].sort(byRecency);
 }

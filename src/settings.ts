@@ -1,28 +1,38 @@
-import { PluginSettingTab, App, Setting, Notice, Platform, FuzzySuggestModal, TFolder, Modal } from "obsidian";
+import { PluginSettingTab, App, Setting, Notice, FuzzySuggestModal, TFolder, ButtonComponent } from "obsidian";
 import type UNreaderPlugin from "./main";
 import * as debugLog from "./core/debugLog";
 import { saveDebugReportToVault } from "./core/debugReport";
 import qqChannelQr from "./assets/qq-channel-qr.jpg";
 import { DATA_DIR_NAME, DEFAULT_ROOT, UNREADER_ROOT, dataRootOf, normalizeDataFolder } from "./core/paths";
+import { SUPPORTED_BOOK_FORMATS } from "./core/bookService";
+import { excludedFolderKey, normalizeExcludedFolder } from "./core/bookExclusions";
 import type { SharedResourceKind } from "./core/resourceStore";
 import type { LibraryMigrationPlan } from "./core/libraryMigration";
+import { openExternalLink } from "./core/externalLink";
+import { UnreaderModal } from "./ui/modalSkin";
 
 /** 反馈渠道（与 UNmemos 同一套联系方式） */
 const FEEDBACK_EMAIL = "2414942469@qq.com";
 const QQ_CHANNEL_URL = "https://pd.qq.com/s/9etkz9gqz?b=5";
 const BILIBILI_URL = "https://space.bilibili.com/1640219370";
 
-/** 在系统默认浏览器打开 URL：桌面端走 Electron shell.openExternal，
- *  避免 window.open 被 Obsidian WebView 拦成空白新窗口 */
-function openExternalLink(url: string): void {
-	if (Platform.isDesktopApp) {
-		try {
-			const { shell } = require("electron") as { shell: { openExternal: (url: string) => Promise<void> } };
-			void shell.openExternal(url);
-			return;
-		} catch { /* Electron 不可用时回退 */ }
-	}
-	window.open(url, "_blank");
+/** `SliderComponent.setDynamicTooltip()` 自 1.13 起废弃 —— 官方说法是「滑块当前值改为
+ *  常显」。但本插件 `manifest.minAppVersion` 是 **1.7.2**：在 1.7–1.12 上「拖动时看到
+ *  当前值」只有这一条路，删掉就是旧版本上的可见退化。所以保留调用，只是按结构类型取用，
+ *  别让它一直挂在废弃清单里。 */
+function keepSliderValueTooltip<T extends object>(slider: T): T {
+	(slider as { setDynamicTooltip?: () => unknown }).setDynamicTooltip?.();
+	return slider;
+}
+
+/** `ButtonComponent.setWarning()` 自 1.13 起废弃，官方替代是 `setDestructive()`；
+ *  而 `setDestructive()` 在 1.7–1.12 的运行时里**不存在**，直接换过去会把旧版本点崩。
+ *  所以两条路都留着：新版本走官方推荐，旧版本走原 API，视觉结果一致（破坏性按钮配色）。 */
+function markDestructive(button: ButtonComponent): ButtonComponent {
+	const compat = button as unknown as { setDestructive?: () => unknown; setWarning?: () => unknown };
+	if (compat.setDestructive) compat.setDestructive();
+	else compat.setWarning?.();
+	return button;
 }
 
 export class UNreaderSettingTab extends PluginSettingTab {
@@ -33,7 +43,15 @@ export class UNreaderSettingTab extends PluginSettingTab {
 		this.plugin = plugin;
 	}
 
+	/** `PluginSettingTab.display()` 自 1.13 起废弃（官方推荐改用声明式的
+	 *  `getSettingDefinitions()`）。声明式 API 只有 1.13+ 有，而本插件
+	 *  `minAppVersion` 是 1.7.2 —— 切过去等于把最低支持版本抬上去。这里保留命令式实现：
+	 *  `display()` 只当官方入口，重绘一律走 `renderSettings()`。 */
 	display(): void {
+		this.renderSettings();
+	}
+
+	private renderSettings(): void {
 		const { containerEl } = this;
 		containerEl.empty();
 		containerEl.addClass("unreader-settings");
@@ -73,10 +91,9 @@ export class UNreaderSettingTab extends PluginSettingTab {
 			.setName("钉住可用最小宽度")
 			.setDesc("当阅读区宽度小于此阈值时，钉住按钮自动隐藏并退回悬浮模式，避免内容过窄。范围 400-1200px，便捷默认值 720px。")
 			.addSlider(sl =>
-				sl
+				keepSliderValueTooltip(sl
 					.setLimits(400, 1200, 10)
-					.setValue(this.plugin.settings.pinThreshold)
-					.setDynamicTooltip()
+					.setValue(this.plugin.settings.pinThreshold))
 					.onChange(v => {
 						this.plugin.settings.pinThreshold = v;
 						this.plugin.scheduleSave();
@@ -86,9 +103,62 @@ export class UNreaderSettingTab extends PluginSettingTab {
 				btn.setIcon("rotate-ccw").setTooltip("恢复默认 720").onClick(() => {
 					this.plugin.settings.pinThreshold = 720;
 					void this.plugin.persistData();
-					this.display();
+					this.renderSettings();
 				}),
 			);
+
+		// ── 书架（书籍管理侧边栏）──
+		// 这一栏管的是「哪些文件算书」的两条边界：**格式**（写死五种，见
+		// bookService.SUPPORTED_BOOK_FORMATS）与**位置**（排除文件夹，默认跟随官方
+		// 「排除文件」）。两者都只影响列表 —— 被排除的书照常能打开，进度 / 标注 /
+		// 置顶一个字都不动，所以这里没有迁移面、也没有数据风险。
+		new Setting(containerEl).setName("书架").setHeading();
+
+		new Setting(containerEl)
+			.setName("收录的格式")
+			.setDesc(`书架与「打开书籍」只列出 ${SUPPORTED_BOOK_FORMATS.join(" / ")}（含 .htm）。其它格式（PDF、Markdown、FB2 等）不会出现在书籍管理界面里 —— 它们在文件树中原样保留、也能由别的程序打开，只是不当作书。`);
+
+		const followObsidian = this.plugin.settings.bookshelfFollowObsidianExclusions !== false;
+		new Setting(containerEl)
+			.setName("跟随 Obsidian 的排除文件夹")
+			.setDesc(`把官方「设置 → 文件与链接 → 排除文件」里的条目也用来过滤书架。官方那边加一条（如某个附件或资料目录），书架里就少一批书 —— 当前官方共 ${this.obsidianExclusionCount()} 条排除项。排除只影响书籍列表：文件本身、阅读进度与标注都不受影响。`)
+			.addToggle(toggle =>
+				toggle
+					.setValue(followObsidian)
+					.onChange(value => {
+						this.plugin.settings.bookshelfFollowObsidianExclusions = value;
+						void this.saveBookshelfExclusions();
+					}),
+			);
+
+		const excludedFolders = this.plugin.settings.bookshelfExcludedFolders ?? [];
+		new Setting(containerEl)
+			.setName("额外排除的文件夹")
+			.setDesc(excludedFolders.length
+				? "以下文件夹里的书不会出现在书架与「打开书籍」列表里。"
+				: "还没有额外排除的文件夹。需要把某个目录（下载、附件、别人的资料……）从书架里摘掉时在这里添加。")
+			.addButton(button =>
+				button
+					.setButtonText("添加文件夹")
+					.setCta()
+					.onClick(() => {
+						new ExcludedFolderModal(this.app, new Set(excludedFolders.map(excludedFolderKey)), path => {
+							void this.saveBookshelfExclusions([...excludedFolders, path]);
+						}).open();
+					}),
+			);
+
+		for (const folder of excludedFolders) {
+			new Setting(containerEl)
+				.setName(folder)
+				.addButton(button =>
+					button
+						.setButtonText("移除")
+						.onClick(() => {
+							void this.saveBookshelfExclusions(excludedFolders.filter(f => excludedFolderKey(f) !== excludedFolderKey(folder)));
+						}),
+				);
+		}
 
 		new Setting(containerEl).setName("订阅").setHeading();
 		new Setting(containerEl)
@@ -120,38 +190,35 @@ export class UNreaderSettingTab extends PluginSettingTab {
 				}));
 		new Setting(containerEl)
 			.setName("每个订阅保留文章数")
-			.setDesc("刷新后按发布时间保留最新文章；历史文章和标注保留在缓存范围内。")
-			.addSlider(slider => slider
+			.setDesc("刷新后按发布时间保留最新文章，超出上限的旧文章会被清理以控制体积；星标文章与有笔记（高亮/批注/书签）的文章长期保留，不参与清理。")
+			.addSlider(slider => keepSliderValueTooltip(slider
 				.setLimits(20, 1000, 20)
-				.setValue(this.plugin.settings.feeds.entryLimit)
-				.setDynamicTooltip()
+				.setValue(this.plugin.settings.feeds.entryLimit))
 				.onChange(value => {
 					this.plugin.settings.feeds.entryLimit = value;
 					void this.plugin.persistData();
 				}));
 		new Setting(containerEl)
 			.setName("图片缓存上限")
-			.setDesc("文章图片保存在本机 IndexedDB，不随库同步。单位 MB，0 表示不落盘缓存。")
-			.addSlider(slider => slider
+			.setDesc("文章图片保存在本机的离线缓存里，不随库同步。单位为兆字节，0 表示不落盘缓存。")
+			.addSlider(slider => keepSliderValueTooltip(slider
 				.setLimits(0, 1024, 25)
-				.setValue(this.plugin.settings.feeds.imageCacheMb)
-				.setDynamicTooltip()
+				.setValue(this.plugin.settings.feeds.imageCacheMb))
 				.onChange(value => {
 					this.plugin.settings.feeds.imageCacheMb = value;
 					void this.plugin.persistData();
 				}));
 		new Setting(containerEl)
 			.setName("播客缓存上限")
-			.setDesc("播客默认流式播放，只有显式下载才写入本机缓存。单位 MB。")
-			.addSlider(slider => slider
+			.setDesc("播客默认流式播放，只有显式下载才写入本机缓存。单位为兆字节。")
+			.addSlider(slider => keepSliderValueTooltip(slider
 				.setLimits(0, 4096, 100)
-				.setValue(this.plugin.settings.feeds.mediaCacheMb)
-				.setDynamicTooltip()
+				.setValue(this.plugin.settings.feeds.mediaCacheMb))
 				.onChange(value => {
 					this.plugin.settings.feeds.mediaCacheMb = value;
 					void this.plugin.persistData();
 				}))
-			.addButton(button => button.setButtonText("清空媒体缓存").setWarning().onClick(async () => {
+			.addButton(button => markDestructive(button.setButtonText("清空媒体缓存")).onClick(async () => {
 				await this.plugin.feedMediaStore.clear();
 				new Notice("RSS 图片和播客缓存已清空");
 			}));
@@ -196,7 +263,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 					.onChange(v => {
 						this.plugin.settings.debugLog = v;
 						void this.plugin.persistData();
-						this.display();
+						this.renderSettings();
 					}),
 			);
 
@@ -234,7 +301,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 		exportRow.addButton(btn =>
 			btn.setButtonText("清空").onClick(() => {
 				debugLog.clear();
-				this.display();
+				this.renderSettings();
 			}),
 		);
 
@@ -281,7 +348,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 		const bili = feedback.createDiv("unreader-feedback-row");
 		bili.createDiv({ text: "B站主页", cls: "unreader-feedback-label" });
 		const biliLink = bili.createEl("a", {
-			text: "space.bilibili.com/1640219370",
+			text: "Space.bilibili.com/1640219370",
 			cls: "unreader-feedback-link",
 			attr: { href: BILIBILI_URL, rel: "noopener", target: "_blank" },
 		});
@@ -289,6 +356,39 @@ export class UNreaderSettingTab extends PluginSettingTab {
 			e.preventDefault();
 			openExternalLink(BILIBILI_URL);
 		});
+	}
+
+	/** 官方「排除文件」的条目数。只读、只用于设置页文案（用户得知道跟随了多少条）。 */
+	private obsidianExclusionCount(): number {
+		try {
+			const host = this.app.vault as unknown as { getConfig?: (key: string) => unknown };
+			const raw = host.getConfig?.("userIgnoreFilters");
+			return Array.isArray(raw) ? raw.filter(x => typeof x === "string" && x !== "").length : 0;
+		} catch {
+			return 0;
+		}
+	}
+
+	/** 落盘排除文件夹并让已打开的书架当场跟随（书架正显示时重绘，模式与滚动位置不变）。 */
+	private async saveBookshelfExclusions(next?: string[]): Promise<void> {
+		if (next) {
+			// 归一化 + 去重（比较用小写键）：手写 `Books/` 与 `books` 是同一条，
+			// 与 `main.loadSettingsData` 同一口径 —— 否则读盘后被收敛、设置页显示与
+			// 落盘内容不一致。空条目直接丢掉（选文件夹不可能产生，但手改 data.json 会）。
+			this.plugin.settings.bookshelfExcludedFolders = [
+				...new Map(
+					next
+						.map(f => normalizeExcludedFolder(f))
+						.filter(f => f !== "")
+						.map(f => [excludedFolderKey(f), f] as const),
+				).values(),
+			];
+		}
+		await this.plugin.persistData();
+		this.plugin.refreshBookshelfPanel();
+		// 只有列表变动才重绘设置页（重绘会把滚动位置带回顶部）；开关本身不用重绘 ——
+		// 状态已在控件上，描述里的条目数是次要信息，下次进设置页自然刷新。
+		if (next) this.renderSettings();
 	}
 
 	/** 设置页显示数据落点：把用户选中的外层目录和实际数据根同时写出来。 */
@@ -314,7 +414,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 		// 没有可搬的文件（新库 / 已经手工搬过）：直接切落点，不弹确认框
 		if (!plan.moves.length) {
 			const result = await this.plugin.applyDataFolder(next, { migrate: false });
-			this.display();
+			this.renderSettings();
 			new Notice(result.ok
 				? `数据文件夹已设为「${dataRootOf(next)}/${DATA_DIR_NAME}」；没有需要迁移的数据文件`
 				: result.error ?? "切换失败");
@@ -323,7 +423,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 
 		const switchOnly = async (): Promise<void> => {
 			const result = await this.plugin.applyDataFolder(next, { migrate: false });
-			this.display();
+			this.renderSettings();
 			new Notice(result.ok
 				? `数据文件夹已设为「${dataRootOf(next)}/${DATA_DIR_NAME}」，但这 ${plan.moves.length} 个数据文件仍留在「${plan.from}」，插件不会再去读它们 —— 请自行移动，或改用「迁移并切换」`
 				: result.error ?? "切换失败");
@@ -338,7 +438,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 					new Notice(result.error ?? "迁移失败");
 					return false;
 				}
-				this.display();
+				this.renderSettings();
 				new Notice(`已迁移 ${result.moved} 个数据文件到「${dataRootOf(next)}/${DATA_DIR_NAME}」；书籍与书架顺序未动`);
 				return true;
 			},
@@ -354,7 +454,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 			.setDesc(`${description} 当前 ${count} 项。`)
 			.addButton(button =>
 				button.setButtonText("管理").onClick(() => {
-					void this.plugin.openResourceManager(kind, () => this.display());
+					void this.plugin.openResourceManager(kind, () => this.renderSettings());
 				}),
 			);
 	}
@@ -368,7 +468,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 	}
 }
 
-class DataFolderMigrationModal extends Modal {
+class DataFolderMigrationModal extends UnreaderModal {
 	private busy = false;
 
 	constructor(
@@ -402,28 +502,63 @@ class DataFolderMigrationModal extends Modal {
 		const switchOnly = buttons.createEl("button", { text: "仅切换，不迁移" });
 		const confirm = buttons.createEl("button", { text: "迁移并切换", cls: "mod-cta" });
 		cancel.addEventListener("click", () => this.close());
-		switchOnly.addEventListener("click", async () => {
-			if (this.busy) return;
-			this.busy = true;
-			switchOnly.disabled = true;
-			confirm.disabled = true;
-			await this.onSwitchOnly();
-			this.close();
+		switchOnly.addEventListener("click", () => {
+			void (async (): Promise<void> => {
+				if (this.busy) return;
+				this.busy = true;
+				switchOnly.disabled = true;
+				confirm.disabled = true;
+				await this.onSwitchOnly();
+				this.close();
+			})();
 		});
-		confirm.addEventListener("click", async () => {
-			if (this.busy) return;
-			this.busy = true;
-			cancel.disabled = true;
-			confirm.disabled = true;
-			confirm.setText("迁移中…");
-			if (await this.onConfirm()) this.close();
-			else {
-				this.busy = false;
-				cancel.disabled = false;
-				confirm.disabled = false;
-				confirm.setText("迁移并切换");
-			}
+		confirm.addEventListener("click", () => {
+			void (async (): Promise<void> => {
+				if (this.busy) return;
+				this.busy = true;
+				cancel.disabled = true;
+				confirm.disabled = true;
+				confirm.setText("迁移中…");
+				if (await this.onConfirm()) this.close();
+				else {
+					this.busy = false;
+					cancel.disabled = false;
+					confirm.disabled = false;
+					confirm.setText("迁移并切换");
+				}
+			})();
 		});
+	}
+}
+
+/** 书架排除文件夹选择器：只列库内目录，已经排除的不再出现（避免重复条目）。
+ *  **库根不在列**：选中它等于把整库排除、书架瞬间空掉 —— 那不是「排除文件夹」的意图，
+ *  真要做也不该从一个下拉里一步达成（与 `DataFolderModal` 挡住库根同一个道理）。 */
+class ExcludedFolderModal extends FuzzySuggestModal<TFolder> {
+	constructor(
+		app: App,
+		private taken: Set<string>,
+		private onChoose: (path: string) => void,
+	) {
+		super(app);
+		this.setPlaceholder("选择要从书架里排除的文件夹…");
+	}
+
+	getItems(): TFolder[] {
+		const root = this.app.vault.getRoot();
+		return this.app.vault
+			.getAllLoadedFiles()
+			.filter((item): item is TFolder => item instanceof TFolder && item !== root)
+			.filter(folder => !this.taken.has(excludedFolderKey(folder.path)))
+			.sort((a, b) => a.path.localeCompare(b.path));
+	}
+
+	getItemText(folder: TFolder): string {
+		return folder.path;
+	}
+
+	onChooseItem(folder: TFolder): void {
+		this.onChoose(folder.path);
 	}
 }
 

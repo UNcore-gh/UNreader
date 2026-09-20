@@ -1,5 +1,6 @@
-import { Modal, App } from "obsidian";
+import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
+import { UnreaderModal } from "./modalSkin";
 
 /** 字体来源：库内文件（path 用于判断是否已在字体夹内）或系统文件选择器。 */
 export interface FontPick {
@@ -22,7 +23,7 @@ export interface FontPick {
  *  结构与 backgroundImageModal 同构（同一套 .unreader-bg-* 样式与搜索交互），
  *  **故意不抽公共件**：图片选择器在 test/ 下零覆盖，为了少 79 行去重构它只有风险
  *  没有收益。两者的差异只在文案与「字体要显示所在文件夹」这一点。 */
-export class FontPickModal extends Modal {
+export class FontPickModal extends UnreaderModal {
 	constructor(
 		app: App,
 		private picks: FontPick[],
@@ -80,7 +81,7 @@ export class FontPickModal extends Modal {
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
 		btnRow.createEl("button", { text: "取消" }).addEventListener("click", () => this.close());
 
-		setTimeout(() => input.focus(), 50);
+		window.setTimeout(() => input.focus(), 50);
 	}
 
 	onClose(): void {

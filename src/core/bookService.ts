@@ -1,6 +1,7 @@
 import { TFile, App, normalizePath } from "obsidian";
 import type UNreaderPlugin from "../main";
 import type { BookshelfEntry, BookshelfSortMode } from "../types";
+import { createBookPathExcluder } from "./bookExclusions";
 import { isHtmlExt } from "./htmlBook";
 
 /** 插件支持的书格式：EPUB（重排） + MOBI/AZW3（KF8，重排） + TXT（纯文本，切分后重排）
@@ -8,6 +9,16 @@ import { isHtmlExt } from "./htmlBook";
  *  PDF 已整体移除——Obsidian 核心内置 PDF 查看器且占用了 `pdf` 扩展名，
  *  插件无法在文件浏览器里成为默认打开方式，为它自建渲染通道属重复建设。 */
 const BOOK_EXTS = new Set(["epub", "mobi", "azw3", "txt", "html", "htm"]);
+
+/** 书籍管理界面展示的格式白名单（按用户可读顺序书写）：设置页文案与空态提示都读它。
+ *  **这是唯一事实来源**，`BOOK_EXTS` 只是它在扫描时的形态 —— 加格式时改这里 +
+ *  `BOOK_MIME` + `main.ts` 的 `registerExtensions` 三处，不要只改一处。 */
+export const SUPPORTED_BOOK_FORMATS = ["EPUB", "AZW3", "MOBI", "TXT", "HTML"] as const;
+
+/** 该扩展名（不含点，大小写不限）是不是插件支持的书。 */
+export function isSupportedBookExt(ext: string): boolean {
+	return BOOK_EXTS.has(ext.toLowerCase());
+}
 
 /** 按扩展名给出 MIME（foliate-js 的 makeBook 实际用 magic 字节识别，
  *  这里设的值仅作兜底——某些环境拿不到 magic 字节时仍可走扩展名路径）。
@@ -68,12 +79,13 @@ const DIAG_TXT = /^unreader-(?:debug-log|neighbor)-/;
 /** 打开书籍列表可读取的书：**全库扫描**，按书名排序。
  *
  *  书籍不限位置（「资料文件夹」是插件**数据**的落点，不是书的落点，见 core/paths.ts）；
- *  跳过 0 字节文件，以及插件自己写在库根的诊断 .txt。 */
+ *  跳过 0 字节文件、插件自己写在库根的诊断 .txt，以及**被排除文件夹命中的书**
+ *  （默认跟随 Obsidian 的「排除文件」，见 core/bookExclusions.ts）。 */
 export function getBookFiles(plugin: UNreaderPlugin): TFile[] {
 	return collectBookFiles(plugin, true);
 }
 
-/** 书架使用全库扫描，并保留 Vault 返回的顺序作为默认排名。 */
+/** 书架使用全库扫描（同样应用排除文件夹），并保留 Vault 返回的顺序作为默认排名。 */
 export function getLibraryBookFiles(plugin: UNreaderPlugin): TFile[] {
 	return collectBookFiles(plugin, false);
 }
@@ -126,11 +138,18 @@ export function sortBookshelfEntries(
 }
 
 function collectBookFiles(plugin: UNreaderPlugin, alphabetical: boolean): TFile[] {
+	// 排除文件夹（默认跟随 Obsidian 的「排除文件」，见 core/bookExclusions.ts）：
+	// 判定只在这一层生效 —— 被排除的书照常能打开，进度 / 标注 / 置顶一个字不动。
+	const excluded = createBookPathExcluder(plugin.app, {
+		followObsidian: plugin.settings.bookshelfFollowObsidianExclusions !== false,
+		folders: plugin.settings.bookshelfExcludedFolders ?? [],
+	});
 	const files = plugin.app.vault
 		.getFiles()
 		.filter(f => BOOK_EXTS.has(f.extension.toLowerCase()))
 		.filter(f => f.stat.size > 0)
-		.filter(f => !(f.extension.toLowerCase() === "txt" && DIAG_TXT.test(f.basename)));
+		.filter(f => !(f.extension.toLowerCase() === "txt" && DIAG_TXT.test(f.basename)))
+		.filter(f => !excluded(f.path));
 	if (alphabetical) files.sort((a, b) => a.basename.localeCompare(b.basename));
 	return files;
 }

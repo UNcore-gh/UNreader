@@ -31,6 +31,10 @@ export class HighlightPopover {
 	private barRow!: HTMLElement;
 	private commentWrap!: HTMLElement;
 	private commentInput!: HTMLTextAreaElement;
+	/** 弹框标题（「添加评论」/「编辑评论」） */
+	private commentTitle!: HTMLElement;
+	/** 弹框顶部的原文引用（两行截断）：背板压暗了正文，这一行是「别写错地方」的锚点 */
+	private commentQuote!: HTMLElement;
 	private lastAnchorRect: DOMRect | null = null;
 	private lastBounds: Bounds | null = null;
 	/** 评论编辑区是否展开（只有展开时才需要「贴键盘」重排与高度压缩） */
@@ -68,7 +72,7 @@ export class HighlightPopover {
 
 	constructor(actions: HighlightPopoverActions) {
 		this.actions = actions;
-		this.containerEl = document.createElement("div");
+		this.containerEl = createDiv();
 		this.containerEl.className = "unreader-highlight-popover";
 		this.render();
 		this.hide();
@@ -150,10 +154,29 @@ export class HighlightPopover {
 		this.commentWrap = this.containerEl.createDiv({ cls: "unreader-selbar-comment" });
 		this.commentWrap.hide();
 
+		// 背板：盖住正文（点击 = 收起编辑区，与「取消」等价）
+		const scrim = this.containerEl.createDiv({ cls: "unreader-comment-scrim" });
+		scrim.addEventListener("pointerdown", e => {
+			e.stopPropagation();
+			e.preventDefault();
+			this.closeCommentEditor();
+		});
+
+		// 弹框的标题行：说清「在给什么写评论」，右侧关闭键与「取消」等价
+		const head = this.commentWrap.createDiv({ cls: "unreader-comment-head" });
+		this.commentTitle = head.createDiv({ cls: "unreader-comment-title", text: "添加评论" });
+		const dialogCloseBtn = head.createDiv({ cls: "unreader-comment-close", attr: { "aria-label": "关闭" } });
+		setIcon(dialogCloseBtn, "x");
+		dialogCloseBtn.addEventListener("click", e => {
+			e.stopPropagation();
+			this.closeCommentEditor();
+		});
+		this.commentQuote = this.commentWrap.createDiv({ cls: "unreader-comment-quote" });
+
 		const ta = this.commentWrap.createEl("textarea", {
 			cls: "unreader-hl-pop-comment",
 			attr: { placeholder: "写下你对这段文字的评论…" },
-		}) as HTMLTextAreaElement;
+		});
 		this.commentInput = ta;
 		ta.addEventListener("keydown", e => {
 			e.stopPropagation();
@@ -186,6 +209,11 @@ export class HighlightPopover {
 	private openCommentEditor(): void {
 		if (!this.target) return;
 		this.commentInput.value = this.target.comment ?? "";
+		// 弹框态：容器退成透明的定位盒，内容 = 背板 + 评论卡片（样式见 styles.css 第 6 节）
+		this.containerEl.addClass("is-comment-open");
+		// 已有评论 = 编辑既有内容，否则是这条高亮的「补写评论」——两种语境的文案与落点不同
+		this.commentTitle.setText(this.target.comment ? "编辑评论" : "添加评论");
+		this.commentQuote.setText(this.target.text ?? "");
 		this.commentOpen = true;
 		this.commentWrap.show();
 		this.barRow.addClass("is-hidden");
@@ -196,29 +224,59 @@ export class HighlightPopover {
 		};
 		// 先按展开态排一次，再挂键盘订阅：focus 会拉起键盘 → 官方收缩容器 → 必须跟着重排
 		place();
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			place();
 			this.commentInput.focus();
 		});
 		this.watchGeometry();
-		setTimeout(() => this.commentInput.focus(), 30);
+		window.setTimeout(() => this.commentInput.focus(), 30);
 	}
 
-	/** 可用高度装不下整个评论框时压缩输入区（保住「保存 / 取消」按钮行）。
-	 *  桌面端可用高度充裕 → 计算结果恒为 CSS 上限 160px，与改动前一致。 */
+	/** 可用高度装不下整张评论卡片时（手机横屏、iPad 分屏 + 键盘）压缩输入区，
+	 *  而不是把「保存 / 取消」按钮行沉到键盘下面。桌面端可用高度充裕 → 值恒为 CSS 上限。
+	 *
+	 *  2026-09-20 这一格变成**弹框卡片**（标题行 + 引用行 + 输入区 + 按钮行）之后，
+	 *  「非输入区高度」必须把新增的标题行与引用行一起量进去；实在装不下时先让引用行退场。
+	 *
+	 *  口径与 `SelectionToolbar.fitCommentHeight` **逐字同源**（`test:comment-mobile` 同一套
+	 *  断言同时覆盖两处），改一处必须同步改另一处。 */
 	private fitCommentHeight(available: number): void {
 		const rowH = this.commentWrap.querySelector<HTMLElement>(".unreader-hl-pop-comment-row")?.offsetHeight ?? 32;
-		const chrome = rowH + 30;
-		const next = Math.max(44, Math.min(160, Math.floor(available - 16 - chrome)));
+		const headH = this.commentWrap.querySelector<HTMLElement>(".unreader-comment-head")?.offsetHeight ?? 22;
+		const quoteH = this.commentWrap.querySelector<HTMLElement>(".unreader-comment-quote")?.offsetHeight ?? 0;
+		// 极窄可用区（实测 ~172px：手机横屏 / iPad 分屏 + 键盘）：卡片自己的固定开销
+		// （标题行 + 引用行 + 按钮行 + 内边距与行距）就要吃掉 ~150px，硬压输入区只会把按钮行
+		// 顶到键盘下面。所以先让**引用行退场**——它只是「别写错地方」的锚点，输入框与按钮行
+		// 才是必须留住的（`is-tight` 同时把内边距与行距收一档，见 styles.css 第 6 节）。
+		const tight = available < 240;
+		this.commentWrap.toggleClass("is-tight", tight);
+		// 卡片上下 padding(12+12) + 三段 10px 行距 + 上下 16px 余量；紧凑档 = padding(10+10)
+		// + 两段 8px 行距 + 16px 余量。
+		const chrome = rowH + headH + (tight ? 0 : quoteH) + (tight ? 58 : 70);
+		const next = Math.max(44, Math.min(200, Math.floor(available - chrome)));
+		// min/max 必须一起写：CSS 给的 min-height(88px) 在 min > max 时会**反过来压过**内联
+		// max-height（CSS 的 min/max 冲突规则），只写 max-height 的实现在极窄档压不下去
+		// （实测卡片 213px > 可用 172px，按钮行照旧被裁）。
+		this.commentInput.style.minHeight = `${Math.min(next, 88)}px`;
 		this.commentInput.style.maxHeight = `${next}px`;
+	}
+
+	/** 清掉 `fitCommentHeight` 写下的内联尺寸与紧凑档标记（收起 / 重投编辑态时都要回到 CSS 口径）。
+	 *  与它配对，别只清 max-height：留下 `is-tight` 会让下一次展开少一行引用。 */
+	private resetCommentMetrics(): void {
+		this.commentInput?.style.removeProperty("min-height");
+		this.commentInput?.style.removeProperty("max-height");
+		this.commentWrap?.removeClass("is-tight");
 	}
 
 	private closeCommentEditor(): void {
 		this.commentOpen = false;
+		this.containerEl.removeClass("is-comment-open");
 		this.stopWatching();
 		this.commentWrap.hide();
 		this.barRow.removeClass("is-hidden");
-		this.commentInput.style.removeProperty("max-height");
+		this.resetCommentMetrics();
+		this.commentQuote.setText("");
 		const bounds = this.boundsResolver?.() ?? this.lastBounds;
 		if (bounds) this.reposition(this.lastAnchorRect, bounds);
 	}
@@ -243,6 +301,11 @@ export class HighlightPopover {
 			tw = this.containerEl.offsetWidth || tw;
 		}
 		this.containerEl.removeClass("is-measuring");
+		// 弹框态照旧贴锚点（理由与 SelectionToolbar.reposition 同段：UN 系列刻意不做「居中
+		// 弹窗」——`UNmemos/src/styles.css` 的 `.memos-editor-is-expanded` 段写明「avoids the
+		// visual 'jump' of a centered modal and keeps the input box where the user expects
+		// it」。弹框换的是「面 / 圆角 / 投影 + 背板」这一层观感，落点不动；锚点失效时
+		// `placeFloating` 自己会退到可用区居中。
 		const { left, top, origin } = placeFloating(anchorRect, { width: tw, height: th }, bounds, { margin: 8, gap: 8 });
 		this.containerEl.style.left = `${left}px`;
 		this.containerEl.style.top = `${top}px`;
@@ -273,11 +336,13 @@ export class HighlightPopover {
 		if (!this.barRow) this.render();
 		this.syncDots();
 		this.commentOpen = false;
+		this.containerEl.removeClass("is-comment-open");
 		this.stopWatching();
 		this.commentWrap.hide();
 		this.barRow.removeClass("is-hidden");
 		this.commentInput.value = this.target.comment ?? "";
-		this.commentInput.style.removeProperty("max-height");
+		this.resetCommentMetrics();
+		this.commentQuote.setText("");
 
 		this.lastAnchorRect = anchorRect;
 		// 有供体就用现测值：侧栏触发 / 展开评论时键盘已经弹起，传入的 bounds 可能已过期
@@ -295,11 +360,13 @@ export class HighlightPopover {
 		this.lastAnchorRect = null;
 		this.lastBounds = null;
 		this.commentOpen = false;
+		this.containerEl.removeClass("is-comment-open");
 		this.stopWatching();
 		if (this.commentInput) {
 			this.commentInput.value = "";
-			this.commentInput.style.removeProperty("max-height");
+			this.resetCommentMetrics();
 		}
+		this.commentQuote?.setText("");
 		this.commentWrap?.hide();
 		this.barRow?.removeClass("is-hidden");
 		this.containerEl.removeClass("is-visible");

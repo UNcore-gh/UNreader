@@ -1,4 +1,4 @@
-import { Platform, TFile, TFolder, Vault } from "obsidian"
+import { FileManager, Platform, TFile, TFolder, Vault } from "obsidian"
 import { AppearancePreset, AppearanceSettings, DEFAULT_APPEARANCE, adoptLegacyAppearance, platformAppearanceDefaults } from "../types"
 
 /** 单个预设文件的磁盘格式 */
@@ -41,6 +41,7 @@ export class PresetStore {
 	constructor(
 		private vault: Vault,
 		private folder: string,
+		private fileManager: FileManager,
 	) {}
 
 	/** 预设名 → 安全文件夹名（跨端一致：仅清洗文件系统非法字符，不做 hash） */
@@ -154,7 +155,7 @@ export class PresetStore {
 		this.writeTimers.set(entry.id, window.setTimeout(() => {
 			this.writeTimers.delete(entry.id)
 			void this.writeNow(entry).catch(e => console.warn("[UNreader] 写入预设文件失败", e))
-		}, 600) as unknown as number)
+		}, 600))
 	}
 
 	/** 重命名：复制整个预设文件夹到新名下，再删除旧文件夹 */
@@ -206,7 +207,8 @@ export class PresetStore {
 		try {
 			const folder = this.vault.getAbstractFileByPath(`${this.folder}/${preset.dir}`)
 			if (folder instanceof TFolder) {
-				await this.vault.trash(folder, true)
+				// 删除预设目录走用户的删除偏好（上架规则禁止 Vault.trash/delete）
+				await this.fileManager.trashFile(folder)
 				return
 			}
 		} catch { /* 回收站失败转直接删除 */ }
@@ -219,7 +221,7 @@ export class PresetStore {
 
 	/** 旧版预设内背景图（preset:background.xxx）→ data URI；shared:/远程引用原样返回 */
 	async resolveImages(appearance: AppearanceSettings, preset: AppearancePreset & { dir?: string }): Promise<void> {
-		const dir = (preset as AppearancePreset & { dir?: string }).dir ?? PresetStore.dirNameFor(preset.name)
+		const dir = (preset).dir ?? PresetStore.dirNameFor(preset.name)
 		for (const field of PresetStore.IMAGE_FIELDS) {
 			const ref = ((appearance as unknown as Record<string, unknown>)[field] as string ?? "").trim()
 			if (!ref.startsWith("preset:")) continue

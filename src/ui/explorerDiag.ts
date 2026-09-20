@@ -32,7 +32,7 @@ const EXPLORER_ROOTS = [
 
 function styleOf(el: Element | null): Record<string, string> {
 	if (!el) return {};
-	const cs = getComputedStyle(el as HTMLElement);
+	const cs = getComputedStyle(el);
 	return {
 		display: cs.display,
 		visibility: cs.visibility,
@@ -95,7 +95,7 @@ export function collectNeighborFacts(rootEl: HTMLElement | null): Record<string,
 		// 绝不记内容：@font-face 的 src 可能是 20MB 级的 blob/data。
 		out.styles = [...doc.querySelectorAll("style")].map(el => {
 			let rules = -1;
-			try { rules = (el as HTMLStyleElement).sheet?.cssRules?.length ?? -1 } catch { rules = -1 }
+			try { rules = (el).sheet?.cssRules?.length ?? -1 } catch { rules = -1 }
 			return { id: el.id || null, bytes: (el.textContent ?? "").length, rules };
 		});
 

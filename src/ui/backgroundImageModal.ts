@@ -1,5 +1,6 @@
-import { Modal, App } from "obsidian";
+import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
+import { UnreaderModal } from "./modalSkin";
 
 /** 统一的图片来源：库内文件或系统文件选择器，由宿主负责读取。 */
 export interface BackgroundImagePick {
@@ -14,7 +15,7 @@ export interface BackgroundImagePick {
 }
 
 /** 选择背景图片（库内文件列表，逐张即时生效；系统文件选择器由面板行「系统」按钮承担）。 */
-export class BackgroundImageModal extends Modal {
+export class BackgroundImageModal extends UnreaderModal {
 	constructor(
 		app: App,
 		private picks: BackgroundImagePick[],
@@ -71,7 +72,7 @@ export class BackgroundImageModal extends Modal {
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
 		btnRow.createEl("button", { text: "取消" }).addEventListener("click", () => this.close());
 
-		setTimeout(() => input.focus(), 50);
+		window.setTimeout(() => input.focus(), 50);
 	}
 
 	onClose(): void {

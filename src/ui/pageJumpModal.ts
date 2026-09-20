@@ -1,7 +1,8 @@
-import { Modal, App } from "obsidian";
+import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
+import { UnreaderModal } from "./modalSkin";
 
-export class PageJumpModal extends Modal {
+export class PageJumpModal extends UnreaderModal {
 	constructor(
 		app: App,
 		private total: number,
@@ -54,7 +55,7 @@ export class PageJumpModal extends Modal {
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
 		btnRow.createEl("button", { text: "跳转", cls: "mod-cta" }).addEventListener("click", submit);
 
-		setTimeout(() => {
+		window.setTimeout(() => {
 			input.focus();
 			input.select();
 		}, 50);

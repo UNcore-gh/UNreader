@@ -49,8 +49,15 @@ function articleHtml(entry: FeedEntry, feed: FeedSubscription | null): string {
 	const body = entry.contentHtml.trim()
 		? entry.contentHtml
 		: `<p>${escapeHtml(entry.summary || "这篇文章没有可显示的正文。")}</p>`;
+	// 文末的「在默认浏览器打开原文」：用户 2026-09-20 要求「文章最下面也加一个跳转
+	// 默认浏览器的按钮」。入口从正文里挂回来是**有意的反转** —— 当初撤掉它是因为
+	// 「srcdoc 里的链接只能靠事件拦截才不导航」，而那条拦截现在是引擎层唯一的收口
+	// （engineAdapter 的 frame 点击链路 + foliate `external-link`），正文里再放一个
+	// `<a href>` 与功能轨那枚按钮走的是**同一条**外链通道，没有额外的链路成本。
+	// 挂 `<a>`（不是 `<button>`）：四种阅读源与 foliate 自己的链接处理都认它。
+	// 没有原文地址（纯本地内容）时整块不渲染，不留空壳。
 	const original = entry.url
-		? `<footer class="ur-feed-source-link"><a href="${escapeHtml(entry.url)}" rel="noopener noreferrer">阅读原文</a></footer>`
+		? `<footer class="ur-feed-original"><a class="ur-feed-original-link" href="${escapeHtml(entry.url)}" target="_blank" rel="noopener noreferrer">在默认浏览器打开原文</a></footer>`
 		: "";
 	return `<!DOCTYPE html><html><head><meta charset="utf-8"><base href="${escapeHtml(entry.url || "")}"><style>` +
 		`html,body{margin:0;padding:0;background:transparent}` +
@@ -63,7 +70,10 @@ function articleHtml(entry: FeedEntry, feed: FeedSubscription | null): string {
 		`.ur-feed-content pre{white-space:pre-wrap;overflow-wrap:anywhere}` +
 		`.ur-feed-content table{display:block;max-width:100%;overflow:auto}` +
 		`.ur-feed-content blockquote{margin:1em 0;padding:.2em 0 .2em 1em;border-left:3px solid color-mix(in srgb,currentColor 24%,transparent);opacity:.86}` +
-		`.ur-feed-source-link{margin-top:2.2em;padding-top:1.1em;border-top:1px solid color-mix(in srgb,currentColor 14%,transparent);font-size:.86em}` +
+		// 文末「在默认浏览器打开原文」：样式跟着正文（继承 currentColor/行高），
+		// 不引任何外部资源，深浅色主题都不用另外覆盖。
+		`.ur-feed-original{margin:2.4em 0 0;padding:1.1em 0 0;border-top:1px solid color-mix(in srgb,currentColor 16%,transparent)}` +
+		`.ur-feed-original-link{display:inline-block;padding:.5em 1em;border:1px solid color-mix(in srgb,currentColor 26%,transparent);border-radius:999px;font-size:.88em;line-height:1.4;text-decoration:none;opacity:.85}` +
 		`</style></head><body><article class="ur-feed-article"><header class="ur-feed-header">` +
 		`<h1 class="ur-feed-title">${title}</h1><div class="ur-feed-meta">` +
 		(author ? `<span>${author}</span>` : "") + `<span>${source}</span>` +
@@ -111,4 +121,3 @@ export function makeFeedBook(entry: FeedEntry, feed: FeedSubscription | null = n
 		},
 	};
 }
-

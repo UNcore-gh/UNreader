@@ -1,11 +1,16 @@
 import type { FeedEntry, FeedSettings } from "../types";
-import { extractFulltext } from "./articleExtractor";
+import { extractFulltext, mergeExtractedArticles, type ExtractedArticle } from "./articleExtractor";
 import { fetchPageForExtraction, fetchParsedFeed, resolveFeedInput, type FeedResolution } from "./feedFetcher";
 import type { FeedStore } from "./feedStore";
 import { parseOpml, type ParsedOpmlFeed } from "./feedParser";
 
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 30 * 60_000;
+/** 多页文章最多接几页、单页正文下限（低于此长度视为"抓错了/抓到了列表页"）。 */
+const MAX_FULLTEXT_PAGES = 3;
+const MIN_CONTINUATION_LENGTH = 200;
+/** 合并后正文的兜底上限：防止被"永远有下一页"的站点拖着无限抓。 */
+const MAX_FULLTEXT_TEXT_LENGTH = 300_000;
 
 export interface FeedRefreshResult {
 	feedId: string
@@ -17,6 +22,7 @@ export interface FeedRefreshResult {
 /** Feed 网络与合并服务。所有方法只在用户显式操作或打开文章时调用。 */
 export class FeedService {
 	private inFlight = new Map<string, Promise<FeedRefreshResult>>();
+	private fulltextInFlight = new Map<string, Promise<FeedEntry | null>>();
 	private retryAt = new Map<string, { at: number; attempt: number }>();
 	private closed = false;
 
@@ -46,6 +52,13 @@ export class FeedService {
 		this.assertOpen();
 		this.retryAt.delete(feedId);
 		await this.store.removeSubscription(feedId);
+	}
+
+	/** 启用 / 停用订阅。停用时清掉退避计时器，重新启用后立即可刷新。 */
+	async setSubscriptionEnabled(feedId: string, enabled: boolean): Promise<void> {
+		this.assertOpen();
+		if (!enabled) this.retryAt.delete(feedId);
+		await this.store.setSubscriptionEnabled(feedId, enabled);
 	}
 
 	async importOpml(raw: string): Promise<{ imported: number; refreshed: number; failed: number }> {
@@ -90,7 +103,8 @@ export class FeedService {
 
 	async refreshAll(force = false): Promise<FeedRefreshResult[]> {
 		this.assertOpen();
-		const feeds = this.store.listFeeds();
+		// 停用的订阅不参与批量刷新（单条 refreshFeed 仍可显式调用，方便「启用前先试一把」）
+		const feeds = this.store.listFeeds().filter(feed => feed.enabled !== false);
 		const results: FeedRefreshResult[] = [];
 		for (const feed of feeds) results.push(await this.refreshFeed(feed.id, force));
 		return results;
@@ -156,11 +170,55 @@ export class FeedService {
 
 	async fetchFulltext(feedId: string, entryId: string): Promise<FeedEntry | null> {
 		this.assertOpen();
+		const key = `${feedId}:${entryId}`;
+		const running = this.fulltextInFlight.get(key);
+		if (running) return running;
+		const run = this.doFetchFulltext(feedId, entryId);
+		this.fulltextInFlight.set(key, run);
+		try {
+			return await run;
+		} finally {
+			if (this.fulltextInFlight.get(key) === run) this.fulltextInFlight.delete(key);
+		}
+	}
+
+	private async doFetchFulltext(feedId: string, entryId: string): Promise<FeedEntry | null> {
 		const entry = this.store.getEntry(feedId, entryId);
 		if (!entry?.url) throw new Error("这篇文章没有可抓取的原文地址");
-		const html = await fetchPageForExtraction(entry.url);
-		const extracted = extractFulltext(html, entry.url);
-		return this.store.replaceEntryContent(feedId, entryId, extracted.html, extracted.hash);
+		const extracted = await this.collectFulltext(entry.url);
+		return this.store.replaceEntryContent(feedId, entryId, extracted.html, extracted.hash, {
+			title: extracted.title,
+			author: extracted.byline,
+		});
+	}
+
+	/** 抓正文：首页，外加同一篇文章的续页（判定见 articleExtractor.findNextPageUrl —— 只认
+	 *  `/slug` → `/slug/2` 与"仅差分页参数"两种形态，不会把"下一篇推荐文章"接进来）。
+	 *  续页任何一步失败都只是**提前收工**，不影响首页已抓到的正文。 */
+	private async collectFulltext(url: string): Promise<ExtractedArticle> {
+		const pages: ExtractedArticle[] = [extractFulltext(await fetchPageForExtraction(url), url)];
+		const visited = new Set<string>([url]);
+		let total = pages[0]!.text.length;
+		while (pages.length < MAX_FULLTEXT_PAGES && total < MAX_FULLTEXT_TEXT_LENGTH) {
+			const next = pages[pages.length - 1]!.nextPageUrl;
+			if (!next || visited.has(next)) break;
+			visited.add(next);
+			let page: ExtractedArticle;
+			try {
+				page = extractFulltext(await fetchPageForExtraction(next), next);
+			} catch {
+				break;
+			}
+			const previous = pages[pages.length - 1]!.text;
+			// 三道防呆：续页太短（抓到列表页/空页）、与上一页重复（站点把全文放回首页）、
+			// 明显小于首页的一个零头（抓到了"相关阅读"）。
+			if (page.text.length < MIN_CONTINUATION_LENGTH) break;
+			if (previous.includes(page.text.slice(0, 60))) break;
+			if (page.text.length < previous.length * 0.15) break;
+			pages.push(page);
+			total += page.text.length;
+		}
+		return mergeExtractedArticles(pages);
 	}
 
 	private limit(): number {
@@ -175,6 +233,7 @@ export class FeedService {
 	close(): void {
 		this.closed = true;
 		this.inFlight.clear();
+		this.fulltextInFlight.clear();
 		this.retryAt.clear();
 	}
 }

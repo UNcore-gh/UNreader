@@ -25,11 +25,20 @@ const HOT_KEEP = 200
 const WRITE_RETRY_MAX = 3
 const WRITE_RETRY_MS = 3000
 
+/** 老格式位置字段（`BookPosition.cfi` / `ProgressFile.cfi` 都标了 `@deprecated`）。
+ *  这里用一个**不含 deprecated 标注**的结构类型来读它：全模块只有「吸收旧数据」
+ *  这一个用途，走 helper 收口后就不必在每个调用点重复触发 `no-deprecated`。
+ *  写入路径一律只写新名 `anchor`。 */
+function legacyAnchor(source: { anchor?: unknown; cfi?: unknown } | null | undefined): string {
+	if (!source) return ""
+	if (typeof source.anchor === "string" && source.anchor) return source.anchor
+	if (typeof source.cfi === "string" && source.cfi) return source.cfi
+	return ""
+}
+
 /** 从 ProgressFile 抽取位置 token，兼容新旧两种字段名 */
 function pickAnchor(parsed: Partial<ProgressFile>): string {
-	if (typeof parsed.anchor === "string" && parsed.anchor) return parsed.anchor
-	if (typeof parsed.cfi === "string" && parsed.cfi) return parsed.cfi
-	return ""
+	return legacyAnchor(parsed)
 }
 
 /**
@@ -142,7 +151,7 @@ export class ProgressStore {
 		// 旧 data.json 里的 positions 迁移到文件（仅在比文件记录新时写入）
 		let migrated = 0
 		for (const [bookPath, pos] of Object.entries(legacyPositions ?? {})) {
-			const legacy = pos?.anchor ?? pos?.cfi
+			const legacy = legacyAnchor(pos)
 			if (typeof legacy !== "string" || !legacy) continue
 			const existing = this.cache.get(bookPath)
 			if (existing && existing.updatedAt >= (pos.updatedAt ?? 0)) continue
@@ -237,7 +246,7 @@ export class ProgressStore {
 		this.cache.delete(oldPath)
 		this.mergeIn(newPath, current)
 		this.hotWrite(newPath, current)
-		try { localStorage.removeItem(this.hotKey(oldPath)) } catch { /* ignore */ }
+		try { window.localStorage.removeItem(this.hotKey(oldPath)) } catch { /* ignore */ }
 		return true
 	}
 
@@ -251,22 +260,22 @@ export class ProgressStore {
 	 *  「写盘那一拍赶不上」（应用被杀 / 崩溃），异步化就等于没写。 */
 	private hotWrite(bookPath: string, pos: BookPosition): void {
 		try {
-			if (typeof localStorage === "undefined") return
+			if (typeof window.localStorage === "undefined") return
 			const payload: ProgressFile = {
 				book: bookPath,
 				anchor: pos.anchor,
 				fraction: pos.fraction ?? 0,
 				updatedAt: pos.updatedAt ?? 0,
 			}
-			localStorage.setItem(this.hotKey(bookPath), JSON.stringify(payload))
-			if (localStorage.length > HOT_SCAN_AT) this.hotPrune()
+			window.localStorage.setItem(this.hotKey(bookPath), JSON.stringify(payload))
+			if (window.localStorage.length > HOT_SCAN_AT) this.hotPrune()
 		} catch { /* 配额满 / 隐私模式：热缓存尽力而为，绝不打断主链 */ }
 	}
 
 	private hotRead(bookPath: string): BookPosition | null {
 		try {
-			if (typeof localStorage === "undefined") return null
-			const raw = localStorage.getItem(this.hotKey(bookPath))
+			if (typeof window.localStorage === "undefined") return null
+			const raw = window.localStorage.getItem(this.hotKey(bookPath))
 			if (!raw) return null
 			const parsed = JSON.parse(raw) as Partial<ProgressFile>
 			const anchor = pickAnchor(parsed)
@@ -285,10 +294,10 @@ export class ProgressStore {
 	private hotBooks(): string[] {
 		const out: string[] = []
 		try {
-			if (typeof localStorage === "undefined") return out
+			if (typeof window.localStorage === "undefined") return out
 			const prefix = `${HOT_PREFIX}:${encodeURIComponent(this.scope)}:`
-			for (let i = 0; i < localStorage.length; i++) {
-				const key = localStorage.key(i)
+			for (let i = 0; i < window.localStorage.length; i++) {
+				const key = window.localStorage.key(i)
 				if (!key || !key.startsWith(prefix)) continue
 				try {
 					out.push(decodeURIComponent(key.slice(prefix.length)))
@@ -310,15 +319,15 @@ export class ProgressStore {
 		if (entries.length <= HOT_KEEP) return
 		entries.sort((a, b) => b.updatedAt - a.updatedAt)
 		for (const e of entries.slice(HOT_KEEP)) {
-			try { localStorage.removeItem(e.key) } catch { /* ignore */ }
+			try { window.localStorage.removeItem(e.key) } catch { /* ignore */ }
 		}
 	}
 
 	/** 写入进度（去抖 1s；调用方同步返回，不阻塞翻页/滚动）。
 	 *  热缓存是**同步**写的 —— 应用在这一拍之后被杀也不丢位置。 */
 	save(bookPath: string, pos: BookPosition): void {
-		const anchor = pos?.anchor ?? pos?.cfi
-		if (typeof anchor !== "string" || !anchor) return
+		const anchor = legacyAnchor(pos)
+		if (!anchor) return
 		// 统一进新格式（老 cfi 字段也吸收）
 		const normalized: BookPosition = { anchor, fraction: pos.fraction ?? 0, updatedAt: pos.updatedAt ?? 0 }
 		this.mergeIn(bookPath, normalized)
@@ -332,8 +341,8 @@ export class ProgressStore {
 	/** 立即写盘（不去抖）：关闭视图 / 退出应用 / 应用切后台时用。
 	 *  去抖链（视图 800ms + 本模块 1s）在「打开着书直接退出」这条路上是纯损失。 */
 	saveNow(bookPath: string, pos: BookPosition): void {
-		const anchor = pos?.anchor ?? pos?.cfi
-		if (typeof anchor !== "string" || !anchor) return
+		const anchor = legacyAnchor(pos)
+		if (!anchor) return
 		const normalized: BookPosition = { anchor, fraction: pos.fraction ?? 0, updatedAt: pos.updatedAt ?? 0 }
 		this.mergeIn(bookPath, normalized)
 		this.hotWriteCache(bookPath)

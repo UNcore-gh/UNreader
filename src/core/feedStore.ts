@@ -24,6 +24,8 @@ function normalizeSubscription(value: Partial<FeedSubscription>): FeedSubscripti
 		lastError: typeof value.lastError === "string" ? value.lastError : null,
 		etag: typeof value.etag === "string" ? value.etag : null,
 		lastModified: typeof value.lastModified === "string" ? value.lastModified : null,
+		// 旧库没有这个字段 → 一律按「启用」读；只有显式写了 false 才算停用
+		enabled: value.enabled !== false,
 	};
 }
 
@@ -145,6 +147,7 @@ export class FeedStore {
 			lastError: null,
 			etag: null,
 			lastModified: null,
+			enabled: true,
 		};
 		this.feeds.set(id, feed);
 		this.entries.set(id, new Map());
@@ -168,6 +171,15 @@ export class FeedStore {
 		feed.title = title.trim() || feed.title;
 		feed.updatedAt = Date.now();
 		await Promise.all([this.writeIndex(), this.writeFeed(feedId)]);
+	}
+
+	/** 启用 / 停用订阅。停用只改索引里的一位（文章快照原样保留，随时可再启用）。 */
+	async setSubscriptionEnabled(feedId: string, enabled: boolean): Promise<void> {
+		const feed = this.feeds.get(feedId);
+		if (!feed || feed.enabled === enabled) return;
+		feed.enabled = enabled;
+		feed.updatedAt = Date.now();
+		await this.writeIndex();
 	}
 
 	async updateFetchMetadata(
@@ -208,17 +220,40 @@ export class FeedStore {
 		return entry;
 	}
 
+	/** 一次写入多条阅读状态，供播客进度等高频小更新合并落盘。 */
+	async updateEntriesState(feedId: string, patches: Array<{ entryId: string; patch: Partial<FeedEntryState> }>): Promise<void> {
+		const map = this.entries.get(feedId);
+		if (!map || !patches.length) return;
+		let changed = false;
+		for (const { entryId, patch } of patches) {
+			const entry = map.get(entryId);
+			if (!entry) continue;
+			const next: FeedEntryState = {
+				...entry.state,
+				...patch,
+				stateUpdatedAt: Date.now(),
+			};
+			entry.state = next;
+			entry.updatedAt = Math.max(entry.updatedAt, next.stateUpdatedAt);
+			changed = true;
+		}
+		if (changed) await this.writeFeed(feedId);
+	}
+
 	async replaceEntryContent(
 		feedId: string,
 		entryId: string,
 		contentHtml: string,
 		contentHash: string,
+		metadata?: { title?: string; author?: string },
 	): Promise<FeedEntry | null> {
 		const entry = this.entries.get(feedId)?.get(entryId);
 		if (!entry) return null;
 		entry.contentHtml = contentHtml;
 		entry.contentHash = contentHash;
 		entry.contentSource = "fulltext";
+		if (metadata?.title?.trim()) entry.title = metadata.title.trim();
+		if (!entry.author && metadata?.author?.trim()) entry.author = metadata.author.trim();
 		entry.pendingContentHtml = undefined;
 		entry.pendingContentHash = undefined;
 		entry.pendingContentSource = undefined;

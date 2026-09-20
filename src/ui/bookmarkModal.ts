@@ -1,7 +1,8 @@
-import { Modal, App } from "obsidian";
+import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
+import { UnreaderModal } from "./modalSkin";
 
-export class BookmarkModal extends Modal {
+export class BookmarkModal extends UnreaderModal {
 	constructor(
 		app: App,
 		private onSubmit: (label: string) => void,
@@ -42,7 +43,7 @@ export class BookmarkModal extends Modal {
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
 		btnRow.createEl("button", { text: "添加", cls: "mod-cta" }).addEventListener("click", submit);
 
-		setTimeout(() => input.focus(), 50);
+		window.setTimeout(() => input.focus(), 50);
 	}
 
 	onClose(): void {

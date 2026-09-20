@@ -156,7 +156,7 @@ export class AppearancePanel {
 			this.onPickFont = callbacks.onPickFont ?? (() => {});
 			this.onPickFontSystem = callbacks.onPickFontSystem ?? (() => {});
 		}
-		this.containerEl = document.createElement("div");
+		this.containerEl = createDiv();
 		this.containerEl.className = "unreader-appearance-panel";
 		// 鼠标离开面板自动关闭（300ms 延迟，移入则取消）。
 		// 仅 hover 能力设备绑定：触屏靠「点击按钮开 + 点外面关」，
@@ -184,7 +184,7 @@ export class AppearancePanel {
 						if (ae && ae.tagName === "INPUT" && ae.type === "color") return;
 					} catch { /* ignore */ }
 					this.close();
-				}, 300) as unknown as number;
+				}, 300);
 			});
 		}
 		this.current = { ...DEFAULT_APPEARANCE };
@@ -330,7 +330,7 @@ export class AppearancePanel {
 		);
 		scrollEl.appendChild(
 			this.buildSlider("字间距", -0.05, 0.3, 0.01, resolved.letterSpacing, v => this.emit({ letterSpacing: v }), x => `${x.toFixed(2)}em`, () => {
-				this.emit({ letterSpacing: DEFAULT_APPEARANCE.letterSpacing as number });
+				this.emit({ letterSpacing: DEFAULT_APPEARANCE.letterSpacing });
 				(this.current as unknown as Record<string, unknown>).letterSpacing = DEFAULT_APPEARANCE.letterSpacing;
 				this.render();
 			}),
@@ -346,8 +346,8 @@ export class AppearancePanel {
 			{ value: "obsidian" as const, label: "跟随 Obsidian" },
 			{ value: "custom" as const, label: "自定义" },
 		], this.current.colorMode ?? "obsidian", v => {
-			this.current.colorMode = v as AppearanceSettings["colorMode"];
-			this.emit({ colorMode: v as AppearanceSettings["colorMode"] });
+			this.current.colorMode = v;
+			this.emit({ colorMode: v });
 			this.render();
 		}, "恢复默认：跟随 Obsidian", () => {
 			this.emit({ colorMode: DEFAULT_APPEARANCE.colorMode });
@@ -361,8 +361,8 @@ export class AppearancePanel {
 			{ value: "light" as const, label: "浅色" },
 			{ value: "dark" as const, label: "深色" },
 		], this.current.theme ?? "auto", v => {
-			this.current.theme = v as AppearanceSettings["theme"];
-			this.emit({ theme: v as AppearanceSettings["theme"] });
+			this.current.theme = v;
+			this.emit({ theme: v });
 			this.render();
 		}, "恢复默认：自动", () => {
 			this.emit({ theme: DEFAULT_APPEARANCE.theme });
@@ -382,11 +382,11 @@ export class AppearancePanel {
 		// 用 activeBackground/activeTextColor 已自动取对应主题
 		scrollEl.appendChild(
 			this.buildColorRow("背景色", bgValue, v => {
-				if (isDark) this.emit({ darkBackgroundColor: v } as Partial<AppearanceSettings>);
+				if (isDark) this.emit({ darkBackgroundColor: v });
 				else this.emit({ backgroundColor: v });
 			}, bgFallback, () => {
 				if (isDark) {
-					this.emit({ darkBackgroundColor: DEFAULT_APPEARANCE.darkBackgroundColor } as Partial<AppearanceSettings>);
+					this.emit({ darkBackgroundColor: DEFAULT_APPEARANCE.darkBackgroundColor });
 					this.current.darkBackgroundColor = DEFAULT_APPEARANCE.darkBackgroundColor;
 				} else {
 					this.emit({ backgroundColor: DEFAULT_APPEARANCE.backgroundColor });
@@ -397,11 +397,11 @@ export class AppearancePanel {
 		);
 		scrollEl.appendChild(
 			this.buildColorRow("文字颜色", fgValue, v => {
-				if (isDark) this.emit({ darkTextColor: v } as Partial<AppearanceSettings>);
+				if (isDark) this.emit({ darkTextColor: v });
 				else this.emit({ textColor: v });
 			}, fgFallback, () => {
 				if (isDark) {
-					this.emit({ darkTextColor: DEFAULT_APPEARANCE.darkTextColor } as Partial<AppearanceSettings>);
+					this.emit({ darkTextColor: DEFAULT_APPEARANCE.darkTextColor });
 					this.current.darkTextColor = DEFAULT_APPEARANCE.darkTextColor;
 				} else {
 					this.emit({ textColor: DEFAULT_APPEARANCE.textColor });
@@ -558,7 +558,7 @@ export class AppearancePanel {
 		);
 		{
 			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
-			hint.setText("点击正文空白始终可临时唤出工具栏；「滑动自动隐藏」只管插件工具层，「接管原生界面」让 Obsidian 的页首/底栏随滚动与工具层显隐一起收放（关掉后完全不碰原生界面）。浮动目录与章节进度按各自开关显示，不受工具栏显隐影响。");
+			hint.setText("点击正文空白始终可临时唤出工具栏；「滑动自动隐藏」只管插件工具层（下滑藏、上滑唤），「接管原生界面」让 Obsidian 的页首/底栏向下滚动时收起、向上滚动不再自动出现（点按正文空白才唤出；关掉后完全不碰原生界面）。浮动目录与章节进度按各自开关显示，不受工具栏显隐影响。");
 		}
 
 		// 全沉浸：默认只留退出按钮，这里的两个开关只控制明确例外。
@@ -573,7 +573,7 @@ export class AppearancePanel {
 			this.render();
 		});
 		if (this.current.showTocRail !== true) fullTocRow.setAttr("data-disabled", "true");
-		(fullTocRow.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.toggleAttribute("disabled", this.current.showTocRail !== true);
+		(fullTocRow.querySelector("input[type=checkbox]"))?.toggleAttribute("disabled", this.current.showTocRail !== true);
 		scrollEl.appendChild(fullTocRow);
 		const fullProgressRow = this.buildToggleRow("显示章节进度条", this.current.fullImmersionShowChapterProgress === true, v => {
 			this.current.fullImmersionShowChapterProgress = v;
@@ -584,7 +584,7 @@ export class AppearancePanel {
 			this.render();
 		});
 		if (this.current.chapterProgress !== true) fullProgressRow.setAttr("data-disabled", "true");
-		(fullProgressRow.querySelector("input[type=checkbox]") as HTMLInputElement | null)?.toggleAttribute("disabled", this.current.chapterProgress !== true);
+		(fullProgressRow.querySelector("input[type=checkbox]"))?.toggleAttribute("disabled", this.current.chapterProgress !== true);
 		scrollEl.appendChild(fullProgressRow);
 		scrollEl.appendChild(this.buildToggleRow("点击屏幕显示界面", this.current.fullImmersionTapReveal === true, v => {
 			this.current.fullImmersionTapReveal = v;
@@ -610,7 +610,7 @@ export class AppearancePanel {
 		const scrollTarget = this.pendingScrollSection;
 		this.pendingScrollSection = null;
 		if (scrollTarget) {
-			requestAnimationFrame(() => {
+			window.requestAnimationFrame(() => {
 				const section = this.containerEl.querySelector<HTMLElement>(`[data-appearance-section="${scrollTarget}"]`);
 				section?.scrollIntoView({ block: "start" });
 			});
@@ -641,11 +641,11 @@ export class AppearancePanel {
 		resetTitle: string,
 		onReset: () => void,
 	): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		row.createSpan({ cls: "unreader-appearance-label", text: label });
 		const control = row.createDiv({ cls: "unreader-appearance-control" });
-		const select = control.createEl("select", { cls: "dropdown" }) as HTMLSelectElement;
+		const select = control.createEl("select", { cls: "dropdown" });
 		for (const opt of options) {
 			select.createEl("option", { value: String(opt.value), text: opt.label });
 		}
@@ -659,23 +659,23 @@ export class AppearancePanel {
 	}
 
 	private buildFontSelect(currentId: string | null): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		row.createSpan({ cls: "unreader-appearance-label", text: "字体" });
 		const control = row.createDiv({ cls: "unreader-appearance-control" });
-		const select = control.createEl("select", { cls: "dropdown" }) as HTMLSelectElement;
+		const select = control.createEl("select", { cls: "dropdown" });
 		select.createEl("option", { value: "", text: "跟随 Obsidian" });
 		// 仅自定义字体（库内字体文件夹扫描结果）：要么跟随 Obsidian，要么用导入的字体
 		const customs = this.getCustomFonts();
 		if (customs.length) {
-			const group = document.createElement("optgroup");
+			const group = createEl("optgroup");
 			group.label = "自定义字体";
 			// 同名消歧：label 是去扩展名的 basename，所以 A.ttf 与 A.otf 会得到同一个
 			// 显示名（而它们的 id / 字形都不同）——出现重名时补扩展名区分
 			const labelCount = new Map<string, number>();
 			for (const f of customs) labelCount.set(f.label, (labelCount.get(f.label) ?? 0) + 1);
 			for (const f of customs) {
-				const opt = document.createElement("option");
+				const opt = createEl("option");
 				opt.value = f.id;
 				const dup = (labelCount.get(f.label) ?? 0) > 1;
 				opt.text = dup ? `${f.label}（${f.id.split(".").pop() ?? ""}）` : f.label;
@@ -690,7 +690,7 @@ export class AppearancePanel {
 			const base = currentId.startsWith("custom:")
 				? currentId.slice("custom:".length).split("/").pop() ?? ""
 				: currentId;
-			const opt = document.createElement("option");
+			const opt = createEl("option");
 			opt.value = currentId;
 			opt.text = `字体已停用或丢失：${base.replace(/\.[^.]+$/, "")}`;
 			select.appendChild(opt);
@@ -738,7 +738,7 @@ export class AppearancePanel {
 		format: (v: number) => string,
 		onReset?: () => void,
 	): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		row.createSpan({ cls: "unreader-appearance-label", text: label });
 		const control = row.createDiv({ cls: "unreader-appearance-control" });
@@ -746,7 +746,7 @@ export class AppearancePanel {
 		const slider = control.createEl("input", {
 			type: "range",
 			attr: { min: String(min), max: String(max), step: String(step) },
-		}) as HTMLInputElement;
+		});
 		slider.value = String(initial);
 		slider.addEventListener("input", () => {
 			const v = Number(slider.value);
@@ -758,7 +758,7 @@ export class AppearancePanel {
 	}
 
 	private createResetButton(onReset: () => void, tooltip = "恢复默认"): HTMLElement {
-		const btn = document.createElement("button");
+		const btn = createEl("button");
 		btn.className = "unreader-appearance-reset";
 		btn.setAttr("aria-label", tooltip);
 		btn.title = tooltip;
@@ -774,12 +774,12 @@ export class AppearancePanel {
 	}
 
 	private buildPresetRow(): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row unreader-appearance-preset-row";
 		row.createSpan({ cls: "unreader-appearance-label", text: "预设" });
 		const control = row.createDiv({ cls: "unreader-appearance-control unreader-appearance-preset-control" });
 		const presets = this.getPresets();
-		const select = control.createEl("select", { cls: "dropdown unreader-appearance-preset-select" }) as HTMLSelectElement;
+		const select = control.createEl("select", { cls: "dropdown unreader-appearance-preset-select" });
 		select.createEl("option", { value: "", text: presets.length ? "选择预设…" : "暂无预设" });
 		for (const p of presets) select.createEl("option", { value: p.id, text: p.name });
 		// 回显当前生效预设名；无生效预设（手动调整）时停在占位符
@@ -799,7 +799,7 @@ export class AppearancePanel {
 			}
 		});
 		const iconBtn = (icon: string, title: string, onClick: () => void): HTMLButtonElement => {
-			const btn = document.createElement("button");
+			const btn = createEl("button");
 			btn.className = "unreader-appearance-reset";
 			btn.title = title;
 			btn.setAttr("aria-label", title);
@@ -846,15 +846,15 @@ export class AppearancePanel {
 		field: "backgroundImage" | "backgroundImageLight" | "backgroundImageDark",
 		label: string,
 	): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		row.createSpan({ cls: "unreader-appearance-label", text: label });
 		const control = row.createDiv({ cls: "unreader-appearance-control" });
 		const text = control.createEl("input", {
 			type: "text",
 			cls: "unreader-appearance-color-text",
-			attr: { spellcheck: "false", placeholder: "图片 URL / data URI（手动输入）" },
-		}) as HTMLInputElement;
+			attr: { spellcheck: "false", placeholder: "图片地址（手动输入）" },
+		});
 		const raw = ((this.current as unknown as Record<string, unknown>)[field] as string | null) ?? "";
 		// 显示名字而非原始引用（data URI 太长、路径无意义）；手动输入 URL 仍然支持
 		const picked = this.getImageName(field);
@@ -873,7 +873,7 @@ export class AppearancePanel {
 				return;
 			}
 			(this.current as unknown as Record<string, unknown>)[field] = trimmed || null;
-			this.emit({ [field]: trimmed || null } as Partial<AppearanceSettings>);
+			this.emit({ [field]: trimmed || null });
 			this.render();
 		};
 		text.addEventListener("change", () => apply(text.value));
@@ -881,7 +881,7 @@ export class AppearancePanel {
 			if (e.key === "Enter") {
 				e.preventDefault();
 				apply(text.value);
-				(text as HTMLInputElement).blur();
+				(text).blur();
 			}
 		});
 		// 「库」走库内列表弹窗，「系统」直接调系统文件选择器；
@@ -896,7 +896,7 @@ export class AppearancePanel {
 			e.stopPropagation();
 			this.onPickImageSystem(field);
 		});
-		const clearBtn = document.createElement("button");
+		const clearBtn = createEl("button");
 		clearBtn.className = "unreader-appearance-reset";
 		clearBtn.title = "移除背景图片";
 		clearBtn.appendChild(createInlineIcon("trash"));
@@ -904,7 +904,7 @@ export class AppearancePanel {
 			e.stopPropagation();
 			if (!((this.current as unknown as Record<string, unknown>)[field] as string | null)) return;
 			(this.current as unknown as Record<string, unknown>)[field] = null;
-			this.emit({ [field]: null } as Partial<AppearanceSettings>);
+			this.emit({ [field]: null });
 			this.render();
 		});
 		control.appendChild(clearBtn);
@@ -914,7 +914,7 @@ export class AppearancePanel {
 	/** 分区标题行（外观面板的分组）。与此前的「读一屏不分组」相比，它要回答的是
 	 *  「这一堆里哪些是同类、哪些只在某种状态下才看得出来」——见各行/各组的注释。 */
 	private buildSectionRow(title: string, section?: AppearanceSection): HTMLElement {
-		const el = document.createElement("div");
+		const el = createDiv();
 		// 复用面板里**已有**的分区标题类（「界面颜色」「背景图片」用的就是它）——
 		// 自造一个类会让同一面板出现两种分区观感。
 		el.className = "unreader-appearance-color-header";
@@ -929,7 +929,7 @@ export class AppearancePanel {
 		onToggle: (v: boolean) => void,
 		onReset?: () => void,
 	): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		const labelEl = row.createSpan({ cls: "unreader-appearance-label", text: label });
 		// label 文字较长（"自动打开目录面板"7 字 > 72px）会溢出截断 → 覆盖默认
@@ -937,7 +937,7 @@ export class AppearancePanel {
 		// toggle 和 reset 始终被推至 row 最右紧挨；slider/select 行不受影响
 		labelEl.addClass("is-label-wide");
 		// 勾选框紧挨重置按钮，移动端窄屏也不会因中间控件被压扁
-		const toggle = row.createEl("input", { type: "checkbox" }) as HTMLInputElement;
+		const toggle = row.createEl("input", { type: "checkbox" });
 		toggle.checked = checked;
 		toggle.className = "unreader-appearance-toggle";
 		toggle.addEventListener("change", () => onToggle(toggle.checked));
@@ -952,20 +952,20 @@ export class AppearancePanel {
 		fallback: string,
 		onReset?: () => void,
 	): HTMLElement {
-		const row = document.createElement("div");
+		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		row.createSpan({ cls: "unreader-appearance-label", text: label });
 		const control = row.createDiv({ cls: "unreader-appearance-control" });
 		const colorInput = control.createEl("input", {
 			type: "color",
 			cls: "unreader-appearance-color-input",
-		}) as HTMLInputElement;
+		});
 		colorInput.value = normalizeHexColor(initial, fallback);
 		const text = control.createEl("input", {
 			type: "text",
 			cls: "unreader-appearance-color-text",
 			attr: { spellcheck: "false" },
-		}) as HTMLInputElement;
+		});
 		text.value = colorInput.value;
 		text.placeholder = fallback;
 		const apply = (hex: string) => {
@@ -987,7 +987,7 @@ export class AppearancePanel {
 			if (e.key === "Enter") {
 				e.preventDefault();
 				apply(text.value);
-				(text as HTMLInputElement).blur();
+				(text).blur();
 			}
 		});
 		if (onReset) row.appendChild(this.createResetButton(onReset));

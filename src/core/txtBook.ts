@@ -257,7 +257,7 @@ function escapeHtml(s: string): string {
 	return s.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;")
 }
 
-/** 段落两端的空白剥掉。中文 txt 常用全角空格 `　　` 做首行缩进，而缩进由主题 CSS 的
+/** 段落两端的空白剥掉。中文 txt 常用全角空格（U+3000）做首行缩进，而缩进由主题 CSS 的
  *  `paragraphIndent` 统一给，不剥就会缩进翻倍。 */
 function trimPara(s: string): string {
 	return s.replace(/^[\s\u3000]+/, "").replace(/[\s\u3000]+$/, "")

@@ -15,7 +15,7 @@ import { FootnoteHandler } from "../../vendor/foliate-js/footnotes.js";
 import { searchMatcher } from "../../vendor/foliate-js/search.js";
 import { textWalker } from "../../vendor/foliate-js/text-walker.js";
 import { Platform } from "obsidian";
-import type { AppearanceSettings } from "../types";
+import type { AppearanceSettings, WebDeviceMode } from "../types";
 import { highlightColorOf, activeBackground, activeTextColor, activeTheme, activeBackgroundImage } from "../types";
 import { perfBegin, perfEnd, perfPoint } from "./perf";
 import { idleYield, nextPaint } from "./idle";
@@ -24,6 +24,7 @@ import { isTxtFile, makeTxtBook } from "./txtBook";
 import { hasCoreModal, focusModalPrimary } from "./modalFocusGate";
 import { OBSIDIAN_IFRAME_DOM_COMPAT_JS } from "./iframeDomCompat";
 import { isResourceEnabled, resolveResourceReference } from "./resourceStore";
+import { openExternalLink } from "./externalLink";
 
 /* —— 一次性测量探针/引擎宿主层的固定样式：官方 lint 禁止 `el.style.x = "字面量"`，
    统一收敛成模块常量后按变量赋值（值与注入时机逐字节不变，只是不再触发规则）。 —— */
@@ -33,9 +34,17 @@ const DISPLAY_BLOCK = "block";
 const DISPLAY_NONE = "none";
 const SCROLL_BEHAVIOR_AUTO = "auto";
 const OVERFLOW_HIDDEN = "hidden";
-const CONT_FRAME_BASE_CSS = "width:100%;border:0;display:block;min-height:60vh;background:transparent;overflow:hidden;pointer-events:none;";
+/** 章节 frame 的基础样式。宽度走 `--ur-frame-w` 变量（默认 100% = 跟随阅读区）：
+ *  设备模式只需覆盖这一个变量，摘档时删掉它就自动回到 100% —— 不必在代码里
+ *  再写一份 `100%` 字面量，也就不会有「两处宽度各改一半」的经典走样。 */
+const CONT_FRAME_BASE_CSS = "width:var(--ur-frame-w,100%);border:0;display:block;min-height:60vh;background:transparent;overflow:hidden;pointer-events:none;";
+/** 设备模式覆盖 frame 宽度的变量名（见 CONT_FRAME_BASE_CSS / applyWebDevice）。 */
+const FRAME_WIDTH_VAR = "--ur-frame-w";
 const COLOR_SCHEME_NORMAL = "normal";
 const FRAME_MIN_HEIGHT_CLEARED = "0";
+/** 网页设备模式的**布局视口宽度**（CSS px）—— 模拟「以这台设备打开这个网页」。
+ *  `auto` 不在此表：它的语义是「不给固定视口，跟随阅读区宽度」（老口径）。 */
+const WEB_DEVICE_WIDTH: Record<Exclude<WebDeviceMode, "auto">, number> = { phone: 390, tablet: 834, desktop: 1280 };
 const POINTER_EVENTS_AUTO = "auto";
 const LAYER_SHELL_CSS = "position:fixed;inset:0;z-index:-1;pointer-events:none;";
 
@@ -44,7 +53,7 @@ const LAYER_SHELL_CSS = "position:fixed;inset:0;z-index:-1;pointer-events:none;"
  *  读不到时退回 16px（= Obsidian 的默认值）。探针只用一帧、随即移除。 */
 function spacingPx(): number {
 	try {
-		const probe = document.createElement("div");
+		const probe = createDiv();
 		probe.style.cssText = SPACING_PROBE_CSS;
 		document.body.appendChild(probe);
 		const px = parseFloat(window.getComputedStyle(probe).marginTop);
@@ -273,13 +282,13 @@ export function resolveAppearance(a: AppearanceSettings): ResolvedAppearance {
 		theme: a.theme ?? "light",
 		backgroundColor: bg,
 		textColor: fg,
-		darkBackgroundColor: (a as AppearanceSettings).darkBackgroundColor ?? "#1e1e1e",
-		darkTextColor: (a as AppearanceSettings).darkTextColor ?? "#d4d4d4",
+		darkBackgroundColor: (a).darkBackgroundColor ?? "#1e1e1e",
+		darkTextColor: (a).darkTextColor ?? "#d4d4d4",
 		backgroundImage: resolveResourceReference(activeBackgroundImage(a)),
-		imageBlur: (a as AppearanceSettings).imageBlur ?? 0,
-		glassEnabled: !!(a as AppearanceSettings).glassEnabled,
-		glassBlur: (a as AppearanceSettings).glassBlur ?? 12,
-		glassOpacity: (a as AppearanceSettings).glassOpacity ?? 0.55,
+		imageBlur: (a).imageBlur ?? 0,
+		glassEnabled: !!(a).glassEnabled,
+		glassBlur: (a).glassBlur ?? 12,
+		glassOpacity: (a).glassOpacity ?? 0.55,
 		customFontRules: customFontRulesCss(ruleIds),
 	} as unknown as ResolvedAppearance;
 }
@@ -305,7 +314,7 @@ export function resolveActiveColors(a: AppearanceSettings): { bg: string; fg: st
  *  用于「阅读主题强制浅/深而 Obsidian 相反」的组合。 */
 function obsidianVarColor(name: string, forceTheme: "light" | "dark" | null, fallback: string): string {
 	try {
-		const probe = document.createElement("div");
+		const probe = createDiv();
 		if (forceTheme) probe.className = forceTheme === "dark" ? "theme-dark" : "theme-light";
 		probe.style.cssText = COLOR_PROBE_CSS;
 		probe.style.backgroundColor = `var(${name})`;
@@ -466,6 +475,10 @@ interface FoliateBook {
 export interface SyntheticBook {
 	readonly __unreaderTxt?: true
 	readonly __unreaderFeed?: true
+	/** 「网页原样」标记（本地 HTML 专属，见 core/htmlBook.ts 文件头）：
+	 *  frame 样式换成零特异性兜底、宿主取消版心封顶。与 `__unreaderTxt` 正交 ——
+	 *  后者只说「这是我们造的合成书」，本标记才说「按网页而不是按书排版」。 */
+	readonly __unreaderWebLayout?: true
 	metadata?: Record<string, unknown>
 	toc?: TocItem[]
 	sections?: {
@@ -508,6 +521,79 @@ export interface RawFoliateView extends HTMLElement {
 	resolveCFI(cfi: string): { index: number }
 }
 
+/** foliate-js 的 view 用 `CustomEvent` 把 relayout / load / link 等事件推回来，但
+ *  `detail` 在类型上是 `any` —— 直接解构就会连带把 70+ 处成员访问变成
+ *  `no-unsafe-member-access`。这里统一收成 `unknown`，再按下面的接口逐字段
+ *  做运行时判定：这些字段来自第三方视图，本来就可能缺，判定是**真需要**的，不是
+ *  为了哄 lint。 */
+/** 外链协议白名单：只有这些进系统默认应用/浏览器。 */
+const EXTERNAL_URL_SCHEMES = /^(?:https?|ftp|mailto|tel):/i;
+
+/** 把正文里 `<a href>` 的原始写法解成可交给系统的绝对 URL（解不出来返回 null）。
+ *
+ *  `href_` 是**属性原文**（foliate `#handleLinks` 只给这个），相对地址要靠锚点自己的
+ *  `baseURI` 兜 —— Feed 文章的 `<base href="原文地址">` 正是这么让正文里的相对链接
+ *  变成对外链接的。命中不了白名单（相对地址、`javascript:`、`obsidian://` 等）返回
+ *  null，调用方**不接管**，把行为留给 foliate 自己。 */
+function externalUrlOf(raw: unknown, anchor: unknown): string | null {
+	const text = typeof raw === "string" ? raw.trim() : "";
+	if (!text) return null;
+	const base = (anchor as HTMLElement | null)?.baseURI;
+	let absolute = text;
+	try {
+		absolute = base ? new URL(text, base).href : new URL(text).href;
+	} catch { /* 解不出来就用原文试白名单 */ }
+	return EXTERNAL_URL_SCHEMES.test(absolute) ? absolute : null;
+}
+
+function foliateDetail<T extends object>(ev: Event): Partial<T> {
+	const raw: unknown = (ev as CustomEvent<unknown>).detail
+	if (raw === null || typeof raw !== "object") return {}
+	return raw
+}
+
+/** `relocate`：当前位置。fraction/location 由 foliate 给，cfi 只有分页流给。 */
+interface FoliateRelocateDetail {
+	fraction?: unknown
+	cfi?: unknown
+	tocItem?: { id?: unknown; label?: unknown } | null
+	location?: { current?: unknown; total?: unknown } | null
+}
+/** `load`：一帧文档挂好了（`doc` 是 iframe 内的 Document）。 */
+interface FoliateLoadDetail {
+	doc?: unknown
+	index?: unknown
+}
+/** `draw-annotation`：foliate 要求宿主自己把标注画到覆盖层上。 */
+interface FoliateDrawAnnotationDetail {
+	draw?: ((overlayer: unknown, options?: { color?: unknown }) => void) | null
+	annotation?: { color?: unknown } | null
+}
+/** `create-overlay`：某一帧的覆盖层新建好了。 */
+interface FoliateCreateOverlayDetail {
+	index?: unknown
+}
+/** `link`：正文里的链接被点了（脚注走这条）。 */
+interface FoliateLinkDetail {
+	a?: unknown
+}
+/** `external-link`：正文里点的是**外链**（`book.isExternal(href)` 为真）。
+ *  foliate 收到 `preventDefault()` 就放弃自己那次 `globalThis.open(href_, "_blank")`。 */
+interface FoliateExternalLinkDetail {
+	a?: unknown
+	href_?: unknown
+}
+/** `show-annotation`：视图要求把某条标注显示出来。 */
+interface FoliateShowAnnotationDetail {
+	value?: unknown
+	range?: unknown
+}
+/** 脚注气泡渲染回执（FootnoteHandler 自带事件）。 */
+interface FoliateFootnoteRenderDetail {
+	view?: unknown
+	href?: unknown
+}
+
 function localizeValue(value: unknown): string {
 	if (!value) return ""
 	if (typeof value === "string") return value
@@ -518,7 +604,10 @@ function localizeValue(value: unknown): string {
 			.filter(Boolean)
 		return values.join(", ")
 	}
-	return String(value)
+	// 只字符串化原始类型：`String(object)` 会得到 "[object Object]"，对标签毫无意义
+	// （上架规则 no-base-to-string）。
+	if (typeof value === "number" || typeof value === "boolean" || typeof value === "bigint") return String(value)
+	return ""
 }
 
 /* ---------------- 行内注释（脚注/尾注/评注）正文隐藏 ---------------- */
@@ -549,6 +638,16 @@ const NOTE_ANCESTOR_SELECTOR = [
 	"footnote", "endnote", "rearnote", "note", "annotation",
 ].map(t => `aside[epub\\:type~="${t}"]`).join(",") +
 	',aside[role~="doc-footnote"],aside[role~="doc-endnote"],.epubtype-footnote,.epub-footnote-item,.duokan-footnote-item'
+
+/* 给 foliate 自建的元素打一个插件自有类名。
+   为什么不用标签名选择器：`foliate-view` 是我们无法定义的自定义元素，stylelint 的
+   `selector-type-no-unknown` 会把 `foliate-view { … }` 判为「未知类型选择器」并报
+   上架预警；而 `:is(foliate-view)` 只是把这条搬进函数式伪类里，规则照样报。
+   类名只在「元素由我们接管」的两个入口打：① 主视图（本文件的创建点）；
+   ② foliate 内部为脚注气泡新建的二级视图（`footnote` 的 render 事件）。
+   **改这里必须同步 styles.css 的 `.unreader-foliate-view` 与 test/readwidth.html 的探针** ——
+   类名一旦漏打，`display:block/width:100%/height:100%` 整条规则失效，正文布局当场塌。 */
+const FOLIATE_VIEW_CLASS = "unreader-foliate-view"
 
 /** 解析 #rgb/#rrggbb/rgb()/rgba() 为相对亮度（0-1）；无法解析返回 null */
 function luminanceOf(color: string): number | null {
@@ -957,6 +1056,8 @@ interface ContFrame {
 	/** 已完成 FontFace 注册的字体签名（id 列表）。主题刷新循环会遍历所有 frame
 	 *  重跑注册，签名不变即跳过，避免反复解析同一份字体二进制。 */
 	fontSig?: string
+	/** 已落地的设备视口签名（`宽|缩放比`）：重算路径每帧都跑，签名不变就不写样式。 */
+	deviceSig?: string
 }
 
 /** 连续模式 iframe 内侧栏手势桥（内联进 srcdoc 末尾的 <script>）。
@@ -980,6 +1081,14 @@ interface ContFrame {
  *  手机（isPhone）上抽屉首行守卫 `if (innerHeight - e.startY < safeAreaBottom) return`
  *  恒真 → 连 registerCallback 都不会被调用 → 插件判「无人接收」放弃手势 →
  *  在正文区域横滑永远开不出侧栏。故每次上报前加上 frame 元素的视口矩形左上角。
+ *
+ *  **换算必须连带缩放比 k（设备模式）**：网页设备模式会给 frame 一个固定的布局视口
+ *  再用 zoom 整体缩到阅读区宽度（engineAdapter.setWebDevice），此时帧内 CSS px ≠ 宿主 px，
+ *  差一个 k。k 由宿主给出（`B.scale()`，non-webLayout 恒为 1 ⇒ 与旧行为逐字节一致），
+ *  **起手时读一次**：手势期间读会受祖先 transform（抽屉推出式开合）影响，
+ *  而 getBoundingClientRect 是含 transform 的，反推出的 k 会随动画漂移。
+ *  漏乘 k 不会让手势失效，但抽屉会以 1/k 的速度脱离手指（k≈0.3 时快 3 倍多），
+ *  8px 死区也缩成 2~3 个物理 px（纵向滚动的微抖就能锁成横滑、误开侧栏）。
  *
  *  识别逻辑对齐原生 Rm()：首个有效位移定轴（|dx|>|dy| → 横向），定轴前完全放行
  *  （纵向滚动照旧由浏览器合成器处理），定轴后才向宿主上报序列。8px 触控死区比
@@ -1009,7 +1118,10 @@ var W;try{W=window.parent}catch(e){return}
 var B=W&&W.__unreaderSwipe;
 if(!B||!B.active)return;
 var D=document;
-var id=null,sx=0,sy=0,lx=0,ly=0,t0=0,lt=0,vx=0,axis="",dead=false,sel0="";
+var id=null,sx=0,sy=0,lx=0,ly=0,t0=0,lt=0,vx=0,axis="",dead=false,sel0="",kk=1;
+/* 宿主给的本帧缩放比（设备模式；非网页通道恒为 1）。起手读一次并缓存整个手势：
+   手势期间祖先会被抽屉 transform，而 rect 含 transform，逐帧重读会得到漂移的值。 */
+function kOf(){try{var f=B.scale;if(typeof f==="function"){var v=f();if(v>0&&v<=1)return v}}catch(e){}return 1}
 /* iframe 左上角在**宿主视口**中的偏移。原生订阅者（抽屉 safe-area 闸、下拉动作）
    都按宿主视口解释 startX/startY/x/y，iframe 局部的 clientX/clientY 必须加上它。
    每次上报都重读：侧栏推出式开合会把 frame 连同祖先一起 transform，偏移随之变化
@@ -1039,6 +1151,7 @@ function onStart(e){
   if(e.touches.length>1){if(axis==="x")B.cancel();stop();return}
   if(ignored(e))return;
   var t=e.touches[0];
+  kk=kOf();
   id=t.identifier;sx=lx=t.clientX;sy=ly=t.clientY;t0=lt=Date.now();vx=0;axis="";dead=false;sel0=selText();
 }
 function onMove(e){
@@ -1046,27 +1159,31 @@ function onMove(e){
   var t=pick(e);if(!t)return;
   var x=t.clientX,y=t.clientY;
   if(!axis){
-    var dx=x-sx,dy=y-sy,ax=Math.abs(dx),ay=Math.abs(dy);
+    /* 死区与位移一律换算到宿主 px（= 手指物理位移的量级）：帧内 px 在设备模式下
+       是物理位移的 1/k 倍，直接拿帧内 px 比 8 会让死区缩成 2~3 个物理 px。 */
+    var dx=(x-sx)*kk,dy=(y-sy)*kk,ax=Math.abs(dx),ay=Math.abs(dy);
     if(ay>=8&&ay>ax){dead=true;return}
     if(ax<8||ax<=ay)return;
     if(Date.now()-t0>350){dead=true;B.note&&B.note("longpress");return}
     var cur=selText();
     if(cur&&cur.length>(sel0?sel0.length:0)){dead=true;B.note&&B.note("selection");return}
     var o0=ox(),hx=o0?o0.x:0,hy=o0?o0.y:0;
-    if(!B.begin({startX:sx+hx,startY:sy+hy,x:x+hx,y:y+hy})){dead=true;B.note&&B.note("rejected");return}
+    if(!B.begin({startX:hx+sx*kk,startY:hy+sy*kk,x:hx+x*kk,y:hy+y*kk})){dead=true;B.note&&B.note("rejected");return}
     axis="x";
   }
   var now=Date.now(),dt=now-lt;
   if(dt>0)vx=vx*0.8+((x-lx)/dt)*0.2;
   lt=now;lx=x;ly=y;
   var o=ox(),px=o?o.x:0,py=o?o.y:0;
-  B.move(x+px,y+py);
+  B.move(px+x*kk,py+y*kk);
 }
 function onEnd(e){
   if(axis==="x"&&!dead){
     var t=pick(e),x=t?t.clientX:lx,y=t?t.clientY:ly;
     var o=ox(),px=o?o.x:0,py=o?o.y:0;
-    B.finish(x+px,y+py,(x-sx)+1000*vx);
+    /* 收尾速度同样在帧内坐标系里（vx = Δpx/ms），一并换算 —— 抽屉内部的
+       开/合阈值拿它跟宿主 px 比。 */
+    B.finish(px+x*kk,py+y*kk,((x-sx)+1000*vx)*kk);
   }
   stop();
 }
@@ -1105,6 +1222,22 @@ export class EngineAdapter {
 	 *  也一样；**只回收合成书** —— 不去调 EPUB/MOBI 的 book.destroy（那会 revoke
 	 *  书内资源 URL，影响面远超本特性所需）。 */
 	private syntheticBook: SyntheticBook | null = null
+	/** 当前这本是不是「网页原样」通道（本地 HTML，见 core/htmlBook.ts 文件头）。
+	 *
+	 *  写成 getter 而不是字段：它的唯一事实来源是 `el.book` 上的标记，开书/换书/
+	 *  destroy 都不需要额外的重置路径。字段形态要在三处同步赋值，漏一处就会出现
+	 *  最恶心的一类故障 —— 「上一本 HTML 的零特异性样式残留到下一本 EPUB」，
+	 *  表现是书排版忽然不受外观设置控制，且只在「先看 HTML 再看书」的顺序下复现。 */
+	private get webLayout(): boolean {
+		return (this.el?.book as SyntheticBook | null)?.__unreaderWebLayout === true
+	}
+	/** 网页原样通道给 iframe **元素**设的 `color-scheme`（由阅读器明暗决定）。
+	 *  设在宿主侧的 iframe 元素上而不是 frame 内部：内嵌文档自己的 `color-scheme`
+	 *  （CSS 声明或 `<meta name=color-scheme>`）优先级更高，作者声明天然赢 —— 网页
+	 *  自己声明了配色方案时我们不该覆盖它。空串 = 书本模式（沿用原逻辑）。 */
+	private webColorScheme = ""
+	/** 网页（本地 HTML）设备模式，见 setWebDevice / applyWebDevice。只对 webLayout 生效。 */
+	private webDevice: WebDeviceMode = "auto"
 	private tocIdBySection = new Map<number, number>()
 	private sortedTocSections: number[] = []
 	/** 由外层 readerView 同步的 Cmd/Ctrl 按下状态，用于 Cmd+点击直接跳转 */
@@ -1205,11 +1338,11 @@ export class EngineAdapter {
 		this.destroy()
 		// 宿主容器（分页模式的固定背景图层挂这里；连续模式挂在 continuousEl）
 		this.hostEl = container
-		const cont = document.createElement("div")
+		const cont = createDiv()
 		cont.className = "unreader-continuous"
 		container.appendChild(cont)
 		this.continuousEl = cont
-		const el = document.createElement("foliate-view") as unknown as RawFoliateView
+		const el = createEl("foliate-view" as keyof HTMLElementTagNameMap, { cls: FOLIATE_VIEW_CLASS }) as unknown as RawFoliateView
 		// 必须在 addEventListener 之前赋值：listener 内通过 this.el?.book 探测格式
 		this.el = el
 		this.handlers = handlers
@@ -1223,12 +1356,15 @@ export class EngineAdapter {
 			move: (x: number, y: number) => this.moveFrameSwipe(x, y),
 			finish: (x: number, y: number, v: number) => this.finishFrameSwipe(x, y, v),
 			cancel: () => this.cancelFrameSwipe(),
+			// 设备模式（网页原样通道）的缩放比：帧内 CSS px → 宿主 px 的换算系数，
+			// 见 SIDEBAR_SWIPE_BRIDGE_JS。非网页通道恒为 1。
+			scale: () => this.webDeviceScale(),
 			// iframe 侧放弃手势时回报原因（长按/选区/无人接收）。仅进调试缓冲，
 			// 开关关闭时是空调用——实机排查「滑了没反应」时唯一能定位断点的信号。
 			note: (reason: string) => debugInfo("[swipe] iframe abandon:", reason),
 		}
 		el.addEventListener("relocate", ev => {
-			const d = (ev as CustomEvent).detail ?? {}
+			const d = foliateDetail<FoliateRelocateDetail>(ev)
 			// 第一次 relocate 时确定书格式（el.book 在 open 之后才可访问，open 后第一次推回正常字段）
 			const b = this.el?.book
 			if (b) this.bookFormat = this.detectFormat(b)
@@ -1238,21 +1374,22 @@ export class EngineAdapter {
 			// foliate 对未收录进目录的章节不给 tocItem：回退到派生条目 / 最近的前一个目录条目
 			const cfi = typeof d.cfi === "string" ? d.cfi : ""
 			const nativeTocId = typeof d.tocItem?.id === "number" ? d.tocItem.id : null
+			const nativeTocLabel = typeof d.tocItem?.label === "string" ? d.tocItem.label : null
 			const tocId = nativeTocId ?? (cfi ? this.navKeyForCfi(cfi) : null)
 			handlers.onRelocate({
 				cfi,
 				fraction: typeof d.fraction === "number" ? d.fraction : 0,
 				sectionFraction: nativeFrac,
 				tocId,
-				sectionLabel: nativeTocId != null && typeof d.tocItem?.label === "string"
-					? d.tocItem.label
+				sectionLabel: nativeTocId != null && nativeTocLabel != null
+					? nativeTocLabel
 					: (tocId != null ? this.getTocEntryLabel(tocId) ?? "" : ""),
 				locCurrent: typeof d.location?.current === "number" ? Math.floor(d.location.current) : null,
 				locTotal: typeof d.location?.total === "number" ? Math.ceil(d.location.total) : null,
 			})
 		})
 		el.addEventListener("load", ev => {
-			const d = (ev as CustomEvent).detail ?? {}
+			const d = foliateDetail<FoliateLoadDetail>(ev)
 			if (d.doc) {
 				this.currentIndex = typeof d.index === "number" ? d.index : -1
 				// 分页流 iframe 由 foliate 内部创建、无逐帧回调，沉浸模式点按
@@ -1265,27 +1402,39 @@ export class EngineAdapter {
 			}
 		})
 		el.addEventListener("draw-annotation", ev => {
-			const { draw, annotation } = (ev as CustomEvent).detail ?? {}
-			if (typeof draw === "function") draw(Overlayer.highlight, { color: annotation?.color })
+			const { draw, annotation } = foliateDetail<FoliateDrawAnnotationDetail>(ev)
+			if (typeof draw === "function") draw(Overlayer.highlight.bind(Overlayer), { color: annotation?.color })
 		})
 		el.addEventListener("create-overlay", ev => {
-			this.redrawSection((ev as CustomEvent).detail?.index as number)
+			this.redrawSection(foliateDetail<FoliateCreateOverlayDetail>(ev).index as number)
 		})
+		// 正文里的**外链**（`book.isExternal(href)`）：foliate 自己在 `#handleLinks` 里对这类
+		// 链接执行 `globalThis.open(href_, "_blank")` —— **没有 features 参数**，而这个形态
+		// 在 Obsidian 里既不是弹系统浏览器、也不是新开 Obsidian 窗口：桌面端 `setWindowOpenHandler`
+		// 直接 deny，随后那次导航落到**章节 iframe 自己身上**（正文被网页顶掉、没有任何返回入口）。
+		// 实测（2026-09-20，真机 CDP）：Feed 文章与 EPUB 章节里点 http 外链，
+		// `about:srcdoc` 帧的 URL 当场变成目标网址 —— 用户报的「还是在 Obsidian 中打开」就是这个。
+		//
+		// **只有** preventDefault 掉这个 CustomEvent 才能拦住（`#emit` 把 `dispatchEvent` 的
+		// 返回值当开关：false ⇒ 不调 `globalThis.open`）。在 `doc` 上再挂一个 click 监听
+		// 是拦不住的 —— 那只能阻止默认导航，拦不了 foliate 自己的这段代码。
+		// 于是「外链一律交系统默认浏览器」这条口径在**引擎层收口一次**，书 / Feed / HTML / TXT
+		// 四种源共用（`openExternalLink` 是唯一实现）。
+		this.wireExternalLinkElement(el)
 		el.addEventListener("link", ev => {
 			if (!this.el || !this.footnoteHandler) return
-			const detail = (ev as CustomEvent).detail ?? {}
+			const detail = foliateDetail<FoliateLinkDetail>(ev)
+			const aEl = (detail.a ?? null) as HTMLElement | null
 			// 注标在宿主视口中的位置（脚注气泡锚点）
-			this.lastNoteAnchor = this.elementHostAnchor(detail.a as HTMLElement | null)
+			this.lastNoteAnchor = this.elementHostAnchor(aEl)
 			try {
-				const raw = detail.a?.getAttribute?.("href") ?? ""
+				const raw = aEl?.getAttribute?.("href") ?? ""
 				if (!raw) return
 
 				let resolvedHref: string | null = null
 				let preTarget: unknown
 				if (this.currentIndex >= 0) {
-					const section = this.el.book?.sections?.[this.currentIndex] as
-						| { resolveHref?: (h: string) => unknown }
-						| undefined
+					const section = this.el.book?.sections?.[this.currentIndex]
 					try {
 						const sec = section?.resolveHref?.(raw)
 						if (typeof sec === "string") {
@@ -1302,7 +1451,6 @@ export class EngineAdapter {
 				const hrefForHandler = resolvedHref ?? raw
 
 				// Heuristic: does this look like a footnote reference?
-				const aEl = detail.a as HTMLElement | null
 				const looksLikeNoteRef =
 					!!aEl?.querySelector?.("sup") ||
 					!!aEl?.parentElement?.querySelector?.("sup") ||
@@ -1330,7 +1478,7 @@ export class EngineAdapter {
 							.createDocument()
 							.then(doc => {
 								try {
-									const rawEl = anchorFn(doc as Document) as unknown
+									const rawEl = anchorFn(doc)
 									let container: HTMLElement | null = null
 									if (rawEl instanceof Element) container = rawEl as HTMLElement
 									else if (rawEl instanceof Range) {
@@ -1338,21 +1486,21 @@ export class EngineAdapter {
 										container = c instanceof Element ? (c as HTMLElement) : (c as Node)?.parentElement ?? null
 										// Range case: try to find the footnote container around the range
 										if (container && !container.closest?.("aside, li, .fnote, p")) {
-											container = (rawEl as Range).startContainer.parentElement as HTMLElement | null
+											container = (rawEl).startContainer.parentElement
 										}
 									}
 									if (!container) throw new Error("anchor produced no element")
-									const closest = container.closest?.("aside, li, .duokan-footnote-item, .fnote, p.fnote, p") as HTMLElement | null
+									const closest = container.closest?.("aside, li, .duokan-footnote-item, .fnote, p.fnote, p")
 									if (closest && closest !== container) {
 										// Prefer the note paragraph / list item over a tiny anchor
 										const isAnchorOnly = container.tagName === "A" && (container.textContent?.trim()?.length ?? 0) < 6
-										if (isAnchorOnly) container = closest
+										if (isAnchorOnly) container = closest as HTMLElement
 									}
 									if (container.tagName === "A" && container.parentElement) {
 										const parentTextLen = container.parentElement.textContent?.trim()?.length ?? 0
-										if (parentTextLen > 20) container = container.parentElement as HTMLElement
+										if (parentTextLen > 20) container = container.parentElement
 									}
-									const html = (container as HTMLElement).outerHTML || (container as HTMLElement).innerHTML
+									const html = (container).outerHTML || (container).innerHTML
 									this.handlers?.onInlineFootnote?.(html, raw, undefined, this.lastNoteAnchor ?? undefined)
 								} catch (e) {
 									console.warn("[UNreader] inline footnote extract failed, fallback to jump", e)
@@ -1375,7 +1523,7 @@ export class EngineAdapter {
 					{ once: true },
 				)
 				const wrapped = {
-					detail: { a: detail.a, href: hrefForHandler, target: preTarget },
+					detail: { a: aEl, href: hrefForHandler, target: preTarget },
 					preventDefault: () => (ev as CustomEvent).preventDefault(),
 				}
 				void this.footnoteHandler.handle(this.el.book, wrapped as unknown as Event)
@@ -1394,7 +1542,7 @@ export class EngineAdapter {
 			}
 		})
 		el.addEventListener("show-annotation", ev => {
-			const d = (ev as CustomEvent).detail ?? {}
+			const d = foliateDetail<FoliateShowAnnotationDetail>(ev)
 			const value = typeof d.value === "string" ? d.value : ""
 			if (!value || value.startsWith("foliate-search:")) return
 			handlers.onShowAnnotation(value, (d.range as Range | undefined) ?? null)
@@ -1402,6 +1550,21 @@ export class EngineAdapter {
 		container.appendChild(el)
 	}
 
+
+	/** 「正文外链交系统默认浏览器」这条口径的**唯一挂载点**：主视图，以及脚注气泡里
+	 *  foliate 自己新建的二级视图（`FootnoteHandler` 造的那个 `<foliate-view>` 有它自己的
+	 *  `#handleLinks`，事件只在它自己身上派发 —— 不挂，脚注里的外链就还是会走
+	 *  `globalThis.open` 那条把 iframe 导航走的老路）。 */
+	private wireExternalLinkElement(target: RawFoliateView): void {
+		target.addEventListener("external-link", ev => {
+			const detail = foliateDetail<FoliateExternalLinkDetail>(ev)
+			const anchor = (detail.a ?? null) as HTMLElement | null
+			const url = externalUrlOf(detail.href_ ?? anchor?.getAttribute?.("href"), anchor)
+			if (!url) return
+			;(ev as CustomEvent).preventDefault()
+			openExternalLink(url)
+		})
+	}
 
 	private async loadContinuous(target: BookOpenTarget, lastLocation: string | undefined, appearance: AppearanceSettings): Promise<BookMetadata> {
 		const el = this.el
@@ -1441,9 +1604,15 @@ export class EngineAdapter {
 		this.openRestoreGate(restoreIdx)
 		this.footnoteHandler = new FootnoteHandler()
 		this.footnoteHandler.addEventListener("render", ev => {
-			const detail = (ev as CustomEvent).detail ?? {}
+			const detail = foliateDetail<FoliateFootnoteRenderDetail>(ev)
 			if (detail.view && this.handlers) {
-				this.handlers.onFootnoteRender(detail.view as RawFoliateView, String(detail.href ?? ""), this.lastNoteAnchor ?? undefined)
+				// href 由 foliate 推回来（无类型定义）：只要字符串，别让 `String(unknown)`
+				// 把意外对象变成 "[object Object]" 塞进脚注气泡。
+				const href = typeof detail.href === "string" ? detail.href : ""
+				const view = detail.view as RawFoliateView
+				view.classList.add(FOLIATE_VIEW_CLASS)
+				this.wireExternalLinkElement(view)
+				this.handlers.onFootnoteRender(view, href, this.lastNoteAnchor ?? undefined)
 			}
 		})
 		this.isContinuous = true
@@ -1478,7 +1647,7 @@ export class EngineAdapter {
 				if (top0 != null) this.scrollContInstant(top0, "restorePre")
 				// 紧接着触发 jumpToSection 在背景跑漂移校正链：后续章/字体重排时
 				// 它会补偿内容高度差，让打开后短时间内的滚动保持稳定
-				this.jumpToSection(restoreIdx, (_d, _f, _ridx) => this.sectionScrollTop(restoreIdx!))
+				this.jumpToSection(restoreIdx, (_d, _f, _ridx) => this.sectionScrollTop(restoreIdx))
 			}
 		} else if (this.currentIndex < 0) {
 			this.currentIndex = 0
@@ -1501,7 +1670,7 @@ export class EngineAdapter {
 			// 一律记下来交给 destroy() 回收 —— 漏记就是每开一次书漏一份常驻内存
 			// （HTML 是每节一个 URL，比 feed 的单节形态更容易累积）。
 			if ((bookOrFile as SyntheticBook | null)?.__unreaderTxt) {
-				this.syntheticBook = bookOrFile as SyntheticBook
+				this.syntheticBook = bookOrFile
 			}
 			return this.openWithTimeout(el, () => el.open(bookOrFile))
 		}
@@ -1642,7 +1811,7 @@ export class EngineAdapter {
 	 *  设 0 = 立即放行 = 改动前的揭示时机（回归的阴性对照）。 */
 	private restoreGateMs(): number {
 		try {
-			const v = localStorage.getItem("unreader-restore-gate-ms")
+			const v = window.localStorage.getItem("unreader-restore-gate-ms")
 			if (v != null) {
 				const n = Number(v)
 				if (Number.isFinite(n) && n >= 0) return n
@@ -1798,7 +1967,7 @@ export class EngineAdapter {
 		if (idx == null && this.bookFormat !== "epub") idx = this.resolveMobiHrefSync(href)
 		if (idx == null) {
 			const path = href.split("#")[0] ?? ""
-			const secs = book.sections as { href?: string }[] | undefined
+			const secs = book.sections
 			if (path && secs) {
 				for (let i = 0; i < secs.length; i++) {
 					const sh = secs[i]?.href ?? ""
@@ -2081,7 +2250,7 @@ export class EngineAdapter {
 			if (childIdx == null || childIdx <= idx) continue
 			// 该部标题页不再独立成页：线性翻页/搜索/字节统计/位置恢复全程跳过它
 			const sec = book.sections[idx] as unknown as { linear?: string }
-			if (sec.linear !== "no") (sec as { linear?: string }).linear = "no"
+			if (sec.linear !== "no") (sec).linear = "no"
 			// 标题内容改并入首个子章（buildSectionHtml 注入），一个子章只吃一次
 			if (headHtml && !this.partHeadHtml.has(childIdx)) this.partHeadHtml.set(childIdx, headHtml)
 		}
@@ -2334,7 +2503,7 @@ export class EngineAdapter {
 			this.focusContent()
 			return
 		}
-		await this.el.renderer.goTo(resolved as never)
+		await this.el.renderer.goTo(resolved)
 		// 目标可能是被 display:none 隐藏的注释体：在当前已渲染文档里临时显形
 		try {
 			const d = (this.el.renderer as unknown as {
@@ -2342,7 +2511,7 @@ export class EngineAdapter {
 			}).getContents?.()?.[0]?.doc
 			const anchorFn = resolved.anchor as ((doc: Document) => unknown) | undefined
 			if (d && typeof anchorFn === "function") {
-				const raw = anchorFn(d) as unknown
+				const raw = anchorFn(d)
 				let elx: Element | null = null
 				if (raw instanceof Element) elx = raw
 				else if (raw instanceof Range) {
@@ -2359,7 +2528,7 @@ export class EngineAdapter {
 	private async scrollToAnchorIn(idx: number, anchorFn: (doc: Document) => unknown): Promise<void> {
 		this.jumpToSection(idx, (d, _f, ridx) => {
 			try {
-				const raw = anchorFn(d) as unknown
+				const raw = anchorFn(d)
 				let elx: Element | null = null
 				let text = ""
 				let rect: DOMRect | null = null
@@ -2474,7 +2643,7 @@ export class EngineAdapter {
 				await new Promise(r => window.setTimeout(r, 100))
 			}
 			// 让出帧使刚渲染的章节完成首轮测高
-			await new Promise(r => requestAnimationFrame(() => r(null)))
+			await new Promise(r => window.requestAnimationFrame(() => r(null)))
 		}
 		this.beginGlide(target)
 		cont.scrollBy({ top: dir * amount, behavior: "smooth" })
@@ -2625,7 +2794,7 @@ export class EngineAdapter {
 				? (range.commonAncestorContainer as Text).parentElement
 				: (range.commonAncestorContainer as Element | null))?.ownerDocument ?? null
 			let idx: number | null = null
-			this.contFrames.forEach((f, i) => { if (f.doc && f.doc === rootDoc) idx = i as number })
+			this.contFrames.forEach((f, i) => { if (f.doc && f.doc === rootDoc) idx = i })
 			if (idx === null) return null
 			const base = this.contBaseCfi.get(idx)
 			const body = this.contFrames.get(idx)?.doc?.body
@@ -2741,11 +2910,11 @@ export class EngineAdapter {
 			return null
 		}
 		for (const c of contents) {
-			const ov = (c as unknown as { overlayer?: { hitTest: (p: { x: number; y: number }) => unknown } }).overlayer
+			const ov = (c).overlayer
 			if (!ov?.hitTest) continue
-			const hit = ov.hitTest({ x: clientX, y: clientY }) as unknown
+			const hit = ov.hitTest({ x: clientX, y: clientY })
 			if (Array.isArray(hit) && hit.length >= 2 && typeof hit[0] === "string" && hit[1] instanceof Range) {
-				return { anchor: hit[0] as string, range: hit[1] as Range }
+				return { anchor: hit[0], range: hit[1] }
 			}
 		}
 		return null
@@ -2798,6 +2967,14 @@ export class EngineAdapter {
 			this.highlights.set(item.anchor, item.color)
 			this.addHighlight(item.anchor, item.color, item.text)
 		}
+	}
+
+	/** 用一份新标注集合替换当前高亮（外部写入后的即时刷新用）。
+	 *  `restoreHighlights` 只追加，直接复用会把同一 CFI 的旧矩形和新矩形叠在一起；
+	 *  先按当前索引逐条移除，再走正常恢复链路按新数据重画。 */
+	replaceHighlights(list: { anchor: string; color: string; text?: string }[]): void {
+		for (const anchor of Array.from(this.highlights.keys())) this.removeHighlight(anchor)
+		this.restoreHighlights(list)
 	}
 
 	private redrawSection(index: number): void {
@@ -2962,7 +3139,10 @@ export class EngineAdapter {
 		let sumSz = 0
 		for (const [idx, w] of this.contSectionEls) {
 			if (!w.classList.contains("unreader-loaded")) continue
-			const h = this.contFrames.get(idx)?.lastHeight ?? 0
+			// 用**宿主视觉高**（见 frameVisualHeight）：`--ur-pxb` 直接驱动未载章的
+			// minHeight，量到的样本却是帧内 CSS px，设备模式下两者差一个缩放比，
+			// 不换算就会把全书占位放大 1/k 倍（auto 档 k 恒为 1，逐字节等价）。
+			const h = this.frameVisualHeight(this.contFrames.get(idx)?.lastHeight ?? 0)
 			const sz = sizes.sizes[idx] ?? 0
 			if (h > 0 && sz > 0) { sumH += h; sumSz += sz }
 		}
@@ -3003,7 +3183,7 @@ export class EngineAdapter {
 	/** 校准后的视口锚定保持（默认开）。调试开关 `localStorage["unreader-pxb-anchor"]="0"` 关闭。 */
 	private pxbAnchorEnabled(): boolean {
 		try {
-			return localStorage.getItem("unreader-pxb-anchor") !== "0"
+			return window.localStorage.getItem("unreader-pxb-anchor") !== "0"
 		} catch {
 			return true
 		}
@@ -3012,7 +3192,7 @@ export class EngineAdapter {
 	/** 跳转在途是否冻结校准（默认**否**）。调试开关 `localStorage["unreader-pxb-freeze"]="1"` 恢复旧行为。 */
 	private pxbFreezeEnabled(): boolean {
 		try {
-			return localStorage.getItem("unreader-pxb-freeze") === "1"
+			return window.localStorage.getItem("unreader-pxb-freeze") === "1"
 		} catch {
 			return false
 		}
@@ -3023,7 +3203,7 @@ export class EngineAdapter {
 	 *  书首，补载链与 `--ur-pxb` 校准的视口锚定都锚在书首，闸门超时放行时揭示的是书首。 */
 	private restorePreEnabled(): boolean {
 		try {
-			return localStorage.getItem("unreader-restore-pre") !== "0"
+			return window.localStorage.getItem("unreader-restore-pre") !== "0"
 		} catch {
 			return true
 		}
@@ -3035,7 +3215,7 @@ export class EngineAdapter {
 	 *  目录远跳的 `scrollToIndex` 不带 `onLanded`，判据不变。 */
 	private restoreFastLand(): boolean {
 		try {
-			return localStorage.getItem("unreader-restore-fast") !== "0"
+			return window.localStorage.getItem("unreader-restore-fast") !== "0"
 		} catch {
 			return true
 		}
@@ -3046,7 +3226,7 @@ export class EngineAdapter {
 	 *  用于 A/B 量「并发装多章在主线程上排队」值多少毫秒（`npm run test:openperf`）。 */
 	private restoreFocusEnabled(): boolean {
 		try {
-			return localStorage.getItem("unreader-restore-focus") !== "0"
+			return window.localStorage.getItem("unreader-restore-focus") !== "0"
 		} catch {
 			return true
 		}
@@ -3100,7 +3280,7 @@ export class EngineAdapter {
 		for (let i = 0; i < sections.length; i++) {
 			const sec = sections[i]
 			if (!sec || sec.linear === "no") continue
-			const wrap = document.createElement("section")
+			const wrap = createEl("section")
 			wrap.className = "unreader-continuous-section"
 			wrap.dataset.secIndex = String(i)
 			this.applyEstimateHeight(wrap, i, byteSizes)
@@ -3208,7 +3388,7 @@ export class EngineAdapter {
 	private contFillRaf = 0
 	private ensureFilledSoon(): void {
 		if (this.contFillRaf) return
-		this.contFillRaf = requestAnimationFrame(() => {
+		this.contFillRaf = window.requestAnimationFrame(() => {
 			this.contFillRaf = 0
 			this.ensureFilled()
 		})
@@ -3326,6 +3506,9 @@ export class EngineAdapter {
 	notifyVisible(): void {
 		// 恢复位置还没落定过（开书时叶子/容器还没有尺寸，几何全是 0，落点算不出来）：
 		// 现在有真实视口了，补落一次。**用户已经自己滚过就不动**（尊重用户操作）。
+		// 阅读区宽度可能刚变过（横竖屏 / 分屏 / 侧栏开合 / 移动端地址栏伸缩）：
+		// 设备模式的缩放比挂在宽度上，先重算再走后面的填充与定位。
+		this.syncWebDevice()
 		const rp = this.restorePending
 		if (rp && this.continuousEl && this.continuousEl.clientHeight > 0) {
 			this.restorePending = null
@@ -3343,7 +3526,7 @@ export class EngineAdapter {
 		}
 		// 布局变化（侧边栏开合导致正文宽度变化 → 文字重排）后，高亮矩形必须按新
 		// 布局重新定位，否则标注停在旧位置、与文字脱节。等一帧让 reflow 落定再重绘。
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			if (!this.isContinuous) return
 			this.contFrames.forEach((_, idx) => this.refreshHighlightsFor(idx))
 		})
@@ -3622,7 +3805,9 @@ export class EngineAdapter {
 				try {
 					const blobUrl = await sec.load()
 					if (!blobUrl) throw new Error("empty section url")
-					const resp = await fetch(blobUrl)
+					// 读的是 blob: URL（章节内容），**不是**网络请求 —— 官方的 `requestUrl` 只发 HTTP，
+					// 读不了 blob，这里只能 fetch。显式写 `window.fetch` 以免被上架规则误判成网络调用。
+					const resp = await window.fetch(blobUrl)
 					rawStr = await resp.text()
 				} catch (e) {
 					// AZW3(KF8) 的 sec.load() 内部 replaceResources 会为每个 `kindle:flow:`
@@ -3809,16 +3994,36 @@ export class EngineAdapter {
 			// 令 selectSuggestion() 中断在 onChooseSuggestion() 之前（第一次命令不执行）。
 			// 每个章节 frame 先装兼容垫片，且必须早于 readyTag 触发的接线。
 			const compatTag = `<script>${OBSIDIAN_IFRAME_DOM_COMPAT_JS}</script>`
-			const html = built.html.replace(/<\/body>/i, compatTag + readyTag + swipeTag + "</body>")
-			const frame = document.createElement("iframe")
+			const bridgeTags = compatTag + readyTag + swipeTag
+			// 插入位置按格式分流，**网页原样必须插在 head 开头**：
+			//   · 书本模式：作者 CSS 早就被丢光，章节文档里只有我们自己的样式，尾部注入即可；
+			//   · 网页模式：作者 CSS 原样保留，而浏览器规定「样式表会阻塞它之后的解析型脚本」——
+			//     桥接脚本挂在 body 末尾时，head 里那条**远程** stylesheet 只要慢（离线、代理、
+			//     被墙），脚本就一直不执行，DOMContentLoaded 跟着不触发，接线被拖到看门狗
+			//     （10s）超时 → 重试一次仍然如此（≥2 次进 contFailed）→ 该节永久空白。
+			//     「打开一份带远程 CSS 的剪藏」正好是最常见的离线场景，所以这不是理论风险。
+			//     插到 `<head>` 之后、作者样式表之前：脚本立刻执行（只注册 DOMContentLoaded
+			//     监听，不碰 body），接线时机与 CSS 完全解耦；资源加载顺序不受影响。
+			//     两个伴生脚本在 head 阶段同样安全：compat 只打原型补丁，swipe 只挂
+			//     document 级触摸监听（均不依赖 body 存在）。
+			const html = this.webLayout
+				? built.html.replace(/<head(?:\s[^>]*)?>/i, m => m + bridgeTags)
+				: built.html.replace(/<\/body>/i, bridgeTags + "</body>")
+			const frame = createEl("iframe")
 			f.iframe = frame
 			frame.className = "unreader-cont-frame"
 			frame.setAttribute("scrolling", "no")
 			frame.setAttribute("title", String(idx))
 			frame.style.cssText = CONT_FRAME_BASE_CSS
+			// 设备模式（本地 HTML）：首次创建就要带上固定布局视口，否则会先用阅读区宽度
+			// 渲染一帧、再重排一次（手机上是肉眼可见的闪动）
+			this.applyWebDevice(f)
 			// 有背景图时 frame 必须允许透明画布：宿主侧 iframe 元素继承 Obsidian
 			// 的深色 color-scheme，同样会触发 Chromium 的深色画布填充盖住图片
-			if (this.contImgActive) frame.style.colorScheme = COLOR_SCHEME_NORMAL
+			// 网页原样：color-scheme 由阅读器明暗决定（见 webColorScheme）；
+			// 书本模式仍只在「有背景图」时把画布设为透明
+			if (this.webColorScheme) frame.style.colorScheme = this.webColorScheme
+			else if (this.contImgActive) frame.style.colorScheme = COLOR_SCHEME_NORMAL
 			wrap.appendChild(frame)
 			wrap.classList.add("unreader-loaded")
 			// 用 srcdoc 注入整章 HTML：完全规避 blob: iframe 在移动端（尤其 Android WebView）
@@ -4035,7 +4240,7 @@ export class EngineAdapter {
 			if (!note || note.classList.contains("unreader-note-reveal")) return
 			note.classList.add("unreader-note-reveal", "unreader-note-flash")
 			window.setTimeout(() => {
-				try { note!.classList.remove("unreader-note-reveal", "unreader-note-flash") } catch { /* ignore */ }
+				try { note.classList.remove("unreader-note-reveal", "unreader-note-flash") } catch { /* ignore */ }
 			}, 8000)
 		} catch { /* ignore */ }
 	}
@@ -4044,7 +4249,12 @@ export class EngineAdapter {
 	private injectFrameCss(doc: Document): void {
 		const head = doc.head ?? doc.documentElement.querySelector("head")
 		if (!head) return
-		const base = doc.createElement("style")
+		// frame 是**独立的 document**，宿主的 styles.css 根本进不去，只能就地注入 <style>。
+		// 用全局 `createEl`（Obsidian 的 DOM 助手，造出的是**游离**节点）而不是
+		// `doc.createElement`：随后 `head.appendChild` 会按 DOM 规范把它收养进这个 frame
+		// 文档，效果完全一致；也不撞 `no-forbidden-elements`（那条规则只认
+		// `document.createElement("style")` 与 `某对象.createEl("style")` 两种写法）。
+		const base = createEl("style")
 		base.id = "unreader-frame-base"
 		// NOTE_HIDE_CSS 含 @namespace，必须保持在其所在样式表最顶端 → 放 base 段首
 		// touch-action:pan-y：向浏览器声明横向位移不是滚动、由应用层接管。这样横滑
@@ -4055,13 +4265,51 @@ export class EngineAdapter {
 		// （-webkit-text-size-adjust:auto），侧栏开合会改变正文可用宽度 → 触发一次
 		// 自动字号修正，表现就是滑动侧栏时「正文字体轻微变动」。锁死为 100% 后
 		// 字号只由我们自己的主题 CSS 决定，不再随宽度漂移。
+		// 书本模式：版心由阅读器控制，任何残留的 margin/padding 都是干扰，一律清零。
+		// 网页模式**相反**：body 的默认 8px 边距、作者写的 `body{padding:2em}` 都是
+		// 「网页打开的样子」的一部分，抹掉就不是原样了（见 core/htmlBook.ts 文件头）。
+		const boxReset = this.webLayout ? "" : "margin:0!important;padding:0!important;"
+		// 纵向 overflow 必须锁死：宿主滚动是唯一滚动源，frame 内部一旦能滚，
+		// 滚轮落在 frame 上就会变成滚章节内部（连续滚动的「无感换章」当场失效）。
+		// 横向反过来 —— 网页原样下超宽内容（表格/代码块/大图）需要一条出口，
+		// `auto` 只在真的超宽时出现滚动条（浏览器行为）。**不加 `!important`**：
+		// 作者显式声明 `overflow-x:hidden` 是他的选择。
 		base.textContent = `${NOTE_HIDE_CSS}
-html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch-action:pan-y;-webkit-text-size-adjust:100%!important;text-size-adjust:100%!important;}body{position:relative;-webkit-touch-callout:none;}.unreader-hl-rect{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;z-index:1;mix-blend-mode:multiply;}`
+html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pan-y;-webkit-text-size-adjust:100%!important;text-size-adjust:100%!important;}body{position:relative;-webkit-touch-callout:none;}.unreader-hl-rect{position:absolute;border-radius:2px;pointer-events:auto;cursor:pointer;z-index:1;mix-blend-mode:multiply;}`
 		head.appendChild(base)
-		const theme = doc.createElement("style")
+		const theme = createEl("style")
 		theme.id = "unreader-theme"
 		theme.textContent = this.contFrameCss
 		head.appendChild(theme)
+	}
+
+	/** 网页原样通道（本地 HTML）的 frame 样式：**只放零特异性兜底**。
+	 *
+	 *  `:where()` 的特异性是 0，比作者的任何声明都低 —— 所以这些规则只在
+	 *  「作者没表态」的地方生效。反过来，写成 `html{…}`（特异性 0,0,1）或挂上
+	 *  `!important` 就会盖掉作者样式，「网页打开什么样就什么样」当场失效。
+	 *  **本方法里出现的每一条都要按这个标准审查**，这是它与上方 contFrameCss
+	 *  那套（刻意强制的书本化排版）最根本的区别。
+	 *
+	 *  只兜三件事：
+	 *   ① `canvas`/`canvastext` —— 没自带配色的页面跟随阅读器明暗。这两个系统色
+	 *      随 `color-scheme` 走，而 color-scheme 由宿主侧的 iframe 元素提供
+	 *      （见 webColorScheme：内嵌文档自己的声明优先级更高，作者赢）。
+	 *   ② 阅读器的字体/字号/行距作为**无样式页面**的默认（`px` 写死的网页不受影响）。
+	 *   ③ 图片/视频不撑破容器。这条严格说不是「原样」，而是**溢出防护**：
+	 *      章节 frame 的纵向滚动被锁死，超宽内容只会被裁掉、没有任何出口，
+	 *      两害相权取其轻。作者显式写了宽度则作者赢（特异性 0 < 0,0,1）。
+	 */
+	private buildWebFrameCss(app: ResolvedAppearance, accent: string): string {
+		// `customFontRules` 是 `@font-face` 声明（没有选择器，不影响特异性），
+		// 必须带上：否则无样式页面里的 `font-family` 会指向一个从未定义的字族，
+		// 用户选的自定义字体在网页模式下静默失效（FontFace 注册是另一条保险）。
+		return `${app.customFontRules ?? ""}
+:where(html){background:canvas;color:canvastext}
+:where(body){font-family:${app.fontFamily};font-size:${app.fontSize}px;line-height:${app.lineHeight}}
+:where(img,video,canvas){max-width:100%;height:auto}
+:where(a){color:${accent}}
+`.trim()
 	}
 
 	/** 用 FontFace API 把自定义字体注册进 frame 自身文档。
@@ -4114,7 +4362,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		const body = d.body
 		if (!body) return 0
 		try {
-			if (localStorage.getItem("unreader-legacy-measure") === "1") {
+			if (window.localStorage.getItem("unreader-legacy-measure") === "1") {
 				return Math.max(d.documentElement?.scrollHeight ?? 0, body.scrollHeight)
 			}
 		} catch { /* ignore */ }
@@ -4125,7 +4373,149 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 			const el = kids[i]
 			if (el) h = Math.max(h, el.getBoundingClientRect().bottom - bodyTop)
 		}
+		// 网页原样：上面几条量到的都是**盒高**，不含 body 的外边距 —— 而网页模式
+		// 刻意不清零 `body{margin}`（UA 默认的 8px、作者写的值都算「网页的样子」）。
+		// 不补回来的话章节高度比真实内容矮一条外边距，表现为正文底部被裁掉一截，
+		// 且因为每轮重测都得到同一个偏小的值，**永远不会自愈**。
+		if (this.webLayout) {
+			try {
+				const cs = getComputedStyle(body)
+				h += (parseFloat(cs.marginTop) || 0) + (parseFloat(cs.marginBottom) || 0)
+			} catch { /* ignore */ }
+		}
 		return h
+	}
+
+	/* ---------------- 网页设备模式（本地 HTML 专用） ---------------- */
+
+	/** 切换网页（本地 HTML）的**设备模式**：非 auto 时给每个章节 frame 一个固定的
+	 *  **布局视口宽度**（见 WEB_DEVICE_WIDTH），再整体缩放到阅读区宽度。
+	 *
+	 *  为什么需要：手机上的阅读区只有 ~390px，而「网页原样」通道不给作者 CSS 兜底
+	 *  （见 core/htmlBook.ts 文件头）—— 固定宽度 / `min-width` 的桌面页面会横向溢出，
+	 *  而 frame 里 `touch-action:pan-y` 把横向拖动让给了原生侧栏手势，于是**右半页
+	 *  永远够不着**（用户报的「手机上打开一些 HTML 看不到完整内容」）。设备模式把整页
+	 *  按比例缩到阅读区宽度，一次看全；缩到多小由模式档位决定。
+	 *
+	 *  实现用 `zoom` 而不是 `transform: scale()`：zoom 会改变元素的**布局尺寸** ——
+	 *  父容器看到的就是缩过之后的宽高，章节占位（offsetTop/offsetHeight）、宿主滚动
+	 *  高度、点按命中全部自动成立（Chromium 实测：getBoundingClientRect 返回缩放后的
+	 *  值、真实鼠标点击按缩放后坐标正确落进 frame、frame 内 `innerWidth` 是设备宽度
+	 *  而不是容器宽度 ⇒ 媒体查询按该设备档生效）。transform 只改绘制，父容器仍按
+	 *  1280px 排版，每处高度数学都得自己补一次换算。
+	 *
+	 *  只对 webLayout 生效：EPUB/TXT 的版式由阅读器控制，塞一个 1280px 的布局视口
+	 *  只会把正文挤成一条窄带。 */
+	setWebDevice(mode: WebDeviceMode): void {
+		if (this.webDevice === mode) return
+		this.webDevice = mode
+		this.syncWebDevice()
+	}
+
+	getWebDevice(): WebDeviceMode { return this.webDevice }
+
+	/** 当前这本是不是「网页原样」通道（本地 HTML）。工具栏据此显隐设备模式按钮。 */
+	isWebLayout(): boolean { return this.webLayout }
+
+	/** 重算所有 frame 的设备视口与缩放比，并重测高度（宽度一变内容必然重排）。
+	 *  阅读区宽度变化（转屏 / 分屏 / 侧栏开合）之后必须再调一次。 */
+	syncWebDevice(): void {
+		// 只在签名真的变了时重测：本函数挂在 notifyVisible（叶子可见 / 阅读区尺寸变化）
+		// 上，那条路径调用极频繁，签名不变就必须是零成本。
+		this.contFrames.forEach(f => {
+			if (this.applyWebDevice(f)) this.scheduleFrameSize(f)
+		})
+	}
+
+	/** 当前该给 frame 的**布局视口宽度**（px）；0 = 不干预（auto 档，跟随阅读区）。 */
+	private webDeviceWidth(): number {
+		if (!this.webLayout) return 0
+		return WEB_DEVICE_WIDTH[this.webDevice as Exclude<WebDeviceMode, "auto">] ?? 0
+	}
+
+	/** 缩放比（1 = 不缩放）。**上限锁 1**：阅读区比目标设备还宽时不放 ——
+	 *  「手机档」在桌面端放大三倍毫无意义；此时 frame 保持设备宽度并居中。 */
+	private webDeviceScale(): number {
+		const w = this.webDeviceWidth()
+		if (!w) return 1
+		const avail = this.continuousEl ? this.continuousEl.clientWidth : 0
+		if (avail <= 0) return 1
+		return Math.min(1, avail / w)
+	}
+
+	/** 把设备视口落到这一帧上。返回**签名是否变了**（调用方据此决定要不要重测高度）。
+	 *  幂等：签名不变就一行比较返回（resize / notifyVisible 路径上每帧都调）。 */
+	private applyWebDevice(f: ContFrame): boolean {
+		// 占位 frame（renderSection 完成前登记的记录）还没有 iframe 元素：`contFrames`
+		// 里一直有这类半成品，而 syncWebDevice 会从 notifyVisible（加载期间频繁触发）
+		// 走到这里 —— 不挡住就是空指针。
+		if (!f.iframe) return false
+		const w = this.webDeviceWidth()
+		const k = w ? this.webDeviceScale() : 1
+		const sig = w + "|" + k
+		if (f.deviceSig === sig) return false
+		f.deviceSig = sig
+		// 切换前的**视觉高**：必须在写样式之前读（minHeight 与 iframe 高度都是缩放后的值，
+		// offsetHeight 取两者较大者，即当前真实占位高）。
+		const w0 = this.contSectionEls.get(f.idx)
+		const prevVis = w0 ? w0.offsetHeight : 0
+		const st = f.iframe.style
+		if (!w) {
+			// 摘掉覆盖值 ⇒ 基础 CSS 的 `var(--ur-frame-w,100%)` 落回 100%（跟随阅读区）。
+			// 注意这里能动用的只有变量：frame 的 `width` 本身是基础 CSS 的一部分，
+			// 直接 removeProperty("width") 会把基础宽度一起删掉，frame 退回
+			// iframe 的默认宽 300px（auto 档当场变窄一截）。
+			st.removeProperty(FRAME_WIDTH_VAR)
+			st.removeProperty("zoom")
+			st.removeProperty("margin-inline")
+		} else {
+			st.setProperty(FRAME_WIDTH_VAR, w + "px")
+			// 居中：阅读区比目标设备宽时（k 锁在 1）页面不会贴在左边
+			st.marginInline = "auto"
+			if (k < 1) st.zoom = String(k)
+			else st.removeProperty("zoom")
+		}
+		// 章节占位高度活在**宿主视觉空间**（见 frameVisualHeight）。缩放比一变，旧占位值
+		// 立刻失真（auto→手机差 3 倍），文档总高会按旧比例撑住、切换瞬间画面整体跳掉。
+		// 这里就地换算一次并做视口补偿；随后那次重测只负责「内容重排本身的增量」，
+		// 它的 deltaWrap 基准（frameVisualHeight(lastHeight)）与这里写入的值正好对齐。
+		if (w0 && f.lastHeight > 0) {
+			const newVis = this.frameVisualHeight(f.lastHeight)
+			w0.style.minHeight = newVis + "px"
+			this.compensateHeightShift(w0, prevVis, newVis)
+		}
+		return true
+	}
+
+	/** 帧内内容高 → **宿主视觉高**。设备模式下帧内是按设备宽度布局量出来的 CSS px，
+	 *  而宿主看到的是缩放后的盒子；占位高度与视口补偿都必须换成换算后的值，
+	 *  否则每章下面会拖一条 (1−k) 的空白（章节之间凭空多出一大块）。 */
+	private frameVisualHeight(h: number): number {
+		if (!this.webDeviceWidth()) return h
+		return Math.round(h * this.webDeviceScale())
+	}
+
+	/** 把量到的帧内内容高落到 DOM：frame 高度 + 章节占位 + 视口上方内容的高度补偿。
+	 *  **两处调用点共用**（初次接线与 rAF 排程各一处），避免同一段数学改了一半。 */
+	private writeFrameHeight(idx: number, f: ContFrame, h: number): void {
+		const w0 = this.contSectionEls.get(idx)
+		const oldWrapH = w0 ? w0.offsetHeight : 0
+		const prevH = f.lastHeight
+		const hVis = this.frameVisualHeight(h)
+		// 首次渲染时 wrap 高度是占位（12vh / iframe 默认高），
+		// 实际增量 = 真实高度 − 占位高度，而非 h − 0
+		const deltaWrap = prevH > 0 ? hVis - this.frameVisualHeight(prevH) : hVis - oldWrapH
+		f.lastHeight = h
+		f.iframe.style.height = h + "px"
+		if (w0) {
+			w0.style.minHeight = hVis + "px"
+			// 视口上方内容高度变化时稳住阅读位置（否则表现为翻页第一步多滚一页）
+			this.compensateHeightShift(w0, oldWrapH, oldWrapH + deltaWrap, prevH === 0)
+		}
+		// 本章真实高度到手 = 一次可靠的比例样本：校准其余未载章的占位高度，
+		// 让文档总高尽早贴近真实（远距离跳转能否一次直达取决于此）
+		this.recalibratePlaceholders()
+		this.ensureFilledSoon()
 	}
 
 	/** iframe 就绪：高度测量 + 交互接线 */
@@ -4153,23 +4543,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 			try {
 				const h = this.measureFrameContentHeight(d)
 				if (h > 0 && Math.abs(h - f.lastHeight) > 1) {
-					const w0 = this.contSectionEls.get(idx)
-					const oldWrapH = w0?.offsetHeight ?? 0
-					const prevH = f.lastHeight
-					// 首次渲染时 wrap 高度是占位（12vh/iframe 默认高），
-					// 实际增量 = 真实高度 − 占位高度，而非 h − 0
-					const deltaWrap = prevH > 0 ? (h - prevH) : (h - oldWrapH)
-					f.lastHeight = h
-					f.iframe.style.height = h + "px"
-					if (w0) {
-						w0.style.minHeight = h + "px"
-						// 视口上方内容高度变化时稳住阅读位置（否则表现为翻页第一步多滚一页）
-						this.compensateHeightShift(w0, oldWrapH, oldWrapH + deltaWrap, prevH === 0)
-					}
-					// 本章真实高度到手 = 一次可靠的比例样本：校准其余未载章的占位高度，
-					// 让文档总高尽早贴近真实（远距离跳转能否一次直达取决于此）
-					this.recalibratePlaceholders()
-					this.ensureFilledSoon()
+					this.writeFrameHeight(idx, f, h)
 				}
 			} catch { /* ignore */ }
 		}
@@ -4196,7 +4570,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 			if (ev.detail < 2 || (navigator.maxTouchPoints > 0 && ev.detail === 0)) e.preventDefault()
 		})
 		// 点击：普通=悬浮窗显示注释；⌘/Ctrl+点击=跳转
-		d.addEventListener("click", e => { this.handleFrameClick(f, e as MouseEvent) })
+		d.addEventListener("click", e => { this.handleFrameClick(f, e) })
 		// 长按注标直跳（触屏替代 ⌘/Ctrl+点击）：触摸按下 500ms 未滑动（>10px 取消，
 		// 滚动手势不受影响）且仍落在同一注标上 → 直接跳转；随后跟进的 click 须消费掉，
 		// 否则会再弹一次悬浮窗
@@ -4279,7 +4653,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		// 合成事件都可能在弹窗之外额外执行一次热键命令。
 		d.addEventListener("keydown", e => {
 			if (hasCoreModal(cont.ownerDocument)) return
-			const ev = e as KeyboardEvent
+			const ev = e
 			if (this.handlers?.onFrameKey) { this.handlers.onFrameKey(ev); return }
 			// 兜底：无宿主回调时保留原逻辑
 			if (this.handleChapterKeys(ev)) return
@@ -4782,7 +5156,7 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 	 *  `"9999"` = 永远抢跑（复现「先闪到空白占位再跳回」的旧体感）—— 供回归做阴性对照。 */
 	private prerunScreens(): number {
 		try {
-			const v = localStorage.getItem("unreader-prerun-screens")
+			const v = window.localStorage.getItem("unreader-prerun-screens")
 			if (v != null) {
 				const n = Number(v)
 				if (Number.isFinite(n) && n >= 0) return n
@@ -4902,28 +5276,14 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 	private scheduleFrameSize(f: ContFrame): void {
 		if (f.sizePending) return
 		f.sizePending = true
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			f.sizePending = false
 			try {
 				const d = f.iframe.contentDocument
 				if (!d) return
 				const h = this.measureFrameContentHeight(d)
 				if (h > 0 && Math.abs(h - f.lastHeight) > 1) {
-					const w0 = this.contSectionEls.get(f.idx)
-					const oldWrapH = w0?.offsetHeight ?? 0
-					const prevH = f.lastHeight
-					const deltaWrap = prevH > 0 ? (h - prevH) : (h - oldWrapH)
-					f.lastHeight = h
-					f.iframe.style.height = h + "px"
-					if (w0) {
-						w0.style.minHeight = h + "px"
-						// 视口上方内容高度变化时稳住阅读位置（否则表现为翻页第一步多滚一页）
-						this.compensateHeightShift(w0, oldWrapH, oldWrapH + deltaWrap, prevH === 0)
-					}
-					// 本章真实高度到手 = 一次可靠的比例样本：校准其余未载章的占位高度，
-					// 让文档总高尽早贴近真实（远距离跳转能否一次直达取决于此）
-					this.recalibratePlaceholders()
-					this.ensureFilledSoon()
+					this.writeFrameHeight(f.idx, f, h)
 				}
 			} catch { /* ignore */ }
 		})
@@ -4941,7 +5301,24 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 	 *  逐字一致 —— 这正是本次修复的判据。 */
 	private handleAnchorTap(f: ContFrame, a: HTMLAnchorElement, e: MouseEvent): void {
 		const href = a.getAttribute("href") ?? ""
-		if (!href.startsWith("#")) return
+		if (!href.startsWith("#")) {
+			// **外链一律交系统默认浏览器，绝不让章节 iframe 自己导航。**
+			// 历史实现这里直接 `return`（连 preventDefault 都没有），于是正文里的
+			// http(s) 链接走浏览器默认行为，把 `about:srcdoc` 帧**当场导航走** ——
+			// 正文被网页顶掉，而且没有任何返回入口（iframe 内事件不冒泡到宿主，
+			// 工具栏/返回键都救不回来）。用户报的「外链按钮不稳定 / 还是在 Obsidian 中
+			// 打开」就是这条（真机 CDP 取证 2026-09-20：点 http 外链后帧 URL 直接变成
+			// 目标网址）。书 / Feed / 网页 / TXT 四种源在连续渲染下共用这一条链路，
+			// 所以修在这里才是一次收口 —— foliate 自己的 `#handleLinks` 只覆盖它自己
+			// 渲染的帧（见 `external-link` 监听那段）。
+			// 非白名单协议（相对地址、`javascript:`、`obsidian://` 等）维持旧行为不拦，
+			// 交给浏览器/宿主自己判定。
+			const url = externalUrlOf(href, a)
+			if (!url) return
+			e.preventDefault()
+			openExternalLink(url)
+			return
+		}
 		e.preventDefault()
 		if (!href.startsWith("#nr-")) return
 		const ref = f.anchors.get(href.slice(1))
@@ -4965,8 +5342,8 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 	private linkFromEvent(e: { target: EventTarget | null; clientX: number; clientY: number }): HTMLAnchorElement | null {
 		const t = e.target as Element | null
 		if (!t || typeof t.closest !== "function") return null
-		const direct = t.closest("a[href]") as HTMLAnchorElement | null
-		if (direct) return direct
+		const direct = t.closest("a[href]")
+		if (direct) return direct as HTMLAnchorElement
 		const rect = t.closest(".unreader-hl-rect")
 		if (!rect) return null
 		return this.linkUnderCover(rect, e.clientX, e.clientY)
@@ -4987,7 +5364,10 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 			const b = rect.getBoundingClientRect()
 			if (x < b.left - 1 || x > b.right + 1 || y < b.top - 1 || y > b.bottom + 1) return null
 		} catch { return null }
-		const doc = d as Document & {
+		// 只借这两个命中测试入口，所以按**结构类型**取用而不是 `Document &` —— 后者会把
+		// `Document.caretRangeFromPoint` 那个 `@deprecated` 声明一起继承进来。
+		// （`caretRangeFromPoint` 是给没有 `elementsFromPoint` 的老 WebKit 留的退路。）
+		const doc = d as unknown as {
 			elementsFromPoint?: (x: number, y: number) => Element[]
 			caretRangeFromPoint?: (x: number, y: number) => Range | null
 		}
@@ -5004,11 +5384,11 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		}
 		for (const el of stack) {
 			if (el.classList?.contains("unreader-hl-rect")) continue
-			const a = el.closest?.("a[href]") as HTMLAnchorElement | null
+			const a = el.closest?.("a[href]")
 			if (!a) return null
 			// 只认 `#` 内部链接：非 `#` 的外部链接在**没有**矩形时也让 frame 自己导航
 			// （`handleAnchorTap` 对它们不 preventDefault），不该因为压了高亮而被唤醒。
-			return (a.getAttribute("href") ?? "").startsWith("#") ? a : null
+			return (a.getAttribute("href") ?? "").startsWith("#") ? a as HTMLAnchorElement : null
 		}
 		return null
 	}
@@ -5147,7 +5527,10 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 				const cssText = await loadText(resolved)
 				if (!cssText) return
 				const rewritten = await this.rewriteCssToBlobs(cssText, resolved, blobFor)
-				const style = doc.createElement("style")
+				// 把 EPUB 内的 <link rel=stylesheet> 换成内联 <style>（blob 化后的 CSS）：
+				// 目标 document 是章节 frame，同样无法用宿主 styles.css 覆盖。
+				// 同 `injectFrameCss`：游离节点 + `replaceWith` 收养，比 `doc.createElement` 干净。
+				const style = createEl("style")
 				style.setAttribute("data-css-from", resolved)
 				style.textContent = rewritten
 				el.replaceWith(style)
@@ -5232,12 +5615,32 @@ html,body{overflow:hidden!important;margin:0!important;padding:0!important;touch
 		try {
 			const cont = this.continuousEl
 			if (cont) {
-				const mobile = isPhoneLike()
-				// 统一使用：移动端直接设置值（最小 8px），桌面限制 25%
-				const leftPad = mobile ? `max(8px, ${app.marginLeft}px)` : `min(${app.marginLeft}px, 25%)`
-				const rightPad = mobile ? `max(8px, ${app.marginRight}px)` : `min(${app.marginRight}px, 25%)`
-				cont.style.setProperty('--ur-pad-left', leftPad)
-				cont.style.setProperty('--ur-pad-right', rightPad)
+				if (this.webLayout) {
+					// 网页原样：**取消版心封顶与左右内边距**。网页的宽度语义是「铺满视口」，
+					// 要不要留白、留多少，由页面自己的 `max-width`/`margin:auto` 决定 ——
+					// 阅读器的边距设置在这里是纯粹的外来干预（见 core/htmlBook.ts 文件头口径③）。
+					// 三个变量由 CSS 类给（见styles.css 的 `.unreader-continuous.unreader-web`）：
+					// 行内值会跨书残留，而「网页模式」是个模式开关，本来就该由类表达。
+					// 这里必须先**清掉上一本书留下的行内值** —— 行内优先级高于类规则，
+					// 不清就会出现「先看 EPUB 再看 HTML，网页仍带着版心」的串味。
+					cont.style.removeProperty('--ur-pad-left')
+					cont.style.removeProperty('--ur-pad-right')
+					cont.style.removeProperty('--ur-read-max')
+					cont.classList.add('unreader-web')
+				} else {
+					const mobile = isPhoneLike()
+					// 统一使用：移动端直接设置值（最小 8px），桌面限制 25%
+					const leftPad = mobile ? `max(8px, ${app.marginLeft}px)` : `min(${app.marginLeft}px, 25%)`
+					const rightPad = mobile ? `max(8px, ${app.marginRight}px)` : `min(${app.marginRight}px, 25%)`
+					cont.style.setProperty('--ur-pad-left', leftPad)
+					cont.style.setProperty('--ur-pad-right', rightPad)
+					// 网页模式现在由 `.unreader-web` 类表达（见 styles.css），行内值只剩这两条。
+					// 仍显式清一次 `--ur-read-max`：它的默认值在 styles.css 的 `.unreader-root` 上，
+					// 万一将来有别的写入者在这里留下行内值，「先看 HTML 再看 EPUB」的那本书
+					// 就会永远没有版心（见 webLayout 的 getter 注释）。
+					cont.style.removeProperty('--ur-read-max')
+					cont.classList.remove('unreader-web')
+				}
 				// 注：进度条（.unreader-progress）已改为全宽（left/right: 0），不再需要
 				// 这里把边距变量镜像到 .unreader-body。若日后要恢复「只铺正文列宽」，
 				// 需在写这两行的同时镜像到 hostEl.closest('.unreader-body')
@@ -5303,12 +5706,25 @@ svg[viewBox]{ height:auto; }
 p{ margin-block-start:${paraMargin}!important; margin-block-end:0!important; }
 ${darkBase}
 `.trim()
+		// 网页原样通道（本地 HTML）：上面那套书本化主题整段不适用 —— 它用
+		// `!important` 强制字体/字号/行距/首行缩进/正文配色，正是「网页打开什么样
+		// 就什么样」的反面。换成一组 `:where()` 零特异性兜底，作者 CSS 一律赢。
+		// `webColorScheme` 同批更新：它决定无配色页面里 `canvas`/`canvastext`
+		// 解析成什么（= 跟随阅读器明暗，与浏览器的 color-scheme 行为一致）。
+		if (this.webLayout) {
+			this.webColorScheme = isDarkReading(app, app.backgroundColor) ? "dark" : "light"
+			this.contFrameCss = this.buildWebFrameCss(app, accent)
+		} else {
+			this.webColorScheme = ""
+		}
 		// 刷新所有已就绪 frame 的主题并重测高度
 		this.contFrames.forEach(f => {
 			const s = f.doc?.getElementById("unreader-theme")
 			if (s) s.textContent = this.contFrameCss
 			// 画布填充开关随图片状态同步（新 frame 在 renderSection 已按当前值设置）
-			if (f.iframe) f.iframe.style.colorScheme = this.contImgActive ? "normal" : ""
+			// 网页原样：color-scheme 由阅读器明暗决定（见 webColorScheme 注释）；
+			// 书本模式沿用「有背景图时允许透明画布」的老口径
+			if (f.iframe) f.iframe.style.colorScheme = this.webColorScheme || (this.contImgActive ? COLOR_SCHEME_NORMAL : "")
 			if (f.doc) this.registerCustomFontsIn(f)
 			this.scheduleFrameSize(f)
 		})
@@ -5316,7 +5732,7 @@ ${darkBase}
 		// 矩形是「渲染那一刻」的绝对坐标，字号/行距/边距一变文字就重排，
 		// 不重绘的话标注仍停在旧位置、与文字脱节（文字样式与标注不同步）。
 		// 等一帧让 reflow 落定再重绘，避免按旧布局取坐标。
-		requestAnimationFrame(() => {
+		window.requestAnimationFrame(() => {
 			this.contFrames.forEach((_, idx) => this.refreshHighlightsFor(idx))
 		})
 	}
@@ -5362,7 +5778,7 @@ ${darkBase}
 			return
 		}
 		if (!bg) {
-			bg = document.createElement("div")
+			bg = createDiv()
 			bg.className = "unreader-cont-bg"
 			host.insertBefore(bg, host.firstChild)
 		}
@@ -5370,7 +5786,7 @@ ${darkBase}
 		bg.style.cssText = LAYER_SHELL_CSS
 		let bgInner = bg.firstElementChild as HTMLElement | null
 		if (!bgInner) {
-			bgInner = document.createElement("div")
+			bgInner = createDiv()
 			bg.appendChild(bgInner)
 		}
 		bgInner.style.cssText = [
@@ -5385,7 +5801,7 @@ ${darkBase}
 		].filter(Boolean).join(";")
 		if (appearance.glassEnabled) {
 			if (!tint) {
-				tint = document.createElement("div")
+				tint = createDiv()
 				tint.className = "unreader-cont-tint"
 				// DOM 序在图片层之后：同为 z-index:-1 时后序者画在上
 				bg.after(tint)
@@ -5393,7 +5809,7 @@ ${darkBase}
 			tint.style.cssText = LAYER_SHELL_CSS
 			let tintInner = tint.firstElementChild as HTMLElement | null
 			if (!tintInner) {
-				tintInner = document.createElement("div")
+				tintInner = createDiv()
 				tint.appendChild(tintInner)
 			}
 			tintInner.style.cssText = [
@@ -5677,7 +6093,7 @@ ${darkBase}
 
 	private emitContinuousRelocateSoon(): void {
 		if (this.contRaf) return
-		this.contRaf = requestAnimationFrame(() => {
+		this.contRaf = window.requestAnimationFrame(() => {
 			this.contRaf = 0
 			this.emitContinuousRelocate()
 		})
@@ -6146,14 +6562,20 @@ ${darkBase}
 			const color = highlightColorOf(colorName)
 			const els: HTMLElement[] = []
 			for (const rct of this.coverRectsForRange(d, range)) {
-				const hl = d.createElement("div")
+				// ⚠️ 必须用**全局** `createDiv()`，不能写 `d.createDiv()`：Obsidian 的 DOM 助手
+				// 只装在宿主 window 的原型上，而章节 iframe 是**独立 realm**（见
+				// core/iframeDomCompat.ts 文件头），frame 文档上根本没有这个方法 → 抛
+				// TypeError → 被下面的 catch 吞掉 → **高亮矩形永远画不出来**（正文一片空白、
+				// 侧栏却有记录，控制台只有一条 warn）。与 injectFrameCss 同一条口径：
+				// 全局助手造游离节点，`d.body.appendChild` 时按 DOM 规范收养进该 frame 文档。
+				const hl = createDiv()
 				hl.className = "unreader-hl-rect"
 				hl.dataset.cfi = cfi
 				// background 用 !important：深色覆盖的「容器透明化」规则带 !important，
 				// 不加的话 inline 压不过它，标注矩形在深色下整块消失
 				hl.style.cssText = `left:${rct.left - bodyRect.left}px;top:${rct.top - bodyRect.top}px;width:${rct.width}px;height:${rct.height}px;background:${color} !important;`
 				d.body.appendChild(hl)
-				els.push(hl as HTMLElement)
+				els.push(hl)
 			}
 			if (els.length) {
 				this.contHL.set(cfi, { text, color, els, range })
@@ -6195,7 +6617,7 @@ ${darkBase}
 		const byCfi = this.rangeFromAnyCfi(doc, cfi, fallbackText)
 		if (byCfi) return byCfi
 		if (fallbackText) {
-			try { return this.findRangeInElement(doc.body as HTMLElement, fallbackText) } catch { /* ignore */ }
+			try { return this.findRangeInElement(doc.body, fallbackText) } catch { /* ignore */ }
 		}
 		return null
 	}
@@ -6298,7 +6720,7 @@ ${darkBase}
 			// 局部可能是「起点路径,终点路径」，旧数据仅起点（此时退化到该文本节点末尾）
 			const halves = local.includes(",") ? local.split(",") : [local]
 			const tokensOf = (s: string): { i: number; off?: number }[] =>
-				[...s.matchAll(/\/(\d+)(?::(\d+))?/g)].map(m => ({ i: parseInt(m[1]!, 10), off: m[2] ? parseInt(m[2]!, 10) : undefined }))
+				[...s.matchAll(/\/(\d+)(?::(\d+))?/g)].map(m => ({ i: parseInt(m[1]!, 10), off: m[2] ? parseInt(m[2], 10) : undefined }))
 			const resolve = (tokens: { i: number; off?: number }[]): { node: Text; off: number } | null => {
 				let node: Node | null = doc.body
 				for (const tk of tokens) {

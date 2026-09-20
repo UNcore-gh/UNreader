@@ -268,10 +268,11 @@ async function removeEmptyFolders(app: App, root: string, deleteRoot = true): Pr
 		}
 		if (!empty) return false;
 		try {
-			// force=true：空目录必须永久删除，不能只进本机回收站。普通 delete 会把目录
-			// 移进 `.trash`，而 Obsidian Sync 通常不把回收站当成普通库内容同步，其他设备
-			// 就会继续看到旧的 `UNreader/` 及空子目录骨架。
-			await app.vault.delete(folder, true);
+			// 走 `FileManager.trashFile`：尊重用户在「文件与链接 → 删除文件」里的偏好
+			// （系统回收站 / 库内 `.trash` / 永久删除），这也是上架规则的硬要求
+			// （`Vault.delete` 会无视该偏好）。这里回收的**只有空目录骨架** ——
+			// prune 的判据是「整棵子树里没有任何文件」，所以不存在误删用户数据的可能。
+			await app.fileManager.trashFile(folder);
 			removed.push(folder.path);
 			return true;
 		} catch {
@@ -291,7 +292,7 @@ async function removeEmptyFolders(app: App, root: string, deleteRoot = true): Pr
 	const rootFolder = app.vault.getAbstractFileByPath(root);
 	if (deleteRoot && rootFolder instanceof TFolder && rootFolder.children.length === 0) {
 		try {
-			await app.vault.delete(rootFolder, true);
+			await app.fileManager.trashFile(rootFolder);
 			removed.push(rootFolder.path);
 		} catch { /* 同上 */ }
 	}

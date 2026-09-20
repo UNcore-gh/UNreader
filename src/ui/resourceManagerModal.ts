@@ -1,4 +1,5 @@
-import { App, Modal } from "obsidian";
+import { App } from "obsidian";
+import { UnreaderModal } from "./modalSkin";
 import type { SharedResource, SharedResourceKind } from "../core/resourceStore";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
 
@@ -11,7 +12,7 @@ export interface ResourceManagerCallbacks {
 	onDelete: (resource: ManagedResource) => Promise<void>;
 }
 
-export class ResourceManagerModal extends Modal {
+export class ResourceManagerModal extends UnreaderModal {
 	constructor(
 		app: App,
 		private kind: SharedResourceKind,
@@ -59,11 +60,13 @@ export class ResourceManagerModal extends Modal {
 			const toggle = toggleLabel.createEl("input", { type: "checkbox" });
 			toggle.checked = resource.enabled;
 			toggleLabel.createSpan({ text: resource.enabled ? "保留使用" : "已移除" });
-			toggle.addEventListener("change", async () => {
-				toggle.disabled = true;
-				await this.callbacks.onToggle(resource.id, toggle.checked);
-				toggle.disabled = false;
-				this.renderList();
+			toggle.addEventListener("change", () => {
+				void (async (): Promise<void> => {
+					toggle.disabled = true;
+					await this.callbacks.onToggle(resource.id, toggle.checked);
+					toggle.disabled = false;
+					this.renderList();
+				})();
 			});
 
 			const del = row.createEl("button", {
@@ -71,10 +74,12 @@ export class ResourceManagerModal extends Modal {
 				text: "删除文件",
 				attr: { title: "删除库内资源文件" },
 			});
-			del.addEventListener("click", async () => {
-				del.disabled = true;
-				await this.callbacks.onDelete(resource);
-				this.renderList();
+			del.addEventListener("click", () => {
+				void (async (): Promise<void> => {
+					del.disabled = true;
+					await this.callbacks.onDelete(resource);
+					this.renderList();
+				})();
 			});
 		}
 	}

@@ -20,7 +20,7 @@ export function idleYield(timeoutMs = 100): Promise<void> {
 	return new Promise<void>(resolve => {
 		let done = false;
 		const finish = (): void => { if (!done) { done = true; resolve(); } };
-		const ric = (globalThis as unknown as {
+		const ric = (window as unknown as {
 			requestIdleCallback?: (cb: () => void, opts?: { timeout?: number }) => number;
 		}).requestIdleCallback;
 		if (typeof ric === "function") ric(() => finish(), { timeout: timeoutMs });

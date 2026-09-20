@@ -1,7 +1,8 @@
-import { Modal, App } from "obsidian";
+import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
+import { UnreaderModal } from "./modalSkin";
 
-export class PresetNameModal extends Modal {
+export class PresetNameModal extends UnreaderModal {
 	private name: string;
 	private onSubmit: (name: string | null) => void;
 
@@ -27,7 +28,7 @@ export class PresetNameModal extends Modal {
 			cls: "unreader-tag-input",
 			type: "text",
 			attr: { placeholder: "预设名称，如：夜间护眼" },
-		}) as HTMLInputElement;
+		});
 		input.value = this.name;
 		input.select();
 
@@ -59,7 +60,7 @@ export class PresetNameModal extends Modal {
 		btnRow.createEl("button", { text: "取消" }).addEventListener("click", cancel);
 		btnRow.createEl("button", { text: this.name ? "重命名" : "保存", cls: "mod-cta" }).addEventListener("click", submit);
 
-		setTimeout(() => input.focus(), 50);
+		window.setTimeout(() => input.focus(), 50);
 	}
 
 	onClose(): void {

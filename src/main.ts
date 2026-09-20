@@ -1,7 +1,8 @@
 import { Plugin, TFile, Notice, FuzzySuggestModal, WorkspaceLeaf, Platform, normalizePath } from "obsidian";
 import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance, platformAppearanceDefaults } from "./types";
 import { UNreaderSettingTab } from "./settings";
-import { getBookFiles } from "./core/bookService";
+import { getBookFiles, SUPPORTED_BOOK_FORMATS } from "./core/bookService";
+import { excludedFolderKey, normalizeExcludedFolder } from "./core/bookExclusions";
 import { clearBookPreviewCache } from "./core/bookPreview";
 import { ProgressStore } from "./core/progressStore";
 import { PresetStore } from "./core/presetStore";
@@ -20,11 +21,21 @@ import { VIEW_TYPE_UNREADER, UNreaderView, ReaderSelectionInfo } from "./ui/read
 import { ResourceManagerModal, type ManagedResource } from "./ui/resourceManagerModal";
 import { collectNeighborFacts } from "./ui/explorerDiag";
 import { ExplorerHeal } from "./ui/explorerHeal";
-import { AddFeedModal, DeleteFeedModal, ImportOpmlModal, RenameFeedModal } from "./ui/feedModals";
+import { AddFeedModal, DeleteFeedModal, FeedManagerModal, ImportOpmlModal, RenameFeedModal } from "./ui/feedModals";
 import type { DiscoveredFeed } from "./core/feedParser";
 import { FeedStore } from "./core/feedStore";
+import { confirmAction } from "./ui/confirmModal";
 import { FeedService } from "./core/feedService";
 import { FeedMediaStore } from "./core/feedMediaStore";
+
+/** UNagent 写完库内文件后的显式刷新通道（见 UNagent 的 utils/pluginNotify.ts）。
+ *
+ *  为什么需要它：本插件靠 Vault 的 create/modify/delete/rename 事件发现「他端
+ *  同步到达」的数据，但那类重扫都排在 `dataReady` 门闩之后、并且带去抖；而
+ *  `Data/Feeds/` 更是**从来没有**Vault 监听（订阅是插件自己高频写的，监听会
+ *  自激）。于是 UNagent 替我们写订阅索引 / 预设 / 资源时，界面上什么都不会发生
+ *  ——用户看到的是「Agent 说存好了，面板里没有」，只能重启插件。 */
+const VAULT_WRITE_EVENT = "unagent:vault-write";
 
 /** 等「首屏绘制之后的第一个空闲期」。
  *
@@ -51,11 +62,13 @@ function yieldToFirstIdle(): Promise<void> {
 		// 定时器只有 300ms：让路的最大代价必须远小于它要避开的那批 I/O。
 		window.setTimeout(finish, 300);
 		try {
-			const ric = (window as Window & {
+			// 以 window 为接收者直接调用（脱离 window 取方法引用会被 unbound-method 判为可疑，
+			// 且 Web IDL 方法用错 this 会抛 Illegal invocation）。
+			const idleWindow = window as Window & {
 				requestIdleCallback?: (cb: () => void, opts?: { timeout: number }) => number;
-			}).requestIdleCallback;
-			if (typeof ric === "function") {
-				ric.call(window, finish, { timeout: 250 });
+			};
+			if (typeof idleWindow.requestIdleCallback === "function") {
+				idleWindow.requestIdleCallback(finish, { timeout: 250 });
 				return;
 			}
 		} catch { /* 回落 */ }
@@ -110,7 +123,7 @@ export default class UNreaderPlugin extends Plugin {
 	 *  候选里的 `Fonts` 就会因为「目标已有同名子目录」被跳过而永久留在原地。 */
 	private libraryHeal: Promise<unknown> = Promise.resolve();
 
-	private saveTimer: ReturnType<typeof setTimeout> | null = null;
+	private saveTimer: number | null = null;
 	private saving = false;
 	/** 字体 blob 缓存：路径 → (mtime, size, blob URL, format)，避免每次开书重读字体文件 */
 	private fontBlobCache = new Map<string, { mtime: number; size: number; uri: string; format: string }>();
@@ -203,7 +216,7 @@ export default class UNreaderPlugin extends Plugin {
 		const isExternalNoise = (reason: unknown): boolean => {
 			if (!(reason instanceof TypeError)) return false;
 			if (!String(reason.message ?? "").includes("children")) return false;
-			const stack = String((reason as Error).stack ?? "").toLowerCase();
+			const stack = String((reason).stack ?? "").toLowerCase();
 			return !stack.includes("plugin:unreader");
 		};
 		/** 同一现场（message + 栈首帧）只进缓冲一次 */
@@ -224,7 +237,8 @@ export default class UNreaderPlugin extends Plugin {
 			else debugLog.error(label, reason);
 		};
 		const captureError = (ev: ErrorEvent): void => {
-			const reason = ev.error ?? ev.message;
+			// `ErrorEvent.error` 的类型就是 `any`；这里只做「分类 + 记录」，收成 unknown 即可
+			const reason: unknown = ev.error ?? ev.message;
 			if (isExternalNoise(reason)) return; // 已知库外噪音：不刷控制台，也不进报告
 			reportOnce("error", reason);
 		};
@@ -241,11 +255,11 @@ export default class UNreaderPlugin extends Plugin {
 		this.progress = new ProgressStore(this.app.vault, PROGRESS_FOLDER, this.deviceScope());
 
 		// 外观预设库：从库内预设文件夹加载
-		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER);
+		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER, this.app.fileManager);
 
 		// 共享资源库：字体沿用 Fonts/，图片统一落 Resources/Images/；
 		// 资源文件与启用索引随库同步，设备外观和当前预设仍只存在本机。
-		this.resourceStore = new ResourceStore(this.app.vault);
+		this.resourceStore = new ResourceStore(this.app.vault, this.app.fileManager);
 		setActiveResourceStore(this.resourceStore);
 		this.feedStore = new FeedStore(this.app.vault);
 		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
@@ -467,6 +481,28 @@ export default class UNreaderPlugin extends Plugin {
 			}));
 		}
 
+		// UNagent 替我们写数据文件后的即时重扫（显式通道，见 VAULT_WRITE_EVENT 的注释）。
+		// 与上面两条 Vault 监听并存：那条是「任何来源写入」的兜底，这条只保证
+		// 「Agent 刚写完」的那一次立刻反映到已打开的界面上。
+		{
+			// 串行化：一次 Agent 操作可能连发几条事件，而重扫是「清空 + 重建」——并发
+			// 跑会互相覆盖，后到的那份反而可能基于旧快照。排队保证最后一次读到的是
+			// 最终磁盘状态。
+			let tail: Promise<void> = Promise.resolve();
+			const onExternalWrite = (ev: Event): void => {
+				const detail = (ev as CustomEvent<{ paths?: unknown }>).detail;
+				const raw = Array.isArray(detail?.paths) ? detail.paths : [];
+				const paths = raw.filter((p): p is string => typeof p === "string" && p.length > 0);
+				if (paths.length === 0) return;
+				debugLog.info(`[agent-write] ${paths.join(", ")}`);
+				tail = tail
+					.then(() => this.refreshFromExternalWrite(paths))
+					.catch(() => undefined);
+			};
+			window.addEventListener(VAULT_WRITE_EVENT, onExternalWrite);
+			this.register(() => window.removeEventListener(VAULT_WRITE_EVENT, onExternalWrite));
+		}
+
 		// **排在 `onLayoutReady` 之后**：本方法开头会 `ensureLibraryFolders()`（vault.createFolder
 		// = 库事件），而移动端启动瞬间正是官方文件列表虚拟化测量最敏感的窗口 ——
 		// 库事件会把 FileExplorerView 推进一次 `compute()`，若此时左抽屉还是
@@ -647,7 +683,7 @@ export default class UNreaderPlugin extends Plugin {
 	 *  设备上等于没有）。 */
 	private async exportDebugLog(): Promise<void> {
 		if (debugLog.entryCount() === 0) {
-			new Notice("暂无诊断日志：请先在「设置 → UNreader → 诊断」打开「调试日志」，复现问题后再执行本命令");
+			new Notice("暂无诊断日志：请先在插件设置里打开「调试日志」，复现问题后再执行本命令");
 			return;
 		}
 		try {
@@ -835,8 +871,8 @@ export default class UNreaderPlugin extends Plugin {
 	private async rebuildStores(): Promise<void> {
 		try { this.resourceStore?.dispose(); } catch { /* ignore */ }
 		this.progress = new ProgressStore(this.app.vault, PROGRESS_FOLDER, this.deviceScope());
-		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER);
-		this.resourceStore = new ResourceStore(this.app.vault);
+		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER, this.app.fileManager);
+		this.resourceStore = new ResourceStore(this.app.vault, this.app.fileManager);
 		setActiveResourceStore(this.resourceStore);
 		this.feedStore = new FeedStore(this.app.vault);
 		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
@@ -1100,7 +1136,12 @@ export default class UNreaderPlugin extends Plugin {
 			},
 			onDelete: async resource => {
 				const used = this.resourceUsageCount(resource.id);
-				if (used > 0 && !window.confirm(`资源“${resource.name}”正被 ${used} 处配置引用，删除后这些配置会失去该资源。确定删除？`)) return;
+				if (used > 0 && !await confirmAction(this.app, {
+					title: "删除资源",
+					body: `资源“${resource.name}”正被 ${used} 处配置引用，删除后这些配置会失去该资源。确定删除？`,
+					cta: "删除",
+					destructive: true,
+				})) return;
 				if (!await this.resourceStore.remove(resource.id)) {
 					new Notice("资源删除失败");
 					return;
@@ -1209,7 +1250,9 @@ export default class UNreaderPlugin extends Plugin {
 		if (!files.length) {
 			// 书籍不限位置（数据落点与书籍位置无关，见 core/paths.ts）：
 			// 扫描范围就是整个库，所以空态的修复建议只能是「把书放进库」。
-			new Notice("库里没有找到 EPUB / MOBI / AZW3 / TXT / HTML 文件：把书放进库内任意位置即可");
+			// 格式与排除文件夹是另外两条「有书却不显示」的原因，一并写进文案 ——
+			// 只报「库里没有」会让用户以为书丢了（真实原因往往是刚排除过的下载目录）。
+			new Notice(`库里没有找到 ${SUPPORTED_BOOK_FORMATS.join(" / ")} 书籍：把书放进库内任意位置即可；若书在排除的文件夹里，请到 设置 → UNreader → 书架 调整`);
 			return;
 		}
 		new BookPickerModal(this, files).open();
@@ -1228,6 +1271,47 @@ export default class UNreaderPlugin extends Plugin {
 			state: { source: { kind: "feed-entry", feedId, entryId } },
 		});
 		return leaf;
+	}
+
+	/** 书架排除项 / 收录格式变更后重绘已打开的书架（见 settings 的「书架」分区）。
+	 *  书架的列表数据每次渲染现算，所以这里只需通知视图重绘 —— 面板模式与滚动位置不变；
+	 *  面板没开（或当前不在书架模式）时什么都不做。 */
+	refreshBookshelfPanel(): void {
+		this.getActiveReader()?.refreshBookshelfPanel();
+	}
+
+	/** UNagent 写完数据文件后的重扫：按路径前缀判断该动哪个库，再刷新已打开的界面。
+	 *
+	 *  与 Vault 监听的分工见 VAULT_WRITE_EVENT 的注释——这里负责「立刻」。路径前缀
+	 *  每次都读**活绑定**（paths.ts）：用户切过资料文件夹后，Agent 写的是新落点，
+	 *  不能拿 onload 时捕获的旧常量去比（那样切根后永远匹配不上）。 */
+	async refreshFromExternalWrite(paths: readonly string[]): Promise<void> {
+		const under = (root: string, p: string): boolean => p === root || p.startsWith(`${root}/`);
+		const touchesPresets = paths.some(p => under(PRESETS_FOLDER, p));
+		const touchesResources = paths.some(p =>
+			under(FONTS_FOLDER, p) || under(RESOURCES_FOLDER, p),
+		);
+		const touchesFeeds = paths.some(p => under(FEEDS_FOLDER, p));
+		const touchesNotes = paths.some(p => under(NOTES_FOLDER, p));
+		if (!touchesPresets && !touchesResources && !touchesFeeds && !touchesNotes) return;
+		// 排在 init 的首轮读盘之后：那些 init 会先 clear 再写回，并发重扫有被旧快照反超的风险。
+		await this.whenDataReady().catch(() => undefined);
+		if (touchesPresets) await this.presetStore.reload().catch(() => undefined);
+		if (touchesResources) {
+			await this.resourceStore.reload().catch(() => undefined);
+			await this.refreshCustomFonts().catch(() => undefined);
+		}
+		// 订阅库是内存缓存，`init()` 就是「整库重读」；只有这条通道会重读它，
+		// Feeds/ 没有 Vault 监听（订阅刷新频率高，监听会自激）。
+		if (touchesFeeds) await this.feedStore.init().catch(() => undefined);
+		const reader = this.getActiveReader();
+		if (!reader) return;
+		if (touchesPresets || touchesResources) {
+			reader.refreshAppearance();
+			reader.refreshAppearancePanel();
+		}
+		if (touchesFeeds) reader.refreshFeedsPanel();
+		if (touchesNotes) await reader.refreshAnnotationsFromExternalWrite(paths);
 	}
 
 	promptAddFeed(): void {
@@ -1271,15 +1355,17 @@ export default class UNreaderPlugin extends Plugin {
 		}
 	}
 
-	renameFeed(feedId: string, title: string): void {
+	/** 重命名订阅。`onDone` 供订阅管理面板在自己开着时重绘列表（弹窗是同一窗口的两层）。 */
+	renameFeed(feedId: string, title: string, onDone?: () => void): void {
 		new RenameFeedModal(this.app, title, value => {
 			void this.feedStore.renameSubscription(feedId, value).then(() => {
 				this.getActiveReader()?.refreshFeedsPanel();
+				onDone?.();
 			});
 		}).open();
 	}
 
-	async deleteFeed(feedId: string): Promise<void> {
+	async deleteFeed(feedId: string, onDone?: () => void): Promise<void> {
 		const feed = this.feedStore.getFeed(feedId);
 		if (!feed) return;
 		new DeleteFeedModal(this.app, feed.title, () => {
@@ -1287,9 +1373,35 @@ export default class UNreaderPlugin extends Plugin {
 				const reader = this.getActiveReader();
 				if (reader?.getCurrentFeedSource()?.feedId === feedId) reader.showEmptyState();
 				reader?.refreshFeedsPanel();
+				onDone?.();
 				new Notice(`已删除订阅：${feed.title}`);
 			});
 		}).open();
+	}
+
+	/** 订阅管理面板（RSS 工具栏的设置按钮）。 */
+	openFeedManager(): void {
+		new FeedManagerModal(this.app, this).open();
+	}
+
+	/** 启用 / 停用订阅：停用后不再参与刷新，文章也从「全部」聚合列表里收起。 */
+	async setFeedEnabled(feedId: string, enabled: boolean): Promise<void> {
+		await this.whenDataReady();
+		await this.feedService.setSubscriptionEnabled(feedId, enabled);
+		const title = this.feedStore.getFeed(feedId)?.title ?? "";
+		new Notice(enabled ? `已启用订阅：${title}` : `已停用订阅：${title}`);
+		this.getActiveReader()?.refreshFeedsPanel();
+	}
+
+	/** 只刷新一个订阅（订阅管理面板每行那颗刷新按钮；停用的订阅也能手动刷一次）。 */
+	async refreshFeed(feedId: string): Promise<void> {
+		await this.whenDataReady();
+		const feed = this.feedStore.getFeed(feedId);
+		if (!feed) return;
+		const result = await this.feedService.refreshFeed(feedId, true);
+		if (result.error) new Notice(`刷新失败：${result.error}`);
+		else new Notice(result.notModified ? `《${feed.title}》没有新文章` : `《${feed.title}》已更新 ${result.addedOrUpdated} 篇`);
+		this.getActiveReader()?.refreshFeedsPanel();
 	}
 
 	async downloadPodcast(feedId: string, entryId: string): Promise<boolean> {
@@ -1309,6 +1421,10 @@ export default class UNreaderPlugin extends Plugin {
 	async refreshAllFeeds(): Promise<void> {
 		await this.whenDataReady();
 		const results = await this.feedService.refreshAll(true);
+		if (!results.length) {
+			new Notice("没有可刷新的订阅（订阅源可能都已停用）");
+			return;
+		}
 		const failed = results.filter(result => result.error).length;
 		new Notice(failed ? `刷新完成，${failed} 个订阅失败` : "订阅已刷新");
 		this.getActiveReader()?.refreshFeedsPanel();
@@ -1316,7 +1432,9 @@ export default class UNreaderPlugin extends Plugin {
 
 	async openNextUnreadFeed(): Promise<void> {
 		await this.whenDataReady();
-		const next = this.feedStore.listEntries().find(entry => entry.state.readAt == null);
+		const disabled = new Set(this.feedStore.listFeeds().filter(feed => feed.enabled === false).map(feed => feed.id));
+		const next = this.feedStore.listEntries()
+			.find(entry => entry.state.readAt == null && !disabled.has(entry.feedId));
 		if (!next) {
 			new Notice("没有未读文章");
 			return;
@@ -1348,8 +1466,8 @@ export default class UNreaderPlugin extends Plugin {
 	}
 
 	scheduleSave(): void {
-		if (this.saveTimer) clearTimeout(this.saveTimer);
-		this.saveTimer = setTimeout(() => {
+		if (this.saveTimer) window.clearTimeout(this.saveTimer);
+		this.saveTimer = window.setTimeout(() => {
 			this.saveTimer = null;
 			void this.persistData();
 		}, 800);
@@ -1357,7 +1475,7 @@ export default class UNreaderPlugin extends Plugin {
 
 	flushSave(): void {
 		if (this.saveTimer) {
-			clearTimeout(this.saveTimer);
+			window.clearTimeout(this.saveTimer);
 			this.saveTimer = null;
 		}
 		void this.persistData();
@@ -1400,7 +1518,7 @@ export default class UNreaderPlugin extends Plugin {
 	/** 读取本机外观快照（localStorage，设备本地永不随库同步） */
 	private loadDeviceAppearance(): Partial<AppearanceSettings> | null {
 		try {
-			const raw = localStorage.getItem(this.deviceAppearanceKey());
+			const raw = window.localStorage.getItem(this.deviceAppearanceKey());
 			if (!raw) return null;
 			const parsed = JSON.parse(raw) as Partial<AppearanceSettings>;
 			return parsed && typeof parsed === "object" ? parsed : null;
@@ -1412,10 +1530,10 @@ export default class UNreaderPlugin extends Plugin {
 	/** 写入本机外观快照；失败（超配额等）返回 false 由调用方降级 */
 	private saveDeviceAppearance(): boolean {
 		try {
-			localStorage.setItem(this.deviceAppearanceKey(), JSON.stringify(this.settings.appearance));
+			window.localStorage.setItem(this.deviceAppearanceKey(), JSON.stringify(this.settings.appearance));
 			return true;
 		} catch (e) {
-			console.warn("[UNreader] 本机外观写入 localStorage 失败（可能超配额），降级写入 data.json", e);
+			console.warn("[UNreader] 本机外观写入 window.localStorage 失败（可能超配额），降级写入 data.json", e);
 			return false;
 		}
 	}
@@ -1448,6 +1566,20 @@ export default class UNreaderPlugin extends Plugin {
 		this.settings.bookshelfPinned = Array.isArray(this.settings.bookshelfPinned)
 			? this.settings.bookshelfPinned.filter((path): path is string => typeof path === "string")
 			: [];
+		// 书架排除文件夹（老 data.json 没有这两个键，`Object.assign` 会保留默认值，
+		// 这里再收一次口：手改过 / 跨版本写坏的 data.json 不该让书架整体崩掉）。
+		// 归一化走 `normalizeExcludedFolder`（去首尾斜杠、统一分隔符、去空项、去重），
+		// 比较用小写键 —— 官方匹配本身大小写不敏感，用户手写 `Books` 与 `books` 是同一条。
+		this.settings.bookshelfExcludedFolders = [
+			...new Map(
+				(Array.isArray(this.settings.bookshelfExcludedFolders) ? this.settings.bookshelfExcludedFolders : [])
+					.filter((f): f is string => typeof f === "string")
+					.map(f => normalizeExcludedFolder(f))
+					.filter(f => f !== "")
+					.map(f => [excludedFolderKey(f), f] as const),
+			).values(),
+		];
+		this.settings.bookshelfFollowObsidianExclusions = this.settings.bookshelfFollowObsidianExclusions !== false;
 			this.settings.positions = this.settings.positions ?? {};
 			this.settings.feeds = Object.assign({}, DEFAULT_SETTINGS.feeds, this.settings.feeds ?? {});
 			this.settings.feeds.entryLimit = Math.max(20, Math.min(2000, Math.floor(Number(this.settings.feeds.entryLimit) || DEFAULT_SETTINGS.feeds.entryLimit)));
@@ -1485,7 +1617,7 @@ export default class UNreaderPlugin extends Plugin {
 		let cleanOpenMigrationKey: string | null = null;
 		try {
 			const key = `unreader-clean-open-v1:${this.deviceScope()}`;
-			if (localStorage.getItem(key) !== "1") {
+			if (window.localStorage.getItem(key) !== "1") {
 				this.settings.appearance.showTocRail = false;
 				this.settings.appearance.autoOpenToc = false;
 				cleanOpenMigrationKey = key;
@@ -1538,6 +1670,12 @@ export default class UNreaderPlugin extends Plugin {
 		if (typeof this.settings.annoPinned !== "boolean") this.settings.annoPinned = false;
 		if (typeof this.settings.annoPanelHeight !== "number" || !Number.isFinite(this.settings.annoPanelHeight) || this.settings.annoPanelHeight < 220) delete this.settings.annoPanelHeight;
 		if (typeof this.settings.pinThreshold !== "number" || this.settings.pinThreshold < 400 || this.settings.pinThreshold > 1200) this.settings.pinThreshold = DEFAULT_SETTINGS.pinThreshold;
+		// 本地 HTML 的阅读设备档位：值域写成显式枚举（不 import 视图层那张表，
+		// 它是 UI 文案层的东西）。兜底很重要——脏值会让设备按钮查表拿到 undefined。
+		if (this.settings.webDeviceMode !== "auto" && this.settings.webDeviceMode !== "phone"
+			&& this.settings.webDeviceMode !== "tablet" && this.settings.webDeviceMode !== "desktop") {
+			this.settings.webDeviceMode = DEFAULT_SETTINGS.webDeviceMode;
+		}
 		if (!Array.isArray(this.settings.appearancePresets)) this.settings.appearancePresets = [];
 		// 规范化每个预设的 appearance，补齐缺失字段
 		for (const p of this.settings.appearancePresets) {
@@ -1550,7 +1688,7 @@ export default class UNreaderPlugin extends Plugin {
 		}
 		const appearanceSaved = this.saveDeviceAppearance();
 		if (cleanOpenMigrationKey && appearanceSaved) {
-			try { localStorage.setItem(cleanOpenMigrationKey, "1"); } catch { /* 下次启动重试即可 */ }
+			try { window.localStorage.setItem(cleanOpenMigrationKey, "1"); } catch { /* 下次启动重试即可 */ }
 		}
 	}
 
@@ -1580,6 +1718,14 @@ export default class UNreaderPlugin extends Plugin {
 				} catch { return "读取失败"; }
 			})(),
 			"book count": String(this.getBookFiles().length),
+			// 书架收录边界的**实际生效态**：用户报「我的书不见了」时，先看这一行 ——
+			// 是格式不符、还是被官方排除项/额外排除的文件夹摘掉了（设置页只表达意图）。
+			"bookshelf filter": (() => {
+				const folders = this.settings.bookshelfExcludedFolders ?? [];
+				const follow = this.settings.bookshelfFollowObsidianExclusions !== false;
+				const extra = folders.length ? `（${folders.join(" ")}）` : "";
+				return `follow obsidian=${follow ? "on" : "off"}；extra folders=${folders.length}${extra}`;
+			})(),
 			theme: a.theme,
 			"color mode": a.colorMode,
 			"bg image mode": a.bgImageMode,
@@ -1592,7 +1738,9 @@ export default class UNreaderPlugin extends Plugin {
 				const field = a.bgImageMode === "separate"
 					? (activeTheme(a) === "dark" ? "backgroundImageDark" : "backgroundImageLight")
 					: "backgroundImage";
-				const v = String((a as unknown as Record<string, unknown>)[field] ?? "");
+				// 字段是 string | null：非字符串不参与展示（`String(对象)` 会输出 "[object Object]"）
+				const rawField = (a as unknown as Record<string, unknown>)[field];
+				const v = typeof rawField === "string" ? rawField : "";
 				if (!v) return `none（当前生效字段是 ${field}，它是空的）`;
 				return `${field} ${v.startsWith("data:") ? Math.round(v.length / 1024) + "KB(data uri)" : v.slice(0, 60)}`;
 			})(),

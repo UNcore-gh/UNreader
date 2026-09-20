@@ -1,4 +1,4 @@
-import { TFile, TFolder, Vault } from "obsidian";
+import { FileManager, TFile, TFolder, Vault } from "obsidian";
 import { FONTS_FOLDER, IMAGES_FOLDER, RESOURCE_MANIFEST, RESOURCES_FOLDER } from "./paths";
 
 const FONT_EXT = new Set(["ttf", "otf", "woff", "woff2"]);
@@ -83,6 +83,7 @@ export class ResourceStore {
 
 	constructor(
 		private vault: Vault,
+		private fileManager: FileManager,
 		private fontFolder: string = FONTS_FOLDER,
 		private imageFolder: string = IMAGES_FOLDER,
 		private manifestPath: string = RESOURCE_MANIFEST,
@@ -257,7 +258,8 @@ export class ResourceStore {
 			const file = this.vault.getAbstractFileByPath(entry.path);
 			if (file instanceof TFile) {
 				try {
-					await this.vault.trash(file, true);
+					// 删除资源文件走用户的删除偏好（上架规则禁止 Vault.trash/delete）
+					await this.fileManager.trashFile(file);
 				} catch {
 					await this.vault.adapter.remove(entry.path);
 				}
