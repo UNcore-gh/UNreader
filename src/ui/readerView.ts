@@ -2364,11 +2364,10 @@ export class UNreaderView extends ItemView {
 			},
 		});
 		const pull = this.immersionSwitchEl.createSpan({ cls: "unreader-immersion-switch-pull" });
-		pull.createSpan({ cls: "unreader-immersion-switch-cap" });
-		pull.createSpan({ cls: "unreader-immersion-switch-cord" });
-		pull.createSpan({ cls: "unreader-immersion-switch-knot" });
-		pull.createSpan({ cls: "unreader-immersion-switch-grip" });
-		pull.createSpan({ cls: "unreader-immersion-switch-side-cord" });
+		pull.createSpan({ cls: "unreader-immersion-switch-stem" });
+		pull.createSpan({ cls: "unreader-immersion-switch-bar-mid" });
+		pull.createSpan({ cls: "unreader-immersion-switch-bar-long" });
+		pull.createSpan({ cls: "unreader-immersion-switch-bar-short" });
 		this.immersionSwitchEl.addEventListener("pointerdown", e => e.stopPropagation());
 		this.immersionSwitchEl.addEventListener("click", e => {
 			e.preventDefault();
