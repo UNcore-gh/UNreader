@@ -187,52 +187,84 @@
 	pointer-events: auto;
 }
 
-/* 全沉浸的唯一常驻出口：**只有一枚图标**（无底框、无圆角、无阴影、无悬停底色）。
-   它直接压在正文上，所以只靠颜色与不透明度与背景拉开层次。
-   落点（桌面）是左上角安全边距；手机/平板另有下移规则，见下方 `body.is-phone` 段。 */
-.unreader-full-immersion-exit {
+/* 沉浸模式拉绳开关：按钮本体完全透明、无底框、无描边、无投影；可见图形全部由
+   CSS 画出，因而不依赖 iPad / 旧 Obsidian 图标集里是否有某个 lucide 名称。
+   顶部坐标由 readerView.syncProgressTop 写入 --ur-immersion-switch-top：
+     · 页首可见 → 实测页首下缘；
+     · 页首被沉浸/官方全屏收走 → 自动抬到安全区下沿或叶子顶边。
+   这里的 top 基础规则带 0.3s 过渡，与页首自身的滑走动画同拍。 */
+.unreader-immersion-switch {
 	position: absolute;
-	top: calc(env(safe-area-inset-top, 0px) + calc(6 * var(--ur-u)));
-	left: calc(env(safe-area-inset-left, 0px) + calc(6 * var(--ur-u)));
-	z-index: 60;
+	top: var(--ur-immersion-switch-top, calc(var(--view-header-top-offset, 0px) + var(--view-header-height, 48px)));
+	left: calc(env(safe-area-inset-left, 0px) + calc(10 * var(--ur-u)));
+	z-index: 61;
 	display: none;
-	align-items: center;
-	justify-content: center;
-	width: calc(24 * var(--ur-u));
-	height: calc(24 * var(--ur-u));
+	width: calc(28 * var(--ur-u));
+	height: calc(38 * var(--ur-u));
+	margin: 0;
 	padding: 0;
-	border: none;
-	background: none;
+	border: 0;
+	background: transparent;
 	box-shadow: none;
 	color: var(--icon-color);
-	/* 无底框后 0.5 在浅色主题的正文上几乎看不见；0.7 是「不抢正文、但一眼能找到」的档 */
-	opacity: 0.7;
-	transition: opacity 0.12s ease, color 0.12s ease;
+	-webkit-appearance: none;
+	appearance: none;
+	-webkit-tap-highlight-color: transparent;
+	outline: none;
+	cursor: pointer;
+	touch-action: manipulation;
+	transition: top 0.3s ease-in-out, color 0.15s ease;
 }
-.unreader-full-immersion-exit.is-visible {
+.unreader-root.has-book .unreader-immersion-switch {
+	display: block;
+}
+.unreader-immersion-switch-pull {
+	position: absolute;
+	top: 0;
+	left: 50%;
 	display: flex;
+	flex-direction: column;
+	align-items: center;
+	transform: translateX(-50%);
+	transform-origin: top center;
 }
-.unreader-full-immersion-exit:hover {
-	color: var(--icon-color-hover);
-	opacity: 1;
+.unreader-immersion-switch-cord {
+	width: calc(2 * var(--ur-u));
+	height: calc(24 * var(--ur-u));
+	border-radius: 999px;
+	background: currentColor;
+	opacity: 0.72;
 }
-.unreader-full-immersion-exit .svg-icon {
-	width: calc(13 * var(--ur-u));
-	height: calc(13 * var(--ur-u));
+.unreader-immersion-switch-grip {
+	width: calc(10 * var(--ur-u));
+	height: calc(12 * var(--ur-u));
+	margin-top: calc(-1 * var(--ur-u));
+	border-radius: 50%;
+	background: currentColor;
+	box-shadow: inset 0 0 0 calc(2 * var(--ur-u)) color-mix(in srgb, var(--background-primary) 36%, transparent);
 }
-
-/* 手机 / 平板：让到**页首盒下沿之下**（安全区 + 页首高）。
-
-   旧写法只有 `env(safe-area-inset-top)`，而 Android WebView 上它恒为 0
-   → 按钮落在 y≈6px、正压进系统状态栏，手指够不到（2026-09-20 用户报障）。
-   官方页首的盒高公式是 `--view-header-top-offset + --view-header-height`
-   （= `max(safe-area, 12px)` + 52px，iPhone 刘海则是 59px + 52px），落到它
-   下面既避开系统状态栏，也避开官方页首自己那排按钮；沉浸模式下页首被收走，
-   这个落点就是「页首刚让出来的那条带的下沿」，视觉上也仍是页首位置。 */
-body.is-phone .unreader-full-immersion-exit,
-body.is-tablet .unreader-full-immersion-exit {
-	top: calc(var(--view-header-top-offset, 0px) + var(--view-header-height, 52px) + calc(8 * var(--ur-u)));
-	left: calc(env(safe-area-inset-left, 0px) + calc(10 * var(--ur-u)));
+.unreader-immersion-switch:hover,
+.unreader-immersion-switch.is-on {
+	color: var(--interactive-accent);
+}
+.unreader-immersion-switch:focus-visible .unreader-immersion-switch-pull {
+	filter: drop-shadow(0 0 3px color-mix(in srgb, var(--interactive-accent) 76%, transparent));
+}
+.unreader-immersion-switch.is-pulling .unreader-immersion-switch-pull {
+	animation: unreader-immersion-pull 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+}
+@keyframes unreader-immersion-pull {
+	0% { transform: translate(-50%, 0); }
+	45% { transform: translate(-50%, calc(6 * var(--ur-u))); }
+	100% { transform: translate(-50%, 0); }
+}
+@media (prefers-reduced-motion: reduce) {
+	.unreader-immersion-switch {
+		transition: none;
+	}
+	.unreader-immersion-switch.is-pulling .unreader-immersion-switch-pull {
+		animation: none;
+	}
 }
 
 /* ---------- 沉浸模式：顶栏白板修复 + view-header 隐藏 ----------

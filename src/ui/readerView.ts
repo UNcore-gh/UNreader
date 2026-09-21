@@ -223,8 +223,9 @@ export class UNreaderView extends ItemView {
 	private pinThreshold = 720;
 	private pinResizeObserver: ResizeObserver | null = null;
 	private pinBtn: HTMLElement | null = null;
-	private fullImmersionBtn: HTMLElement | null = null;
-	private fullImmersionExitEl: HTMLElement | null = null;
+	/** 常驻的沉浸模式拉绳开关：进入/退出共用一枚，不依赖任何图标名。 */
+	private immersionSwitchEl: HTMLElement | null = null;
+	private immersionSwitchPullTimer: number | null = null;
 	/** 全沉浸中的临时“点按唤出”态；只属于当前会话，不写设置。 */
 	private fullImmersionRevealed = false;
 	/** 会话级状态，不写设置：切书/关闭视图清理，标签页失活只释放原生导航。 */
@@ -722,6 +723,10 @@ export class UNreaderView extends ItemView {
 		if (this.devicePresetRetryTimer !== null) {
 			window.clearTimeout(this.devicePresetRetryTimer);
 			this.devicePresetRetryTimer = null;
+		}
+		if (this.immersionSwitchPullTimer !== null) {
+			window.clearTimeout(this.immersionSwitchPullTimer);
+			this.immersionSwitchPullTimer = null;
 		}
 		if (this.progressTopTimer !== null) {
 			window.clearTimeout(this.progressTopTimer);
@@ -1867,7 +1872,14 @@ export class UNreaderView extends ItemView {
 			this.fullImmersion && a.showTocRail === true && a.fullImmersionShowTocRail === true);
 		root.toggleClass("full-immersion-show-progress",
 			this.fullImmersion && a.chapterProgress !== false && a.fullImmersionShowChapterProgress === true);
-		this.fullImmersionExitEl?.toggleClass("is-visible", this.fullImmersion);
+		const switchEl = this.immersionSwitchEl;
+		if (switchEl) {
+			const label = this.fullImmersion ? "退出全沉浸" : "进入全沉浸";
+			switchEl.toggleClass("is-on", this.fullImmersion);
+			switchEl.setAttribute("aria-pressed", this.fullImmersion ? "true" : "false");
+			switchEl.setAttribute("aria-label", label);
+			switchEl.setAttribute("title", label);
+		}
 	}
 
 	/** 打开目录面板（若可开）。浮动目录独立于工具层，不通过命令改写 chrome 显隐。
@@ -2332,26 +2344,32 @@ export class UNreaderView extends ItemView {
 		this.railDeviceBtn = this.sideNav.addIconButton("monitor-smartphone", "阅读设备", () => this.cycleWebDevice());
 		this.railDeviceBtn.addClass("is-html-only-control");
 		this.sideNav.addSeparator();
-		// 全沉浸入口保留在工具栏；点按唤出后同一枚 scan 按钮可直接退出。
-		this.fullImmersionBtn = this.sideNav.addIconButton("scan", "全沉浸模式", () => this.toggleFullImmersion());
 		this.syncRailButtons();
 		this.sideNav.addIconButton("settings", "打开设置", () => this.openPluginSettings());
 		this.sideNav.setBackHandler(() => this.goBack());
 		body.appendChild(this.sideNav.actionsEl);
 		body.appendChild(this.sideNav.backEl);
 		body.appendChild(this.sideNav.navEl);
-		// 全沉浸退出按钮：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏；
-		// 尺寸与图标跟随工具栏按钮倍率；安全区由 CSS 保证，事件不进入正文点按状态机。
-		this.fullImmersionExitEl = this.rootEl.createEl("button", {
-			cls: "unreader-full-immersion-exit",
-			attr: { type: "button", "aria-label": "退出全沉浸" },
+		// 沉浸模式拉绳开关：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏。
+		// 图形完全由 CSS 绘制，避免 iPad / 旧版本图标集缺名时只剩系统按钮底框。
+		this.immersionSwitchEl = this.rootEl.createEl("button", {
+			cls: "unreader-immersion-switch",
+			attr: {
+				type: "button",
+				"aria-label": "进入全沉浸",
+				"aria-pressed": "false",
+				title: "进入全沉浸",
+			},
 		});
-		setIcon(this.fullImmersionExitEl, "scan");
-		this.fullImmersionExitEl.addEventListener("pointerdown", e => e.stopPropagation());
-		this.fullImmersionExitEl.addEventListener("click", e => {
+		const pull = this.immersionSwitchEl.createSpan({ cls: "unreader-immersion-switch-pull" });
+		pull.createSpan({ cls: "unreader-immersion-switch-cord" });
+		pull.createSpan({ cls: "unreader-immersion-switch-grip" });
+		this.immersionSwitchEl.addEventListener("pointerdown", e => e.stopPropagation());
+		this.immersionSwitchEl.addEventListener("click", e => {
 			e.preventDefault();
 			e.stopPropagation();
-			this.exitFullImmersion();
+			this.playImmersionSwitchPull();
+			this.toggleFullImmersion();
 		});
 
 		// 章节进度外观开关：sideNav 此时才建好（进度显示在章节轨的当前章短横内部）
@@ -2366,7 +2384,7 @@ export class UNreaderView extends ItemView {
 			if (!target) return;
 			if (target.closest(
 				".unreader-actions, .unreader-nav, .unreader-back-btn, .unreader-anno-panel, " +
-				".unreader-appearance-panel, .unreader-full-immersion-exit, .unreader-selection-toolbar, .unreader-highlight-popover, " +
+				".unreader-appearance-panel, .unreader-immersion-switch, .unreader-selection-toolbar, .unreader-highlight-popover, " +
 				".unreader-bookmark-inline, .unreader-chapter-hint, " +
 				"input, textarea, select, button",
 			)) return;
@@ -2382,7 +2400,7 @@ export class UNreaderView extends ItemView {
 			// 点击在工具条内部则不处理
 			if (this.selectionToolbar?.containerEl.contains(target) || this.highlightPopover?.containerEl.contains(target)) return;
 			// 点击在侧边栏、目录、笔记面板等常驻 UI 上也不自动关闭（避免误触）
-			if (target.closest(".unreader-anno-panel, .unreader-toc-panel, .unreader-appearance-panel, .unreader-full-immersion-exit, .unreader-actions, .unreader-nav")) return;
+			if (target.closest(".unreader-anno-panel, .unreader-toc-panel, .unreader-appearance-panel, .unreader-immersion-switch, .unreader-actions, .unreader-nav")) return;
 			this.dismissFloatingOnBlankClick();
 		});
 		// Esc 直接关闭所有浮层
@@ -4309,6 +4327,10 @@ export class UNreaderView extends ItemView {
 		//  独占（官方「全屏 / 悬浮导航」同样会把它收走），写死 CSS 公式必然在某些形态下
 		//  为不存在的页首继续留位。写在 .unreader-root 上由其后代继承（面板挂在 .unreader-body 内）。
 		root.style.setProperty("--ur-top-inset", `${Math.round(uiInset)}px`);
+		// 拉绳开关与进度条共用同一份「页首下沿 / 页首收起后的顶边」实测值。
+		// 写在 root 上是刻意的：开关与进度条都是 root 的直接子节点，且 CSS 过渡会让
+		// 它在页首滑走的 0.3s 内一起上移，不需要第二套监听或定时器。
+		root.style.setProperty("--ur-immersion-switch-top", `${Math.round(pad)}px`);
 		// **底部让位（--ur-bottom-inset）**：`.unreader-body` 底边被屏幕底那条原生栏压住
 		// 多少像素。标注侧边栏是**贴底铺满的不透明抽屉**，`bottom:0` 时列表最后几行正好
 		// 落进悬浮底栏（`.mobile-navbar`）底下 —— 既看不见也点不到（见 styles.css 的
@@ -4715,6 +4737,22 @@ export class UNreaderView extends ItemView {
 			if (!Array.isArray(back)) return;
 			if (back[back.length - 1] === guard) back.pop();
 		} catch { /* ignore */ }
+	}
+
+	/** 只播放一次拉绳回弹动画，不延迟状态切换。重复连点会重启动画。 */
+	private playImmersionSwitchPull(): void {
+		const el = this.immersionSwitchEl;
+		if (!el) return;
+		if (this.immersionSwitchPullTimer !== null) {
+			window.clearTimeout(this.immersionSwitchPullTimer);
+		}
+		el.removeClass("is-pulling");
+		void el.offsetWidth;
+		el.addClass("is-pulling");
+		this.immersionSwitchPullTimer = window.setTimeout(() => {
+			this.immersionSwitchPullTimer = null;
+			this.immersionSwitchEl?.removeClass("is-pulling");
+		}, 420);
 	}
 
 	/** 供命令面板/快捷键使用；进入与退出共用同一条路径。 */
