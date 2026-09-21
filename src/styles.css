@@ -261,21 +261,21 @@
 .unreader-immersion-switch-stem {
 	top: 0;
 	width: calc(1.5 * var(--ur-u));
-	height: calc(18 * var(--ur-u));
+	height: calc(13.5 * var(--ur-u));
 }
 .unreader-immersion-switch-bar-mid {
-	top: calc(13 * var(--ur-u));
-	width: calc(4.5 * var(--ur-u));
+	top: calc(12 * var(--ur-u));
+	width: calc(7.5 * var(--ur-u));
 	height: calc(1.5 * var(--ur-u));
 }
 .unreader-immersion-switch-bar-long {
-	top: calc(19 * var(--ur-u));
-	width: calc(6 * var(--ur-u));
+	top: calc(17.5 * var(--ur-u));
+	width: calc(10 * var(--ur-u));
 	height: calc(1.5 * var(--ur-u));
 }
 .unreader-immersion-switch-bar-short {
-	top: calc(24 * var(--ur-u));
-	width: calc(3 * var(--ur-u));
+	top: calc(23 * var(--ur-u));
+	width: calc(5 * var(--ur-u));
 	height: calc(1.5 * var(--ur-u));
 }
 .unreader-root .unreader-immersion-switch:hover .unreader-immersion-switch-pull,
