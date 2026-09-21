@@ -193,27 +193,45 @@
      · 页首可见 → 实测页首下缘；
      · 页首被沉浸/官方全屏收走 → 自动抬到安全区下沿或叶子顶边。
    这里的 top 基础规则带 0.3s 过渡，与页首自身的滑走动画同拍。 */
-.unreader-immersion-switch {
+/* 官方 `button:not(.clickable-icon)` 带一个伪类，比单类选择器更具体；只写
+   `background: transparent` 会输给官方皮肤，实际仍出现 interactive-normal
+   灰底与 input-shadow。这里把所有交互态一起覆盖并加 !important，主题和官方
+   样式都无法再把底框塞回来。 */
+.unreader-root .unreader-immersion-switch,
+.unreader-root .unreader-immersion-switch:hover,
+.unreader-root .unreader-immersion-switch:active,
+.unreader-root .unreader-immersion-switch:focus,
+.unreader-root .unreader-immersion-switch:focus-visible,
+.unreader-root .unreader-immersion-switch.is-on,
+.unreader-root .unreader-immersion-switch.mobile-tap {
 	position: absolute;
 	top: var(--ur-immersion-switch-top, calc(var(--view-header-top-offset, 0px) + var(--view-header-height, 48px)));
-	left: calc(env(safe-area-inset-left, 0px) + calc(10 * var(--ur-u)));
+	left: calc(env(safe-area-inset-left, 0px) + calc(9 * var(--ur-u)));
 	z-index: 61;
 	display: none;
-	width: calc(28 * var(--ur-u));
-	height: calc(38 * var(--ur-u));
+	width: calc(22 * var(--ur-u));
+	height: calc(27 * var(--ur-u));
 	margin: 0;
 	padding: 0;
-	border: 0;
-	background: transparent;
-	box-shadow: none;
-	color: var(--icon-color);
-	-webkit-appearance: none;
-	appearance: none;
+	border: 0 !important;
+	background-color: transparent !important;
+	background-image: none !important;
+	box-shadow: none !important;
+	color: var(--text-muted);
+	-webkit-appearance: none !important;
+	appearance: none !important;
 	-webkit-tap-highlight-color: transparent;
-	outline: none;
+	outline: none !important;
 	cursor: pointer;
 	touch-action: manipulation;
+	line-height: 0;
+	overflow: visible;
 	transition: top 0.3s ease-in-out, color 0.15s ease;
+}
+.unreader-root .unreader-immersion-switch::before,
+.unreader-root .unreader-immersion-switch::after {
+	content: none !important;
+	display: none !important;
 }
 .unreader-root.has-book .unreader-immersion-switch {
 	display: block;
@@ -227,35 +245,65 @@
 	align-items: center;
 	transform: translateX(-50%);
 	transform-origin: top center;
+	opacity: 0.46;
+	transition: opacity 0.15s ease;
 }
-.unreader-immersion-switch-cord {
-	width: calc(2 * var(--ur-u));
-	height: calc(24 * var(--ur-u));
+.unreader-immersion-switch-cap {
+	width: calc(7 * var(--ur-u));
+	height: calc(1.5 * var(--ur-u));
 	border-radius: 999px;
 	background: currentColor;
 	opacity: 0.72;
 }
-.unreader-immersion-switch-grip {
-	width: calc(10 * var(--ur-u));
-	height: calc(12 * var(--ur-u));
+.unreader-immersion-switch-cord {
+	width: calc(1.5 * var(--ur-u));
+	height: calc(15 * var(--ur-u));
+	border-radius: 999px;
+	background: currentColor;
+}
+.unreader-immersion-switch-knot {
+	width: calc(3 * var(--ur-u));
+	height: calc(3 * var(--ur-u));
 	margin-top: calc(-1 * var(--ur-u));
+	border-radius: calc(0.6 * var(--ur-u));
+	background: currentColor;
+	transform: rotate(45deg);
+	opacity: 0.76;
+}
+.unreader-immersion-switch-grip {
+	width: calc(6 * var(--ur-u));
+	height: calc(7 * var(--ur-u));
+	margin-top: calc(-1 * var(--ur-u));
+	border-radius: 50% 50% 44% 44%;
+	background: currentColor;
+}
+.unreader-immersion-switch-bead {
+	position: absolute;
+	top: calc(9 * var(--ur-u));
+	left: calc(50% + calc(4 * var(--ur-u)));
+	width: calc(2.5 * var(--ur-u));
+	height: calc(2.5 * var(--ur-u));
 	border-radius: 50%;
 	background: currentColor;
-	box-shadow: inset 0 0 0 calc(2 * var(--ur-u)) color-mix(in srgb, var(--background-primary) 36%, transparent);
+	opacity: 0.56;
 }
-.unreader-immersion-switch:hover,
-.unreader-immersion-switch.is-on {
+.unreader-root .unreader-immersion-switch:hover .unreader-immersion-switch-pull,
+.unreader-root .unreader-immersion-switch.is-on .unreader-immersion-switch-pull {
+	opacity: 0.72;
+}
+.unreader-root .unreader-immersion-switch:hover,
+.unreader-root .unreader-immersion-switch.is-on {
 	color: var(--interactive-accent);
 }
-.unreader-immersion-switch:focus-visible .unreader-immersion-switch-pull {
-	filter: drop-shadow(0 0 3px color-mix(in srgb, var(--interactive-accent) 76%, transparent));
+.unreader-root .unreader-immersion-switch:focus-visible .unreader-immersion-switch-pull {
+	filter: drop-shadow(0 0 2px color-mix(in srgb, var(--interactive-accent) 62%, transparent));
 }
-.unreader-immersion-switch.is-pulling .unreader-immersion-switch-pull {
-	animation: unreader-immersion-pull 0.42s cubic-bezier(0.22, 1, 0.36, 1);
+.unreader-root .unreader-immersion-switch.is-pulling .unreader-immersion-switch-pull {
+	animation: unreader-immersion-pull 0.38s cubic-bezier(0.22, 1, 0.36, 1);
 }
 @keyframes unreader-immersion-pull {
 	0% { transform: translate(-50%, 0); }
-	45% { transform: translate(-50%, calc(6 * var(--ur-u))); }
+	45% { transform: translate(-50%, calc(4 * var(--ur-u))); }
 	100% { transform: translate(-50%, 0); }
 }
 @media (prefers-reduced-motion: reduce) {

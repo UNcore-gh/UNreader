@@ -2352,6 +2352,8 @@ export class UNreaderView extends ItemView {
 		body.appendChild(this.sideNav.navEl);
 		// 沉浸模式拉绳开关：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏。
 		// 图形完全由 CSS 绘制，避免 iPad / 旧版本图标集缺名时只剩系统按钮底框。
+		// 官方 button 皮肤选择器带 :not(.clickable-icon)，特异性高于单类；样式侧必须用
+		// !important 才能彻底收走 interactive-normal 底与 input-shadow。
 		this.immersionSwitchEl = this.rootEl.createEl("button", {
 			cls: "unreader-immersion-switch",
 			attr: {
@@ -2362,8 +2364,11 @@ export class UNreaderView extends ItemView {
 			},
 		});
 		const pull = this.immersionSwitchEl.createSpan({ cls: "unreader-immersion-switch-pull" });
+		pull.createSpan({ cls: "unreader-immersion-switch-cap" });
 		pull.createSpan({ cls: "unreader-immersion-switch-cord" });
+		pull.createSpan({ cls: "unreader-immersion-switch-knot" });
 		pull.createSpan({ cls: "unreader-immersion-switch-grip" });
+		pull.createSpan({ cls: "unreader-immersion-switch-bead" });
 		this.immersionSwitchEl.addEventListener("pointerdown", e => e.stopPropagation());
 		this.immersionSwitchEl.addEventListener("click", e => {
 			e.preventDefault();
