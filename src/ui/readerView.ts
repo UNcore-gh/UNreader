@@ -656,7 +656,13 @@ export class UNreaderView extends ItemView {
 				if (this.fullImmersion) this.exitFullImmersion();
 				this.releaseNativeNav();
 			}
-			else this.scheduleLoad();
+			else {
+				// 官方可能在布局变更里重建页首（`leaf.updateHeader()` 等）。这里复用同一
+				// 条幂等同步把浮层化类补挂到新元素上 —— 原 CSS 用 `:has()` 做这层结构
+				// 兜底，改为低频 JS 补挂后覆盖不变，且免掉 `:has` 的整树失效开销。
+				this.syncNativeNav("layout");
+				this.scheduleLoad();
+			}
 		}));
 		// 「外观 → 全屏」切换时立即重估原生导航隐藏（关掉全屏必须马上还原，
 		// 否则非 fixed 布局下的 is-hidden-nav 会留下背景板残影）。
@@ -5312,6 +5318,10 @@ export class UNreaderView extends ItemView {
 	}
 
 	private clearMirrorSelection(): void {
+		// relocate 每帧调用：没有镜像选区时直接返回——下面无条件 dispatch 一个宿主
+		// selectionchange（给 UNagent 等三方 UI 的补发），空转时纯噪声。
+		// keepalive 在跑的充要条件就是 mirrorText 非空，所以这里不会漏停定时器。
+		if (!this.mirrorText && !this.mirrorEl) return;
 		this.stopMirrorKeepalive();
 		this.mirrorText = "";
 		const el = this.mirrorEl;

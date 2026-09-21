@@ -147,6 +147,16 @@
 	pointer-events: none;
 }
 
+/* 划线/批注浮层是用户动作的直接结果，不随全沉浸一起收走：选中文字后的高亮色板
+   与批注编辑框、点击已有高亮后的浮窗必须照常出现。默认仍由浮层自身的
+   `.is-visible` 控制（未触发时保持基础规则的 visibility:hidden，不占位、不接管指针），
+   因此全沉浸的纯净态不出现常驻 chrome；只有用户划词 / 点高亮的当次交互才显示。 */
+.unreader-root.is-full-immersion .unreader-selection-toolbar.is-visible,
+.unreader-root.is-full-immersion .unreader-highlight-popover.is-visible {
+	display: flex;
+	pointer-events: auto;
+}
+
 .unreader-root.is-full-immersion .unreader-nav-nodes {
 	opacity: 0;
 	visibility: hidden;
@@ -195,8 +205,10 @@
    这里的 top 基础规则带 0.3s 过渡，与页首自身的滑走动画同拍。 */
 /* 官方 `button:not(.clickable-icon)` 带一个伪类，比单类选择器更具体；只写
    `background: transparent` 会输给官方皮肤，实际仍出现 interactive-normal
-   灰底与 input-shadow。这里把所有交互态一起覆盖并加 !important，主题和官方
-   样式都无法再把底框塞回来。 */
+   灰底与 input-shadow。这里把所有交互态一起覆盖，并对 `border` / `background-*` /
+   `box-shadow` / `appearance` 这几条保留 !important —— 它们是「站外皮肤」的覆盖：
+   主题和官方样式都无法再把底框塞回来；`outline` 与伪元素（`::before`/`::after`）
+   那几条官方没有对应声明，普通声明即可（上架检查会把每条 !important 单独报成预警）。 */
 .unreader-root .unreader-immersion-switch,
 .unreader-root .unreader-immersion-switch:hover,
 .unreader-root .unreader-immersion-switch:active,
@@ -221,7 +233,7 @@
 	-webkit-appearance: none !important;
 	appearance: none !important;
 	-webkit-tap-highlight-color: transparent;
-	outline: none !important;
+	outline: none;
 	cursor: pointer;
 	touch-action: manipulation;
 	line-height: 0;
@@ -230,8 +242,10 @@
 }
 .unreader-root .unreader-immersion-switch::before,
 .unreader-root .unreader-immersion-switch::after {
-	content: none !important;
-	display: none !important;
+	/* 官方按钮皮肤没有伪元素规则（asar 实测），这里用普通声明即可压过
+	   同等或更低特异性的站内/主题声明；!important 只会被上架检查逐条计入。 */
+	content: none;
+	display: none;
 }
 .unreader-root.has-book .unreader-immersion-switch {
 	display: block;
@@ -373,27 +387,21 @@ body.is-phone .workspace-leaf-content[data-type="unreader-view"] .view-header,
 body.is-tablet .workspace-leaf-content[data-type="unreader-view"] .view-header,
 body.is-phone .view-header.unreader-view-header,
 body.is-tablet .view-header.unreader-view-header {
-	position: absolute !important;
+	/* 特异性已足够：官方 `.is-phone .view-header`(0,2,0) / `.view-header`(0,1,0)
+	   都是普通声明，本组选择器最低 (0,3,1)，不需要 !important；而 :has() 兜底
+	   已换成 JS 补挂通道（layout-change → syncNativeNav），不再有整树失效开销。 */
+	position: absolute;
 	/* top:auto → 保持静态位置（原在流位置），顶栏自身外观位置不变 */
-	top: auto !important;
-	left: 0 !important;
-	right: 0 !important;
-	z-index: 30 !important;
+	top: auto;
+	left: 0;
+	right: 0;
+	z-index: 30;
 }
-/* 结构无关的结构兜底：即使 JS 还没把 `unreader-view-header` 挂上去，
-   只要页首还在本插件阅读器的叶子/叶内容里，浮层化就不能失效。
-   ️ **必须单独一条规则**：`:has()` 在旧 WebView 上整组选择器都会被判无效；
-   若跟上面那组主路径写在同一个逗号列表里，会把元素级类的防线一起丢掉。 */
-body.is-phone .workspace-leaf-content:has(> .view-content.unreader-content-el) > .view-header,
-body.is-tablet .workspace-leaf-content:has(> .view-content.unreader-content-el) > .view-header,
-body.is-phone .workspace-leaf:has(> .workspace-leaf-content > .view-content.unreader-content-el) > .view-header,
-body.is-tablet .workspace-leaf:has(> .workspace-leaf-content > .view-content.unreader-content-el) > .view-header {
-	position: absolute !important;
-	top: auto !important;
-	left: 0 !important;
-	right: 0 !important;
-	z-index: 30 !important;
-}
+/* 页首被官方重建（`leaf.updateHeader()` 等）时的自愈通道在 JS 侧：
+   readerView 的 layout-change 分支会再跑一次 `syncNativeNav` → `markViewHeader`，
+   幂等地把 `unreader-view-header` 补到新页首上。原先这里用 `:has()` 做纯 CSS
+   结构兜底，但它会在整棵子树上触发选择器失效判定，且旧 WebView 不支持；
+   改用低频 JS 补挂后，兜底覆盖不变、开销更可控。 */
 /* `.view-content` 就是本插件的 `contentEl`（按定义一定在叶内容里），这条**没有**
    结构漂移风险，所以保持原来的 `[data-type]` 判据不动 —— 少一处改动少一处回归面。 */
 body.is-phone .workspace-leaf-content[data-type="unreader-view"] .view-content,
@@ -443,13 +451,17 @@ body.is-phone.unreader-nav-float .mobile-navbar {
    个官方类上，这 90ms 里它已经开始滑出 —— 用户看到「隐藏后偶发闪烁出现再关闭」。
    本插件自己持有 `unreader-nav-hidden`（与 `is-hidden-nav` 同步施加、只在真正
    唤出时移除），官方怎么摘类都不会让底栏重新画出。
-   `!important` 是刻意的：这是「沉浸隐藏」的硬契约，不能被主题/官方 show 动画
-   （CSS 动画也压不过 `!important`）短暂拉回可见。 */
+   层叠保证：官方 `.is-hidden-nav .mobile-navbar` 是 (0,2,0) 普通声明，本规则
+   选择器 (0,4,1) 且后加载，天然胜出；官方 restoreNavigation 摘类时官方整条
+   规则失效，而本规则的 transform/opacity/pointer-events 与自持的
+   `--hidden-nav-navbar-transform` 都还在，闸门不依赖任何官方声明存活。
+   （asar 实测官方 show() 只做 appendChild，不存在会压过普通声明的 CSS 动画；
+   原先的 !important 是防御性冗余，上架检查会把每条单独报成预警，故收敛。） */
 body.is-phone.unreader-nav-hidden .mobile-navbar {
 	--hidden-nav-navbar-transform: translateY(calc(var(--navbar-height) + var(--navbar-bottom-offset)));
-	transform: var(--hidden-nav-navbar-transform) !important;
-	opacity: 0 !important;
-	pointer-events: none !important;
+	transform: var(--hidden-nav-navbar-transform);
+	opacity: 0;
+	pointer-events: none;
 }
 
 /* `is-hidden-nav` 还有**第三个消费点**：官方用它把底部 fade mask 从
@@ -841,7 +853,10 @@ body .unreader-body {
 .unreader-nav-nodes.is-rail-off .unreader-nav-cluster {
 	display: none;
 }
-.unreader-nav-nodes.is-rail-off:not(:has(.unreader-nav-panel.is-open)) {
+/* 轨关掉且面板未接管时，这一层不接收指针。`is-panel-live` 由 SideNav.
+   syncPanelOpenState → syncBridge 统一收口（open ∧ 锚在右缘轨 ∧ 轨可见），
+   与原来的 :not(:has(...)) 逐态等价，但省掉 :has 的整树失效判定。 */
+.unreader-nav-nodes.is-rail-off:not(.is-panel-live) {
 	pointer-events: none;
 }
 
@@ -1107,14 +1122,7 @@ body .unreader-body {
 
 /* 按钮唤出的面板展开期间，功能轨保持完全展开（JS 在面板开且锚在按钮框时挂
    is-panel-open；否则鼠标离开按钮区后按钮框回到半隐藏位移，会把面板拽出屏幕外）。
-   置于 hover 规则之后以在同权重下胜出；透明度必须为 1 且加 !important：
-   面板是其子元素，后面 .is-visible(0.8)/chrome-revealed(0.95)/hover(0.95)
-   等降透明规则会连带把整个面板压成半透明 */
-.unreader-actions.is-panel-open {
-	opacity: 1 !important;
-	transform: translateX(0) translateY(-50%);
-}
-
+   规则本体在下方 `.unreader-actions.is-visible` 降透明组之后（靠源码顺序胜出）。 */
 @keyframes unreader-nav-pop {
 	from {
 		opacity: 0;
@@ -3587,6 +3595,15 @@ body.is-mobile .unreader-kb-safe .modal {
 	transform: translateX(0) translateY(-50%);
 }
 
+/* 按钮唤出的面板展开期间，功能轨保持完全展开（JS 在面板开且锚在按钮框时挂
+   is-panel-open；否则鼠标离开按钮区后按钮框回到半隐藏位移，会把面板拽出屏幕外）。
+   必须排在上面这组降透明规则之后：同一元素上两者同为 (0,2,0)，靠源码顺序
+   胜出即可，不再需要 !important（上架检查会逐条计入告警）。 */
+.unreader-actions.is-panel-open {
+	opacity: 1;
+	transform: translateX(0) translateY(-50%);
+}
+
 /* 钉住触发钮：顶置，正圆 */
 .unreader-actions-trigger {
 	width: calc(22 * var(--ur-u));
@@ -4339,6 +4356,16 @@ body.is-tablet .unreader-search {
 
 
 /* ---------- 设置页 · 反馈渠道（样式同 UNmemos） ---------- */
+/* 1.13+ 声明式设置：自定义区块（反馈卡）占满整行 —— 官方给的是一行 Setting 壳，
+   这里清掉 setting-item 的横向排布与分隔线，视觉上与旧版命令式渲染一致。
+   声明式容器上没有 `.unreader-settings` 可挂，所以这个类必须自足。 */
+.unreader-settings-custom {
+	display: block;
+	padding: 0;
+	border-top: 0;
+	background-color: transparent;
+}
+
 .unreader-feedback {
 	display: flex;
 	flex-direction: column;

@@ -87,8 +87,6 @@ export function placeFloating(
 	// 预计算可用空间，用于候选排序（空间越大越优先，避免先选“上方”却在上方空间极小时仍强行尝试）
 	const spaceAbove = r.top - margin
 	const spaceBelow = bh - r.bottom - margin
-	const spaceLeft = r.left - margin
-	const spaceRight = bw - r.right - margin
 
 	// 候选生成：前 6 为“不遮挡锚点”的外置位（上方/下方 × 居中/左对齐/右对齐），后 4 为重叠回退
 	type Candidate = { left: number; top: number; origin: string; priority: number; overlaps: boolean }

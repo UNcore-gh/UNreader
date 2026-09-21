@@ -11,7 +11,7 @@ import { repairDanglingFontRefs } from "./core/fontRefRepair";
 import { ResourceStore, setActiveResourceStore, type SharedResourceKind } from "./core/resourceStore";
 import { UNREADER_ROOT, DATA_FOLDER, DATA_DIR_NAME, FONTS_FOLDER, RESOURCES_FOLDER, IMAGES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER, FEEDS_FOLDER, setConfiguredDataFolder, dataRootOf, normalizeDataFolder } from "./core/paths";
 import { healLibraryFolders } from "./core/libraryFolders";
-import { planDataFolderMigration, planLegacyDataFolderNesting, planDataContainerNesting, migrateDataFolder, rewriteFontReferences, type LibraryMigrationPlan } from "./core/libraryMigration";
+import { planDataFolderMigration, planLegacyDataFolderNesting, planDataContainerNesting, migrateDataFolder, rewriteFontReferences, dataContainerSkipNoticeId, type LibraryMigrationPlan } from "./core/libraryMigration";
 import { syncVaultExclusions, clearVaultExclusions } from "./core/exclusions";
 import * as debugLog from "./core/debugLog";
 import { saveDebugReportToVault, writeReport } from "./core/debugReport";
@@ -327,6 +327,8 @@ export default class UNreaderPlugin extends Plugin {
 			try {
 				const t = Date.now();
 				const containerPlan = planDataContainerNesting(this.app);
+				// 冲突消失时清掉“已提示”标记；下次同一冲突重新出现仍会提醒一次。
+				if (!containerPlan.skippedDirs?.length) this.clearDataContainerSkipNotice();
 				if (containerPlan.moves.length || containerPlan.skippedDirs?.length) {
 					const result = await migrateDataFolder(this.app, containerPlan);
 					if (result.error) {
@@ -347,8 +349,8 @@ export default class UNreaderPlugin extends Plugin {
 						if (result.moved.length || result.removedEmpty.length) {
 							debugLog.info(`[dataFolder] 数据容器化完成：移动 ${result.moved.length} 个文件，清理 ${result.removedEmpty.length} 个空目录 → ${containerPlan.to}`);
 						}
-						if (containerPlan.skippedDirs?.length) {
-							new Notice(`UNreader：有 ${containerPlan.skippedDirs.length} 个数据目录因目标已有同名文件未整理（${containerPlan.skippedDirs.join("、")}），已保留原样。`);
+						if (containerPlan.skippedDirs?.length && this.shouldShowDataContainerSkipNotice(containerPlan)) {
+							new Notice(`UNreader：有 ${containerPlan.skippedDirs.length} 个数据目录因目标已有同名文件未整理（${containerPlan.skippedDirs.join("、")}），已保留原样。此提示在冲突内容变化前只显示一次。`);
 						}
 					}
 				}
@@ -1513,6 +1515,29 @@ export default class UNreaderPlugin extends Plugin {
 	/** 本机外观的 localStorage key（按库隔离；同一台机器多个库各自独立） */
 	private deviceAppearanceKey(): string {
 		return `unreader-appearance:${this.deviceScope()}`;
+	}
+
+	/** 容器化冲突提示也是设备本地 UI 状态：同一冲突只提醒一次，换库/换数据根互不影响。 */
+	private dataContainerSkipNoticeKey(): string {
+		return `unreader-data-container-skip-notice:${this.deviceScope()}`;
+	}
+
+	/** 冲突集合没变就不重复弹 Notice；localStorage 不可用时保留每次提醒的安全降级。 */
+	private shouldShowDataContainerSkipNotice(plan: LibraryMigrationPlan): boolean {
+		const id = dataContainerSkipNoticeId(plan);
+		if (!id) return false;
+		try {
+			const key = this.dataContainerSkipNoticeKey();
+			if (window.localStorage.getItem(key) === id) return false;
+			window.localStorage.setItem(key, id);
+			return true;
+		} catch {
+			return true;
+		}
+	}
+
+	private clearDataContainerSkipNotice(): void {
+		try { window.localStorage.removeItem(this.dataContainerSkipNoticeKey()); } catch { /* localStorage 不可用时无需清理 */ }
 	}
 
 	/** 读取本机外观快照（localStorage，设备本地永不随库同步） */

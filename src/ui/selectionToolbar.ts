@@ -320,6 +320,9 @@ export class SelectionToolbar {
 	}
 
 	hide(): void {
+		// relocate 每帧调用：已经收干净时直接返回。下面每个 removeClass/removeProperty 都会
+		// 碰样式或 class，空转时纯噪声（guard 不改变任何可观察状态：三个条件覆盖了 hide 的全部副作用）。
+		if (!this.snapshot && !this.commentOpen && !this.visible) return;
 		// 取证：只有在**编辑区还开着**的时候收起才算故障路径 —— 它会 `visibility:hidden`
 		// 掉承载输入框的容器，移动端软键盘随即被系统收走。带上调用栈，真机日志可直接指认
 		// 是哪条路径动的手（正常出口：取消 / 关闭 / Esc / 点正文空白 / 点别处高亮 / 全沉浸）。

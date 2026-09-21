@@ -334,8 +334,11 @@ function promoteEmbeds(doc: Document): void {
 		const url = normalizeHttpUrl(frame.getAttribute("src"));
 		const label = url ? embedLabel(url) : "";
 		if (!url || !label) continue;
-		const holder = doc.createElement("p");
-		const link = doc.createElement("a");
+		// 用 Obsidian 的 DOM 助手造游离节点，再交给目标文档收养：跨文档 append
+		// 会按 DOM 规范自动 adopt，节点最终仍属于 doc（`doc` 是 DOMParser 产物，
+		// `doc.win` 为 null，不能走 `doc.win.createEl()` 那条形式）。
+		const holder = createEl("p");
+		const link = createEl("a");
 		link.setAttribute("href", canonicalEmbedUrl(url));
 		link.setAttribute("rel", "noopener noreferrer");
 		link.textContent = `▶ ${label}`;

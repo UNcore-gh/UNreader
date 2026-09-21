@@ -354,6 +354,8 @@ export class HighlightPopover {
 	}
 
 	hide(): void {
+		// 同 SelectionToolbar.hide：relocate 每帧调用，已经收干净时直接返回（三个条件覆盖全部副作用）。
+		if (!this.target && !this.commentOpen && !this.visible) return;
 		// 取证同 SelectionToolbar.hide：编辑区还开着时被后台路径收起 = 软键盘被压回去的真凶。
 		if (this.commentOpen) debugLog.info("[comment] hide() 在编辑评论期间收起高亮浮窗 ←", new Error("fold"));
 		this.target = null;

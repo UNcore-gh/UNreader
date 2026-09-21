@@ -23,6 +23,12 @@ export interface LibraryMigrationPlan {
 	keepSourceRoot?: boolean;
 }
 
+/** 容器化冲突提示的稳定指纹：同一数据根、同一批被跳过目录视为同一状态。 */
+export function dataContainerSkipNoticeId(plan: LibraryMigrationPlan): string {
+	if (!plan.skippedDirs?.length) return "";
+	return JSON.stringify([plan.from, ...[...plan.skippedDirs].sort()]);
+}
+
 export interface LibraryMigrationResult {
 	plan: LibraryMigrationPlan;
 	/** 全部文件迁移成功后才会有值；失败回滚成功时为空。 */

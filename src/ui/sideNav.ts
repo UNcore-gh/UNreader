@@ -44,6 +44,12 @@ export class SideNav {
 	private entries: NavEntryModel[] = [];
 	private onSelect: ((entry: NavEntryModel) => void) | null = null;
 	private activeIndex = -1;
+	/** navKey → 条目下标缓存（relocate 每帧走 setActive，原实现每帧 findIndex 一遍 O(N)） */
+	private activeLookup: Map<number, number> | null = null;
+	/** 当前挂着 is-active / --p 的节点。任何时刻至多一个，改活跃章时只动这两处引用，
+	 *  不再每帧 querySelectorAll 全量节点（长书几百个节点时这是实打实的每帧开销）。 */
+	private activeNodeEl: HTMLElement | null = null;
+	private progressNodeEl: HTMLElement | null = null;
 	private open = false;
 	private buttonPinned = false;
 	/** 右缘章节短横轨显隐（随外观/预设；隐藏时目录面板仍可由按钮/命令唤起） */
@@ -281,6 +287,9 @@ export class SideNav {
 
 	/** 更新页码文字；空串时隐藏。 */
 	setPageText(text: string): void {
+		// relocate 每帧调用：页码文本未变时直接返回。原实现每帧 empty() + 重建两个
+		// 页码节点（含 setAttribute / toggleClass / fitPageText），同一页内滚动全是白做。
+		if (text === this.pageText) return;
 		this.pageText = text;
 		this.renderActionPageText();
 		this.renderPageText();
@@ -376,6 +385,9 @@ export class SideNav {
 		this.entries = entries;
 		this.onSelect = onSelect;
 		this.activeIndex = -1;
+		this.activeLookup = null;
+		this.activeNodeEl = null;
+		this.progressNodeEl = null;
 		this.detachDocListener();
 		this.panelEl?.remove();
 		this.panelEl = null;
@@ -411,8 +423,21 @@ export class SideNav {
 
 	setActive(tocId: number | null): void {
 		let index = -1;
-		if (tocId != null) index = this.entries.findIndex(e => e.navKey != null && e.navKey === tocId);
+		if (tocId != null) {
+			const lookup = this.activeLookup ?? this.buildActiveLookup();
+			index = lookup.get(tocId) ?? -1;
+		}
 		this.setActiveIndex(index, true);
+	}
+
+	/** 重建 navKey → 条目下标映射。原 findIndex 是「首个匹配取胜」，这里用 !has 保持同一语义。 */
+	private buildActiveLookup(): Map<number, number> {
+		const map = new Map<number, number>();
+		this.entries.forEach((e, i) => {
+			if (e.navKey != null && !map.has(e.navKey)) map.set(e.navKey, i);
+		});
+		this.activeLookup = map;
+		return map;
 	}
 
 	/** 更新每章的批注综合数量（高亮+书签），显示在面板行右侧。 */
@@ -436,16 +461,19 @@ export class SideNav {
 	}
 
 	private setActiveIndex(index: number, scrollCluster: boolean): void {
+		const changed = index !== this.activeIndex;
 		this.activeIndex = index;
-		this.clusterEl.querySelectorAll(".unreader-nav-node").forEach(el => {
-			el.toggleClass(
-				"is-active",
-				Number((el as HTMLElement).dataset.navIndex) === index,
-			);
-		});
-		this.applyChapterProgress();
+		if (changed) {
+			// 只搬「旧节点摘类 → 新节点挂类」，不再遍历全量节点：relocate 每帧走这里，
+			// 原实现是每帧两遍 querySelectorAll（is-active 一遍、--p 一遍）。
+			const next = index >= 0 ? this.nodeAt(index) : null;
+			if (this.activeNodeEl && this.activeNodeEl !== next) this.activeNodeEl.removeClass("is-active");
+			this.activeNodeEl = next;
+			next?.addClass("is-active");
+			this.applyChapterProgress();
+		}
 		if (scrollCluster && index >= 0) {
-			const node = this.nodeAt(index);
+			const node = this.activeNodeEl ?? this.nodeAt(index);
 			if (node) this.centerChild(this.clusterEl, node);
 		}
 		if (this.open && this.panelEl && index >= 0) {
@@ -461,7 +489,10 @@ export class SideNav {
 	 *  该数值正是这个缺口。故不再使用全宽底部细条（那个位置会和底栏/系统手势区
 	 *  反复冲突，见 styles.css 注释）。 */
 	setChapterProgress(fraction: number): void {
-		this.chapterProgress = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+		const next = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
+		// 值没变就不用再碰样式；活跃章变化时由 setActiveIndex 负责把 --p 搬到新节点。
+		if (next === this.chapterProgress) return;
+		this.chapterProgress = next;
 		this.applyChapterProgress();
 	}
 
@@ -471,13 +502,18 @@ export class SideNav {
 		this.navEl.toggleClass("progress-off", !on);
 	}
 
-	/** 把进度值落到当前章节点上；无激活章则清除所有残留 */
+	/** 把进度值落到当前激活章节点上（只动 progressNodeEl 与目标节点，不再遍历全量节点） */
 	private applyChapterProgress(): void {
-		const active = this.activeIndex >= 0 ? this.nodeAt(this.activeIndex) : null;
-		this.clusterEl.querySelectorAll<HTMLElement>(".unreader-nav-node").forEach(el => {
-			if (el === active) el.style.setProperty("--p", String(this.chapterProgress));
-			else el.style.removeProperty("--p");
-		});
+		const active = this.activeIndex >= 0 ? (this.activeNodeEl ?? this.nodeAt(this.activeIndex)) : null;
+		if (active) this.activeNodeEl = active;
+		// 任何时刻只有当前章节点该带 --p：把值从上一个节点**搬**过去即可。
+		if (this.progressNodeEl && this.progressNodeEl !== active) this.progressNodeEl.style.removeProperty("--p");
+		if (active) {
+			active.style.setProperty("--p", String(this.chapterProgress));
+			this.progressNodeEl = active;
+		} else {
+			this.progressNodeEl = null;
+		}
 	}
 
 	private nodeAt(index: number): HTMLElement | null {

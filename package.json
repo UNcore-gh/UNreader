@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "0.3.6",
+  "version": "0.3.7",
   "description": "UNreader - A beautiful local-first reader. EPUB first, plus MOBI/AZW3, TXT, HTML and RSS feeds.",
   "main": "main.js",
   "type": "module",
@@ -51,6 +51,7 @@
     "test:library-heal": "node test/run-library-heal.mjs",
     "test:library-migration": "node test/run-library-migration.mjs",
     "test:resource-store": "node test/run-resource-store.mjs",
+    "test:settings": "node test/run-settings.mjs",
     "test:progress-durability": "node test/run-progress-durability.mjs",
     "test:exclusions": "node test/run-exclusions.mjs",
     "test:book-filter": "node test/run-book-filter.mjs",

@@ -1281,6 +1281,10 @@ export class EngineAdapter {
 	 *  点高亮/按坐标命中时以它为准 —— 别再退回按文本反查（见 renderHighlightIn 注释）。 */
 	private contHL = new Map<string, { text: string; color: string; els: HTMLElement[]; range?: Range | null }>()
 	private contHLByIndex = new Map<number, string[]>()
+	/** 高亮的判据文本（笔记里存的选中文本）。首绘时 frame 可能尚未就绪，
+	 *  renderHighlightIn 会提前返回；replay 时必须还能拿到它——否则旧格式 CFI
+	 *  （元素边界塔成 `:1`、两端同一文本偏移）在重放时既解不出范围、也没有文本兜底。 */
+	private hlTextHints = new Map<string, string>()
 	private contRaf = 0
 	/** 最近一次点击/悬停注标在宿主视口中的位置（脚注气泡锚点） */
 	private lastNoteAnchor: { x: number; y: number } | null = null
@@ -2317,16 +2321,23 @@ export class EngineAdapter {
 	/** 章节 index -> tocId：优先精确映射；未收录章节回退到「最近的前一个目录条目」，
 	 *  保证目录条在全书任何位置都能指示当前阅读位置。 */
 	private nearestTocIdForSection(idx: number): number | null {
+		// sortedTocSections 升序（见各构建点）。本函数在 relocate 热路径上：未收录进目录的
+		// 章节（封面/版权页/派生条目）每帧都会走到这里，线性扫全表换成二分。
+		// 语义保持「≤ idx 的最后一个目录章节」，没有则归到第一个目录条目。
+		const arr = this.sortedTocSections
+		let lo = 0
+		let hi = arr.length - 1
 		let best: number | null = null
-		for (const sec of this.sortedTocSections) {
-			if (sec <= idx) best = sec
-			else break
+		while (lo <= hi) {
+			const mid = (lo + hi) >> 1
+			if (arr[mid]! <= idx) {
+				best = arr[mid]!
+				lo = mid + 1
+			} else hi = mid - 1
 		}
 		if (best != null) return this.tocIdBySection.get(best) ?? null
-		if (this.sortedTocSections.length) {
-			const first = this.sortedTocSections[0]!
-			if (idx < first) return this.tocIdBySection.get(first) ?? null
-		}
+		const first = arr[0]
+		if (first != null && idx < first) return this.tocIdBySection.get(first) ?? null
 		return null
 	}
 
@@ -2841,6 +2852,9 @@ export class EngineAdapter {
 
 	addHighlight(cfi: string, colorName: string, textHint?: string): void {
 		if (!cfi) return
+		// 入口先记账（而不是只在 renderHighlightIn 里记）：分页/分区的 foliate
+		// addAnnotation 分支不会走到连续渲染，但换回连续时仍需这份判据文本。
+		if (textHint) this.hlTextHints.set(cfi, textHint)
 		if (this.isContinuous && this.continuousRendered) {
 			this.highlights.set(cfi, colorName)
 			const idx = this.sectionIndexFromPos(cfi)
@@ -3017,6 +3031,7 @@ export class EngineAdapter {
 		this.contBaseCfi.clear()
 		this.contHL.clear()
 		this.contHLByIndex.clear()
+		this.hlTextHints.clear()
 		this.continuousRendered = false
 		this.isContinuous = false
 		this.contRestoreTarget = null
@@ -5188,17 +5203,29 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 		}, 600)
 	}
 
-	/** 全书各线性章节的字节数与总量（与 relocate 页码估算同源） */
-	private bookByteSizes(): { sizes: number[]; total: number } | null {
+	/** 全书章节字节表（**按 sections 数组引用缓存**）。
+	 *  为什么必须缓存：`applyEstimateHeight` 在每章渲染时调用一次，不缓存就是 O(N²)；
+	 *  `emitContinuousRelocate` 每帧还要再全表累加一次。所有格式的 `size` 都在 book 构建时
+	 *  一次性写死（EPUB `getSize` / MOBI 的 sections.map / TXT·HTML 合成），sections 数组在
+	 *  书打开期间恒定，按引用缓存即可。`prefix[i]` = 前 i 章字节和（含 linear="no" 的 0）。 */
+	private byteSizesCache: { ref: readonly unknown[]; sizes: number[]; prefix: number[]; total: number } | null = null
+
+	private bookByteSizes(): { sizes: number[]; prefix: number[]; total: number } | null {
 		const sections = (this.el?.book as unknown as { sections?: { size?: number; linear?: string }[] })?.sections ?? []
+		const cached = this.byteSizesCache
+		if (cached && cached.ref === sections) return cached.total > 0 ? cached : null
 		let total = 0
 		const sizes: number[] = []
+		const prefix: number[] = [0]
 		for (const s of sections) {
 			const sz = s && s.linear !== "no" && typeof s.size === "number" && s.size > 0 ? s.size : 0
 			sizes.push(sz)
-			total += sz
+			prefix.push(total += sz)
 		}
-		return total > 0 ? { sizes, total } : null
+		// total=0 时不缓存：`sections` 可能先就位、size 字段后补（同引用），缓存空表会永久锁死 null。
+		if (total <= 0) return null
+		this.byteSizesCache = { ref: sections, sizes, prefix, total }
+		return this.byteSizesCache
 	}
 
 	/** 按全书字节位置定位 {章节, 章内字节占比}（占位章节高度失真，不能用滚动比例直接换算） */
@@ -5408,7 +5435,7 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 			const data = this.contHL.get(cfi)
 			if (data) { for (const r of data.els) r.remove(); this.contHL.delete(cfi) }
 			const color = this.highlights.get(cfi) ?? "yellow"
-			void this.renderHighlightIn(idx, cfi, color)
+			void this.renderHighlightIn(idx, cfi, color, this.hlTextHints.get(cfi))
 		}
 	}
 
@@ -5893,28 +5920,120 @@ ${darkBase}
 	}
 
 	/** Range → 本地 CFI 路径（子节点 1-based 序列 + 文本偏移），与 rangeFromCfiParts 成对。
-	 *  返回起点/终点两条路径：旧版只编码起点导致高亮点击无法还原范围 */
+	 *  返回起点/终点两条路径：旧版只编码起点导致高亮点击无法还原范围。
+	 *
+	 *  **元素容器边界必须先规范化到文本位置**（`textPointOf`）：真实拖选/三击的 range 边界
+	 *  常常落在元素上（Chromium 实测：从段落中间拖到下一段开头、三击选段，end 都是元素），
+	 *  旧实现把元素容器一律写成 `:1`（offset 信息直接丢掉），而还原端 `rangeFromCfiParts`
+	 *  只认文本节点 → 终点解不出 → setEnd 退化成起点文本节点末尾 → 跨段高亮只剩第一段，
+	 *  带内联样式（`<i>`/`<b>`/`<span>`…）的段落只剩第一个文本节点 —— 用户报的
+	 *  「选中多段只高亮第一行、在特殊样式中集中出现」就是这条。规范化后 CFI 只含文本
+	 *  节点路径，与还原端的 childNodes 索引模型完全对齐。 */
 	private toEpubcfiPair(range: Range, holder: Element): { start: string; end: string } {
-		const pathOf = (node: Node | null, offset: number): string => {
+		const pathOf = (node: Node | null, offset: number, side: "start" | "end"): string => {
 			try {
+				const point = this.textPointOf(node, offset, side)
+				if (!point || !holder.contains(point.node)) return "/1:0"
 				const parts: number[] = []
-				let n: Node | null = node
+				let n: Node | null = point.node
 				while (n && n !== holder) {
 					const parent: Node | null = n.parentNode
 					if (!parent) break
 					parts.unshift(Array.prototype.indexOf.call(parent.childNodes, n) + 1)
 					n = parent
 				}
-				const off = node && node.nodeType === 3 ? offset + 1 : 1
-				return parts.map(x => `/${x}`).join("") + `:${off}`
+				return parts.map(x => `/${x}`).join("") + `:${point.offset + 1}`
 			} catch {
 				return "/1:0"
 			}
 		}
 		return {
-			start: pathOf(range.startContainer, range.startOffset),
-			end: pathOf(range.endContainer, range.endOffset),
+			start: pathOf(range.startContainer, range.startOffset, "start"),
+			end: pathOf(range.endContainer, range.endOffset, "end"),
 		}
+	}
+
+	/** 跳过 script/style 这类「不是正文」的文本文本（注入的 CSS 不该被当成可高亮内容）。 */
+	private static readonly SKIP_TEXT_TAGS = new Set(["SCRIPT", "STYLE", "NOSCRIPT", "TEMPLATE"])
+
+	/** 子树里第一个/最后一个正文文本节点（跳过 SKIP_TEXT_TAGS）。 */
+	private firstTextIn(root: Node | null): Text | null {
+		if (!root) return null
+		if (root.nodeType === 3) {
+			const t = root as Text
+			return EngineAdapter.SKIP_TEXT_TAGS.has(t.parentElement?.tagName ?? "") ? null : t
+		}
+		const doc = root.nodeType === 9 ? root as Document : root.ownerDocument
+		if (!doc) return null
+		const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+			acceptNode: (n: Node) => EngineAdapter.SKIP_TEXT_TAGS.has((n as Text).parentElement?.tagName ?? "")
+				? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+		})
+		return walker.nextNode() as Text | null
+	}
+
+	private lastTextIn(root: Node | null): Text | null {
+		if (!root) return null
+		if (root.nodeType === 3) return this.firstTextIn(root)
+		const doc = root.nodeType === 9 ? root as Document : root.ownerDocument
+		if (!doc) return null
+		const walker = doc.createTreeWalker(root, NodeFilter.SHOW_TEXT, {
+			acceptNode: (n: Node) => EngineAdapter.SKIP_TEXT_TAGS.has((n as Text).parentElement?.tagName ?? "")
+				? NodeFilter.FILTER_REJECT : NodeFilter.FILTER_ACCEPT,
+		})
+		let last: Text | null = null
+		for (let n = walker.nextNode(); n; n = walker.nextNode()) last = n as Text
+		return last
+	}
+
+	/** 把任意 DOM 边界（文本节点 / 元素节点）规范化为一个**文本位置**。
+	 *  · 文本节点：原样（偏移按文本长度 clamp）；
+	 *  · 元素 `(el, i)`：语义是「el 第 i 个子节点之前」。起点取该位置**之后**最近的
+	 *    一个文本字符（先找 el 内第 i 个子节点起，再沿祖先的后续兄弟），终点取该位置
+	 *    **之前**最近的一个文本字符；某一侧找不到就反向兜底。于是 `(el, 0)` = 元素
+	 *    开头、`(el, childNodes.length)` = 元素末尾都能对上正确的文本字符。
+	 *  为什么必须做：见 `toEpubcfiPair` 的注释（元素边界直接编码 = 跨段高亮只画第一段）。 */
+	private textPointOf(node: Node | null, offset: number, side: "start" | "end"): { node: Text; offset: number } | null {
+		if (!node) return null
+		if (node.nodeType === 3) {
+			const t = node as Text
+			return { node: t, offset: Math.max(0, Math.min(t.textContent?.length ?? 0, offset)) }
+		}
+		if (node.nodeType !== 1) {
+			const parent = node.parentElement
+			if (!parent) return null
+			return this.textPointOf(parent, Array.prototype.indexOf.call(parent.childNodes, node), side)
+		}
+		const el = node as Element
+		const kids = Array.from(el.childNodes)
+		const i = Math.max(0, Math.min(kids.length, offset))
+		const before = (): { node: Text; offset: number } | null => {
+			for (let k = i - 1; k >= 0; k--) {
+				const t = this.lastTextIn(kids[k] ?? null)
+				if (t) return { node: t, offset: t.textContent?.length ?? 0 }
+			}
+			for (let cur: Node | null = el; cur; cur = cur.parentNode) {
+				for (let sib = cur.previousSibling; sib; sib = sib.previousSibling) {
+					const t = this.lastTextIn(sib)
+					if (t) return { node: t, offset: t.textContent?.length ?? 0 }
+				}
+			}
+			return null
+		}
+		const after = (): { node: Text; offset: number } | null => {
+			for (let k = i; k < kids.length; k++) {
+				const t = this.firstTextIn(kids[k] ?? null)
+				if (t) return { node: t, offset: 0 }
+			}
+			for (let cur: Node | null = el; cur; cur = cur.parentNode) {
+				for (let sib = cur.nextSibling; sib; sib = sib.nextSibling) {
+					const t = this.firstTextIn(sib)
+					if (t) return { node: t, offset: 0 }
+				}
+			}
+			return null
+		}
+		return side === "start" ? (after() ?? before()) : (before() ?? after())
 	}
 
 	/** 章节定位（恢复位置 / 目录跳转 / 章节切换共用）。
@@ -6052,8 +6171,10 @@ ${darkBase}
 		let curTop = -1
 		const viewTop = cont.scrollTop
 		this.contSectionEls.forEach((elx, idx) => {
-			if (elx.offsetTop <= viewCenter) cur = idx
-			if (elx.offsetTop <= viewTop) curTop = idx
+			// 同一个 offsetTop 读一次：这是每帧路径，重复的布局读取不值得
+			const top = elx.offsetTop
+			if (top <= viewCenter) cur = idx
+			if (top <= viewTop) curTop = idx
 		})
 		if (cur < 0) return null
 		const wrap = this.contSectionEls.get(cur)
@@ -6130,17 +6251,12 @@ ${darkBase}
 		// 真实整书页码：按全书各章节字节数估算（与翻页模式 location 同源），
 		// 不再用"已加载章节数"充当总页数
 		const sizePerLoc = 1500
-		const sections = (this.el?.book as unknown as { sections?: { size?: number; linear?: string }[] })?.sections ?? []
-		let sizeTotal = 0
-		let sizeBefore = 0
-		let sizeOfCur = 0
-		for (let i = 0; i < sections.length; i++) {
-			const sx = sections[i]
-			const sz = sx && sx.linear !== "no" && typeof sx.size === "number" && sx.size > 0 ? sx.size : 0
-			sizeTotal += sz
-			if (i < cur) sizeBefore += sz
-			else if (i === cur) sizeOfCur = sz
-		}
+		// 走缓存字节表（见 bookByteSizes）：这里原来每帧全表累加一次，长书每帧 O(N)。
+		const byteSizes = this.bookByteSizes()
+		const sizeTotal = byteSizes?.total ?? 0
+		// 越界时 prefix[n] = total，与旧循环（sizeBefore 累完全表、sizeOfCur=0）一致
+		const sizeBefore = byteSizes ? (byteSizes.prefix[Math.min(cur, byteSizes.sizes.length)] ?? 0) : 0
+		const sizeOfCur = byteSizes ? (byteSizes.sizes[cur] ?? 0) : 0
 		const sizePos = sizeBefore + local * sizeOfCur
 		let locTotal: number | null
 		if (sizeTotal > 0) locTotal = Math.max(1, Math.ceil(sizeTotal / sizePerLoc))
@@ -6161,11 +6277,29 @@ ${darkBase}
 		})
 	}
 
+	/** 目录 id→标题缓存（按 book.toc 数组引用）：getTocEntryLabel 在 relocate 热路径上，
+	 *  原实现每帧拍平整棵树 + find。与 byteSizesCache 同策，数组换引用即重建。 */
+	// 值类型写成 `string | undefined`：TocItem.label 本身可缺省，旧实现的 `?.label ?? null`
+	// 对该情形返回 null；缓存必须保留「首个匹配取胜（哪怕它的 label 缺省）」这一语义。
+	private tocLabelCache: { ref: TocItem[]; map: Map<number, string | undefined> } | null = null
+
 	private getTocEntryLabel(tocId: number): string | null {
-		const flat: TocItem[] = []
-		const collect = (items: TocItem[], out: TocItem[]): void => { for (const it of items) { out.push(it); if (it.subitems?.length) collect(it.subitems, out) } }
-		collect(this.getToc(), flat)
-		return flat.find(it => it.id === tocId)?.label ?? null
+		// 旧实现每次调用都拍平整棵目录树再 find：连续滚动时每帧一次（O(N) 分配 + 查找）。
+		// book.toc 在开书后恒定，按数组引用缓存 id→label 映射；遍历顺序保持前序，「首个匹配」语义不变。
+		const toc = this.el?.book?.toc
+		if (!toc) return null
+		if (!this.tocLabelCache || this.tocLabelCache.ref !== toc) {
+			const map = new Map<number, string | undefined>()
+			const collect = (items: TocItem[]): void => {
+				for (const it of items) {
+					if (typeof it.id === "number" && !map.has(it.id)) map.set(it.id, it.label)
+					if (it.subitems?.length) collect(it.subitems)
+				}
+			}
+			collect(toc)
+			this.tocLabelCache = { ref: toc, map }
+		}
+		return this.tocLabelCache.map.get(tocId) ?? null
 	}
 
 	/** 每个目录条目（tocId）所在章节的起始页码（全书字节估算，与页码显示同口径；连续模式专用） */
@@ -6402,14 +6536,26 @@ ${darkBase}
 					if (top != null) {
 						this.scrollContInstant(top)
 						// 落地后漂移校正：章节内图片/字体晚到会平移目标点，按当前 Range 位置重新对齐。
-						// 观察窗口要足够长（图片加载常在数秒后），连续 3 轮稳定才收工
+						// 观察窗口要足够长（图片加载常在数秒后）。判据不只看「位置两轮相同」：
+						// 上方未载章陆续测高 / `--ur-pxb` 全校准会改写文档总高，目标的绝对
+						// 位置随后还会平移 —— 只凭位置稳定就收工，会漏掉「校准比稳定窗口晚
+						// 一步」的场景（实测一次：高亮绝对位置 1565 px，视口却停在 1953 px，
+						// 就是驻留已收工、上方占位随后变高把目标拉走）。总高仍在变时保持
+						// 驻留（jumpPending 不放手，compensateHeightShift 让路），由本循环
+						// 持续跟随，直到位置与总高都稳定。
 						let anchor = top
 						let stable = 0
+						let shStable = 0
+						let lastSh = -1
 						let rounds = 0
 						const correct = (): void => {
 							if (!alive()) return
 							const now = locateTop()
-							if (now == null) { if (rounds++ < 30) window.setTimeout(correct, 400); else this.endJump(); return }
+							if (now == null) { if (rounds++ < 45) window.setTimeout(correct, 350); else this.endJump(); return }
+							const cc0 = this.continuousEl
+							const sh = cc0?.scrollHeight ?? 0
+							if (sh === lastSh) shStable++
+							else { shStable = 0; lastSh = sh }
 							// 增量跟随（同 jumpToSection 漂移校正）：只补漂移量，不重算绝对落点
 							if (Math.abs(now - anchor) > 2) {
 								const cc = this.continuousEl
@@ -6418,7 +6564,8 @@ ${darkBase}
 								stable = 0
 							}
 							else stable++
-							if (stable < 3 && rounds++ < 30) window.setTimeout(correct, 400)
+							const settled = stable >= 4 && shStable >= 2
+							if (!settled && rounds++ < 45) window.setTimeout(correct, 350)
 							else this.endJump()
 						}
 						window.setTimeout(correct, 350)
@@ -6440,7 +6587,7 @@ ${darkBase}
 		const list = this.contHLByIndex.get(idx) ?? []
 		for (const cfi of list) {
 			const color = this.highlights.get(cfi) ?? this.contHL.get(cfi)?.color ?? "yellow"
-			void this.renderHighlightIn(idx, cfi, color)
+			void this.renderHighlightIn(idx, cfi, color, this.hlTextHints.get(cfi))
 		}
 	}
 
@@ -6532,6 +6679,7 @@ ${darkBase}
 
 	private async renderHighlightIn(idx: number, cfi: string, colorName: string, textHint?: string): Promise<void> {
 		this.highlights.set(cfi, colorName)
+		if (textHint) this.hlTextHints.set(cfi, textHint)
 		let list = this.contHLByIndex.get(idx) ?? []
 		if (!list.includes(cfi)) list = [...list, cfi]
 		this.contHLByIndex.set(idx, list)
@@ -6545,17 +6693,22 @@ ${darkBase}
 			// 判据文本：上次渲染时算出来的文本最可信（与矩形同源）；首次渲染用笔记里存的
 			// 选中文本。它只用于「两种 CFI 口径都解得出来时挑对的那个」，见 rangeFromAnyCfi。
 			const legacy = this.hlLegacyCfiMode()
-			const expected = prev?.text || textHint
+			const storedHint = this.hlTextHints.get(cfi)
+			const expected = prev?.text || textHint || storedHint
 			let range = this.rangeFromAnyCfi(d, cfi, expected)
 			let text = range ? range.toString().trim() : ""
-			// 两种口径都解不出文本（畸形/跨版本数据）→ 按文本在章内反查兜底。
-			// 代价是重复文本会命中第一处，但相对「侧栏有记录、正文什么都没有」仍更可用；
-			// 老实现只在**上次渲染过**时才兜底（`prev`），旧格式高亮首绘因此直接消失。
+			// CFI 解不出、或解出的文本与笔记里的选中文本**对不上** → 按文本在章内反查兜底。
+			// 后者治的是旧数据：真实拖选/三击的元素边界被旧实现写进 CFI（offset 丢失），还原
+			// 出的范围只剩第一段/前半行（正是用户报的「选中多段只高亮第一行」）。
+			// 代价是重复文本会命中第一处，所以门槛必须是「两者不一致」：文本对得上的正常 CFI
+			// 仍然 CFI 优先，不会引入漂移；老实现只在**上次渲染过**时才兜底（`prev`），
+			// 旧格式高亮首绘因此直接消失。
 			const canFallback = legacy ? !!prev : !!(prev?.text || textHint)
-			const needle = prev?.text || textHint || ""
-			if (!text && canFallback && needle) {
+			const needle = prev?.text || textHint || storedHint || ""
+			const norm = (s: string): string => s.replace(/\s+/g, " ").trim()
+			if (canFallback && needle && norm(text) !== norm(needle)) {
 				const byText = this.findRangeInElement(d.body, needle)
-				if (byText) { range = byText; text = needle }
+				if (byText) { range = byText; text = byText.toString() }
 			}
 			if (!range || !text) return
 			const bodyRect = d.body.getBoundingClientRect()
@@ -6635,24 +6788,42 @@ ${darkBase}
 	 *  规范口径解出的文本与笔记里存的选中文本逐字相同。 */
 	private rangeFromAnyCfi(doc: Document, cfi: string, expected?: string): Range | null {
 		const safe = (f: () => Range | null): Range | null => { try { return f() } catch { return null } }
+		const legacyMode = this.hlLegacyCfiMode()
 		const plugin = safe(() => this.rangeFromCfiParts(doc, cfi))
-		const spec = this.hlLegacyCfiMode() ? null : safe(() => this.specCfiRange(doc, cfi))
-		const want = (expected ?? "").replace(/\s+/g, " ").trim()
+		const spec = legacyMode ? null : safe(() => this.specCfiRange(doc, cfi))
+		const norm = (s: string): string => s.replace(/\s+/g, " ").trim()
+		const compact = (s: string): string => s.replace(/\s+/g, "")
+		const want = norm(expected ?? "")
 		if (!want) {
 			return plugin && plugin.toString().trim() ? plugin : (spec ?? plugin)
 		}
 		const score = (r: Range | null): number => {
 			if (!r) return -1
-			const t = r.toString().replace(/\s+/g, " ").trim()
+			const raw = r.toString()
+			const t = norm(raw)
 			if (!t) return -1
-			if (t === want) return 2
+			// 空白差异（笔记里的格式化空格 vs 书内无空格/全角空格）视为精确命中：
+			// 否则一条本可恢复的高亮会被判成「文本对不上」而降级。
+			if (t === want || compact(raw) === compact(want)) return 2
 			if (want.length > 8 && (t.startsWith(want) || want.startsWith(t))) return 1
 			return 0
 		}
 		const ps = score(plugin)
 		const ss = score(spec)
-		if (ss > ps) return spec
-		return ps >= 0 ? plugin : spec
+		const picked = ss > ps ? spec : (ps >= 0 ? plugin : spec)
+		if (picked && score(picked) >= 1) return picked
+		// 两套 CFI 都解不出「文本对得上」的范围（典型：旧数据把元素边界写成
+		// `epubcfi(/6/N!/x/1:1,:1)`，两端塌成同一文本偏移→零长度）：用笔记里存的
+		// 选中文本在章内反查。渲染/跳转/点击必须共用这条链，否则侧栏有点、正文画不出。
+		// legacy 开关下跳过：阴性对照要保留「修复前首绘消失」的旧行为。
+		if (!legacyMode) {
+			try {
+				const body = doc.body as HTMLElement | null
+				const byText = body ? this.findRangeInElement(body, expected ?? "") : null
+				if (byText) return byText
+			} catch { /* ignore */ }
+		}
+		return picked
 	}
 
 	/** **规范口径** CFI → Range（EPUB CFI 规范 / foliate 的 `view.getCFI` 生成的那种）。
@@ -6728,9 +6899,17 @@ ${darkBase}
 					const kids: (Node | null)[] = Array.from(node.childNodes)
 					node = kids[Math.max(0, Math.min(kids.length - 1, tk.i - 1))] ?? null
 				}
-				if (!node || node.nodeType !== 3) return null
-				const off = Math.max(0, Math.min(node.textContent?.length ?? 0, (tokens[tokens.length - 1]!.off ?? 1) - 1))
-				return { node: node as Text, off }
+				if (!node) return null
+				if (node.nodeType === 3) {
+					const off = Math.max(0, Math.min(node.textContent?.length ?? 0, (tokens[tokens.length - 1]!.off ?? 1) - 1))
+					return { node: node as Text, off }
+				}
+				// 老数据里真实拖选/三击写下的**元素容器路径**（见 toEpubcfiPair）：offset 在编码时
+				// 就丢成 `:1`，无法精确还原，只能取「该元素内第一个正文文本的起点」（= 这个
+				// 位置本身）。旧行为直接返回 null，调用方会把终点退化成起点文本节点末尾——
+				// 可见形态就是「跨段高亮只画第一段 / 带内联样式的段落只画前半段」。
+				const t = this.firstTextIn(node)
+				return t ? { node: t, off: 0 } : null
 			}
 			const s = resolve(tokensOf(halves[0] ?? ""))
 			if (!s) return null
@@ -6789,7 +6968,54 @@ ${darkBase}
 						r.setEnd(e.node, e.off)
 						return r
 					}
-					return null
+					break
+				}
+			}
+		} catch { /* ignore */ }
+		// 二次匹配：忽略全部空白。笔记里存的是选中时的渲染文本（可能跨文本节点、
+		// 含格式化空格），而书内 DOM 可能无空格（实测用户高亮「…永生， 竭尽…」
+		// vs 正文「…永生，竭尽…」）。只在上面的空白压缩匹配失败后走，逐字内容
+		// 必须一致，因此不会比 indexOf 更宽。
+		try {
+			const compact = (s: string): string => s.replace(/\s+/g, "")
+			const needle2 = compact(text)
+			if (needle2) {
+				const walker2 = root.ownerDocument.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+				const nodes2: Text[] = []
+				let combined2 = ""
+				for (let n = walker2.nextNode(); n; n = walker2.nextNode()) {
+					const tn = n as Text
+					nodes2.push(tn)
+					combined2 += compact(tn.textContent ?? "")
+					const pos2 = combined2.indexOf(needle2)
+					if (pos2 < 0) continue
+					const map2 = (compactPos: number): { node: Text; off: number } | null => {
+						let acc = 0
+						for (let k = 0; k < nodes2.length; k++) {
+							const nd = nodes2[k]!
+							const raw = nd.textContent ?? ""
+							const len = compact(raw).length
+							const isLast = k === nodes2.length - 1
+							if (compactPos < acc + len || (isLast && compactPos <= acc + len)) {
+								let need = compactPos - acc
+								let off = 0
+								for (; off < raw.length && need > 0; off++) {
+									if (!/\s/.test(raw[off]!)) need--
+								}
+								return { node: nd, off }
+							}
+							acc += len
+						}
+						return null
+					}
+					const s2 = map2(pos2)
+					const e2 = map2(pos2 + needle2.length)
+					if (s2 && e2) {
+						const r2 = root.ownerDocument.createRange()
+						r2.setStart(s2.node, s2.off)
+						r2.setEnd(e2.node, e2.off)
+						return r2
+					}
 				}
 			}
 		} catch { /* ignore */ }
