@@ -2368,7 +2368,7 @@ export class UNreaderView extends ItemView {
 		pull.createSpan({ cls: "unreader-immersion-switch-cord" });
 		pull.createSpan({ cls: "unreader-immersion-switch-knot" });
 		pull.createSpan({ cls: "unreader-immersion-switch-grip" });
-		pull.createSpan({ cls: "unreader-immersion-switch-bead" });
+		pull.createSpan({ cls: "unreader-immersion-switch-side-cord" });
 		this.immersionSwitchEl.addEventListener("pointerdown", e => e.stopPropagation());
 		this.immersionSwitchEl.addEventListener("click", e => {
 			e.preventDefault();

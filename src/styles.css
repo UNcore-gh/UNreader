@@ -277,13 +277,13 @@
 	border-radius: 50% 50% 44% 44%;
 	background: currentColor;
 }
-.unreader-immersion-switch-bead {
+.unreader-immersion-switch-side-cord {
 	position: absolute;
-	top: calc(9 * var(--ur-u));
+	top: calc(8 * var(--ur-u));
 	left: calc(50% + calc(4 * var(--ur-u)));
-	width: calc(2.5 * var(--ur-u));
-	height: calc(2.5 * var(--ur-u));
-	border-radius: 50%;
+	width: calc(1.5 * var(--ur-u));
+	height: calc(6 * var(--ur-u));
+	border-radius: 999px;
 	background: currentColor;
 	opacity: 0.56;
 }
