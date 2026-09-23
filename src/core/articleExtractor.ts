@@ -37,6 +37,7 @@ const ARTICLE_CANDIDATE_SELECTORS = [
 	"[role='main']",
 	"main",
 	".post-content",
+	".asset-content",
 	".article-content",
 	".entry-content",
 	".post-body",

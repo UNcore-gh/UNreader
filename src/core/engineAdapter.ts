@@ -411,7 +411,10 @@ export interface EngineHandlers {
 	onScrollActivity?: (direction: "up" | "down") => void
 	/** 沉浸模式点按：zone 为点击位置在视口中的横向比例（0~1）。
 	 *  仅中间 1/3 被宿主采用（切换工具栏显隐）；点按不用于翻页。 */
-	onTapZone?: (ratio: number) => void
+	onTapZone?: (ratio: number, stamp?: number) => void
+	/** 正文里的播客时间戳（`#ur-audio-*`）：由宿主把音频 seek 到指定秒数。
+	 *  这是链接落地的引擎侧收口，连续模式不依赖宿主后挂的 Document 监听。 */
+	onPodcastTimestamp?: (seconds: number) => void
 	/** 派生目录标题（buildSectionNav 后台解析）完成后通知宿主增量刷新目录面板。
 	 *  开书不再等待全书章节标题解析（首屏提速），此回调保证目录最终完整。 */
 	onNavDerived?: () => void
@@ -765,6 +768,20 @@ export function serializeFrameHtml(doc: Document): string {
 	return `<!DOCTYPE html><html><body>${doc.body?.innerHTML ?? ""}</body></html>`
 }
 
+/** 老式 MOBI/Calibre 常见的 <font size="N"> 是**绝对**字号关键字：正文调大时，
+ *  它自己不会跟着变。这里把 HTML 的 1~7 档映射成相对根字号的 rem（不是 em）——
+ *  用 em 会在 <sup><small><font size="1"> 这种嵌套里再次相乘，反而更小；
+ *  rem 以 html 的阅读器字号为基准，既能随正文缩放，又保留书里的大小层级。 */
+const LEGACY_FONT_SIZE_RULES = `
+font[size="1"] { font-size: 0.625rem !important; }
+font[size="2"] { font-size: 0.8125rem !important; }
+font[size="3"] { font-size: 1rem !important; }
+font[size="4"] { font-size: 1.125rem !important; }
+font[size="5"] { font-size: 1.5rem !important; }
+font[size="6"] { font-size: 2rem !important; }
+font[size="7"] { font-size: 3rem !important; }
+`.trim();
+
 export function buildThemeCss(app: ResolvedAppearance): string {
 	// 阅读区配色：默认纯白底（#ffffff）+ 深灰字（#222222），用户可在外观设置中自定义。
 	// 其余装饰色仍跟随 Obsidian 主题变量，确保与高亮、链接等风格协调。
@@ -900,6 +917,10 @@ ${app.customFontRules ?? ""}
 ${imageRule}
 ${glassRule}
 ${paraIndentRule}
+html {
+	font-size: ${app.fontSize}px !important;
+}
+${LEGACY_FONT_SIZE_RULES}
 body {
 	background-color: transparent !important;
 	color: ${fg} !important;
@@ -1026,7 +1047,14 @@ const CONT_SEL_SUPPRESS_MS = 500
 // 太长会让「过渡刚结束就滚」的第一下被吞掉。
 const SCROLL_LAYOUT_COMP_SUPPRESS_MS = 220
 
-interface ContAnchorRef { index: number; hash: string | null }
+type ContAnchorResolver = (doc: Document) => Element | null
+interface ContAnchorRef {
+	index: number
+	hash: string | null
+	/** 让 foliate 自己解析精确目标。MOBI6 的 `filepos:`、KF8 的 `kindle:pos:` 都不是
+	 *  `#id`，只保存 hash 会把不同注标折叠成同一个「跳章节开头」。 */
+	anchor?: ContAnchorResolver
+}
 /** 高亮覆盖矩形（`DOMRect` 的可写副本：`getClientRects()` 返回的 DOMRect 是只读的，
  *  同一行碎片要合并就得拷贝出来改）。 */
 interface CoverRect {
@@ -1402,7 +1430,6 @@ export class EngineAdapter {
 					this.wireTapZone(d.doc as Document)
 					handlers.onLoadDoc(d.doc as Document, d.index as number)
 				}
-				handlers.onLoadDoc(d.doc as Document, d.index as number)
 			}
 		})
 		el.addEventListener("draw-annotation", ev => {
@@ -3758,8 +3785,13 @@ export class EngineAdapter {
 			// 产生了文字选区 → 是选择操作，不翻页
 			const selText = (d.getSelection?.()?.toString() ?? "").trim()
 			if (selText) return
-			// 落在链接上（脚注/目录）→ 交给链接处理
-			const tgt = e.target as Element | null
+			// 落在链接上（脚注/目录/播客时间戳）→ 交给链接处理。
+			// e.target 可能来自 iframe 的独立 realm，不能拿主窗口的 Element 构造器判类型；
+			// nodeType===1 是跨 realm 恒等的元素节点判据。
+			const targetNode = e.target as Node | null
+			const tgt = targetNode?.nodeType === 1
+				? targetNode as Element
+				: targetNode?.parentElement ?? null
 			if (tgt?.closest?.("a[href]")) return
 			// 比例必须用 frame 元素的宿主视觉矩形换算：分页模式 foliate 内部
 			// 多列布局/横向平移，文档坐标（clientX/documentElement.clientWidth/
@@ -3775,7 +3807,9 @@ export class EngineAdapter {
 				if (w <= 0) return
 				ratio = e.clientX / w
 			}
-			this.handlers?.onTapZone?.(ratio)
+			// 时间戳一并上报：同一个原生 click 若被多条投递链分别命中，
+			// 宿主据此识别为「同一次手势」并去重（见 readerView.handleTapZone）。
+			this.handlers?.onTapZone?.(ratio, e.timeStamp)
 		})
 	}
 
@@ -3940,7 +3974,7 @@ export class EngineAdapter {
 		if (this.bookFormat === "epub") this.flattenEpubSwitches(doc)
 		// rewriteResourcesLocal 对 MOBI 自动跳过（方法开头检查 book.loadBlob）
 		await this.rewriteResourcesLocal(doc, secIdStr)
-		const anchors = this.rewriteAnchors(doc, idx, secIdStr)
+		const anchors = await this.rewriteAnchors(doc, idx, secIdStr)
 		this.injectFrameCss(doc)
 		// HTML 序列化（不能用 XMLSerializer）：见 serializeFrameHtml 注释
 		const html = serializeFrameHtml(doc)
@@ -4189,14 +4223,20 @@ export class EngineAdapter {
 		}
 	}
 
-	/** 内部链接 → #nr-N 映射（同源 iframe 内禁内滚，点击由宿主接管） */
-	private rewriteAnchors(doc: Document, idx: number, secBase: string): Map<string, ContAnchorRef> {
+	/** 内部链接 → #nr-N 映射（同源 iframe 内禁内滚，点击由宿主接管）。
+	 *  `book.resolveHref()` 在 EPUB/MOBI6 是同步的、KF8 是异步的；必须统一 await，
+	 *  否则 AZW3 的 `kindle:pos:` 会返回 Promise，被误判成「解析失败」而漏接管。 */
+	private async rewriteAnchors(doc: Document, idx: number, secBase: string): Promise<Map<string, ContAnchorRef>> {
 		const map = new Map<string, ContAnchorRef>()
-		const book = this.el?.book as unknown as { resolveHref?: (href: string) => { index?: number; anchor?: unknown } | null } | null
+		const book = this.el?.book as unknown as { resolveHref?: (href: string) => unknown } | null
 		for (const a of Array.from(doc.querySelectorAll("a[href]"))) {
 			try {
 				const raw = a.getAttribute("href") ?? ""
 				if (!raw || /^(?:https?:|mailto:|blob:|data:|ftp:)/i.test(raw)) continue
+				// 播客时间戳是宿主自己的功能链接，不是书内脚注/交叉引用。
+				// 绝不能被下面的统一编号改写成 `#nr-N`，否则点击落地时只能看到编号、
+				// 看不到原始的 `#ur-audio-秒数`，seek 永远不可能触发。
+				if (raw.startsWith("#ur-audio-")) continue
 				if (raw.startsWith("#")) {
 					const key = `nr-${++this.contAnchorSeq}`
 					map.set(key, { index: idx, hash: decodeURIComponent(raw.slice(1)) })
@@ -4208,15 +4248,74 @@ export class EngineAdapter {
 				const hashPart = hashIdx === -1 ? null : decodeURIComponent(raw.slice(hashIdx + 1))
 				if (!pathPart) continue
 				const resolved = this.resolveRel(pathPart, secBase)
-				const t = book?.resolveHref?.(resolved)
-				if (t && typeof t.index === "number") {
+				const t = await book?.resolveHref?.(resolved)
+				if (t && typeof t === "object" && typeof (t as { index?: unknown }).index === "number") {
+					const target = t as { index: number; anchor?: unknown }
+					const anchor = typeof target.anchor === "function"
+						? target.anchor as ContAnchorResolver
+						: undefined
 					const key = `nr-${++this.contAnchorSeq}`
-					map.set(key, { index: t.index, hash: hashPart })
+					map.set(key, { index: target.index, hash: hashPart, anchor })
 					a.setAttribute("href", "#" + key)
 				}
 			} catch { /* 保留原样 */ }
 		}
 		return map
+	}
+
+	/** 一个被接管的内部链接在目标文档里的精确元素。优先用书自己的解析器：
+	 *  EPUB 的 `#fragment` 与 MOBI/KF8 的位置锚点由此统一到同一条路径。 */
+	private resolveAnchorElement(ref: ContAnchorRef, doc: Document): Element | null {
+		if (ref.anchor) {
+			try {
+				const resolved = ref.anchor(doc)
+				if (resolved) return resolved
+			} catch { /* 回退 hash */ }
+		}
+		return ref.hash ? doc.getElementById(ref.hash) : null
+	}
+
+	/** MOBI6 的位置锚点通常是一个没有文字的 `<a id="filepos…">`：
+	 *  既不在注释容器里，父节点还可能直接是 `<body>`。这里按 foliate 的脚注提取
+	 *  口径，从空锚点爬到最近的非行内祖先；若已到 body，则取紧随其后的块级元素。
+	 *  否则当前实现会把整个 body/章节容器序列化进气泡。 */
+	private extractNoteElement(target: Element): Element | null {
+		const doc = target.ownerDocument;
+		const inline = "a, span, sup, sub, em, strong, i, b, small, big, font";
+		let el: Element | null = target;
+		while (el?.matches(inline)) {
+			if (!el.parentElement) break;
+			el = el.parentElement;
+		}
+		if (el && el !== doc.body && el !== doc.documentElement) return el;
+
+		const next = target.nextElementSibling;
+		if (next && !next.matches(inline)) return next;
+
+		// 少数书把注释直接写成空锚点后的裸文本，没有包一层 `<p>`：只收集连续的行内节点，
+		// 遇到下一个位置锚点或块级元素立即停，避免再次把后续正文卷进来。
+		const nodes: Node[] = [];
+		for (let node: Node | null = target.nextSibling; node; node = node.nextSibling) {
+			if (node.nodeType === 1) {
+				const element = node as Element;
+				if (element.matches('a[id^="filepos"]')) break;
+				if (nodes.length && !element.matches(inline)) break;
+				nodes.push(element.cloneNode(true));
+				if (!element.matches(inline)) break;
+			} else if (node.nodeType === 3) {
+				nodes.push(node.cloneNode(true));
+			} else if (node.nodeType !== 8) {
+				break;
+			}
+			const text = nodes.map(n => n.textContent ?? "").join("").trim();
+			if (text.length > 4000) break;
+		}
+		if (!nodes.length) return null;
+		// 与高亮覆盖层同口径：全局助手造游离节点，frame 节点 append 时自动 adopt；
+		// 绝不能调 `doc.win.createDiv()`（iframe realm 没有 Obsidian 的 DOM 助手）。
+		const wrap = createDiv();
+		for (const node of nodes) wrap.appendChild(node);
+		return wrap;
 	}
 
 	/** epub:switch 在 HTML 宽松解析下会把所有 case 分支一起渲染（正文重复两遍），
@@ -4662,6 +4761,9 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 		})
 		// 沉浸模式点按：连续流逐帧接入（分页流在 foliate load 事件统一接）
 		this.wireTapZone(d)
+		// 连续模式的章节文档不会走 foliate 的 `load` 事件；这里才是逐帧接线的入口。
+		// 之前只在分页分支调用 onLoadDoc，导致宿主的文档级监听在连续模式下从未挂上。
+		this.handlers?.onLoadDoc?.(d, idx)
 		// 键盘：iframe 获焦时接管翻页与章节键。
 		// 模态框（命令面板/快速切换/设置）开着时**整条让路**：此时焦点本不该在书页里
 		// （真跑进来了由上面的 focusin 处理器归还），而任何一个「转发给宿主 keymap」的
@@ -4741,7 +4843,7 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 	 *  普通内部链接（目录/交叉引用等）不弹注释窗，直接跳转目标位置。 */
 	private async showFrameNote(ref: ContAnchorRef, from?: HTMLAnchorElement, at?: { x: number; y: number }): Promise<void> {
 		const hash = ref.hash
-		if (!hash) { this.jumpToRef(ref); return }
+		if (!hash && !ref.anchor) { this.jumpToRef(ref); return }
 		void this.loadSections([ref.index])
 		const go = (attempt: number): void => {
 			const tf = this.contFrames.get(ref.index)
@@ -4750,24 +4852,21 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 				if (attempt < 25) window.setTimeout(() => go(attempt + 1), 120)
 				else this.jumpToRef(ref)
 				return
-			}
-			try {
-				const elx = d.getElementById(hash)
+				}
+				try {
+					const elx = this.resolveAnchorElement(ref, d)
 				if (!elx) {
 					if (attempt < 25) window.setTimeout(() => go(attempt + 1), 120)
 					else this.jumpToRef(ref)
 					return
-				}
-				let note: Element | null = null
-				try { note = elx.closest(EngineAdapter.NOTE_TARGET_SELECTOR) } catch { /* ignore */ }
-				if (!note && (from && this.isNoterefLink(from))) {
-					// 源是上标/noteref 但目标容器无类型标记：退化为取目标元素（裸链接取父元素）
-					note = elx.tagName === "A" || !elx.textContent?.trim() ? elx.parentElement : elx
-				}
+					}
+					let note: Element | null = null
+					try { note = elx.closest(EngineAdapter.NOTE_TARGET_SELECTOR) } catch { /* ignore */ }
+					if (!note && (from && this.isNoterefLink(from))) note = this.extractNoteElement(elx)
 				if (!note) { this.jumpToRef(ref); return }
 				const html = note.outerHTML
 				// jump 闭包：连续模式下裸 hash 无法经 goTo 解析，直接走 jumpToRef（含隐藏注释显形）
-				if (html) this.handlers?.onInlineFootnote?.(html, hash, () => this.jumpToRef(ref), at)
+				if (html) this.handlers?.onInlineFootnote?.(html, hash ?? "", () => this.jumpToRef(ref), at)
 				else this.jumpToRef(ref)
 			} catch (e) { console.warn("[UNreader] showFrameNote failed", e) }
 		}
@@ -4777,9 +4876,10 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 	/** ⌘/Ctrl+点击/注释跳转：补载 → 版面稳定 → 精确定位（保留 70px 上文但不越过章节顶） */
 	private jumpToRef(ref: ContAnchorRef): void {
 		this.jumpToSection(ref.index, (d, _f, ridx) => {
-			if (!ref.hash) return this.sectionScrollTop(ridx)
-			const elx = d.getElementById(ref.hash)
-			if (!elx) return null
+			const elx = this.resolveAnchorElement(ref, d)
+			// MOBI/KF8 没有 hash、只有解析器；解析器失败时仍退回章节开头，不能变成
+			// 「点击完全没反应」。EPUB 有 hash 但目标缺失时保持原来的 null 语义。
+			if (!elx) return ref.hash ? null : this.sectionScrollTop(ridx)
 			this.revealNoteAround(elx)
 			return this.locateScrollTop(ridx, elx.getBoundingClientRect())
 		})
@@ -5328,6 +5428,24 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 	 *  逐字一致 —— 这正是本次修复的判据。 */
 	private handleAnchorTap(f: ContFrame, a: HTMLAnchorElement, e: MouseEvent): void {
 		const href = a.getAttribute("href") ?? ""
+		// 播客时间戳是插件自己生成的内部链接（`#ur-audio-秒数`），不是脚注引用。
+		// 在这里落地而不是另挂一层宿主 Document 监听：连续模式的章节 iframe 由引擎
+		// 自己创建，宿主后挂的监听很容易漏接；而这条函数已经是链接点击的唯一出口。
+		const audioStamp = /^#ur-audio-(\d+(?:\.\d+)?)$/.exec(href)
+		// 兼容旧缓存/旧帧：历史上 `rewriteAnchors` 会把时间戳改写成 `#nr-N`，
+		// 原始秒数仍保存在 frame 的锚点表里。即使遇到这种残留也要能 seek。
+		const legacyAudioRef = !audioStamp && href.startsWith("#nr-")
+			? f.anchors.get(href.slice(1))
+			: null
+		const legacyAudioStamp = legacyAudioRef?.hash
+			? /^ur-audio-(\d+(?:\.\d+)?)$/.exec(legacyAudioRef.hash)
+			: null
+		if (audioStamp || legacyAudioStamp) {
+			e.preventDefault()
+			e.stopImmediatePropagation()
+			this.handlers?.onPodcastTimestamp?.(Number((audioStamp ?? legacyAudioStamp)![1]))
+			return
+		}
 		if (!href.startsWith("#")) {
 			// **外链一律交系统默认浏览器，绝不让章节 iframe 自己导航。**
 			// 历史实现这里直接 `return`（连 preventDefault 都没有），于是正文里的
@@ -5367,7 +5485,13 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 	 *  用户报的「划了高亮之后点不动注标」即此 —— 覆盖矩形是**装饰**，不该改变它下面
 	 *  那个元素的语义。 */
 	private linkFromEvent(e: { target: EventTarget | null; clientX: number; clientY: number }): HTMLAnchorElement | null {
-		const t = e.target as Element | null
+		// 点击真实文字时，部分 WebView/合成事件给到的 target 是 Text 节点而不是
+		// 承载它的 <a>。先按跨 realm 恒等的 nodeType 取元素，再向上找父级；否则
+		// 「点时间戳文字没反应、点链接边缘才有反应」这类现象会非常难复现。
+		const targetNode = e.target as Node | null
+		const t = targetNode?.nodeType === 1
+			? targetNode as Element
+			: targetNode?.parentElement ?? null
 		if (!t || typeof t.closest !== "function") return null
 		const direct = t.closest("a[href]")
 		if (direct) return direct as HTMLAnchorElement
@@ -5711,6 +5835,10 @@ html,body,p,div,span,li,td,th,dd,dt,blockquote,figcaption{
 	line-height:${app.lineHeight}!important;
 	${app.letterSpacing ? `letter-spacing:${app.letterSpacing}em!important;` : ""}
 }
+html{
+	font-size:${app.fontSize}px!important;
+}
+${LEGACY_FONT_SIZE_RULES}
 body{
 	color:${app.textColor}!important;
 	font-size:${app.fontSize}px!important;

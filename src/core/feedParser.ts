@@ -1,6 +1,7 @@
 import { XMLParser } from "fast-xml-parser";
 import type { FeedEnclosure } from "../types";
 import { normalizeEnclosure, normalizeHttpUrl, stripHtml, stableEntryId, stableHash } from "./feedUtils";
+import { chooseRicherFeedContent, evaluateFeedContentQuality, type FeedContentQuality } from "./feedContentQuality";
 
 type UnknownRecord = Record<string, unknown>;
 
@@ -17,6 +18,7 @@ export interface ParsedFeedEntry {
 	contentHtml: string
 	contentSource: "feed" | "fulltext"
 	contentHash: string
+	contentQuality: FeedContentQuality
 	enclosure: FeedEnclosure | null
 }
 
@@ -68,6 +70,22 @@ function textValue(value: unknown): string {
 		if (text) return text;
 	}
 	return "";
+}
+
+/** 正文专用取值：连续 CDATA 会被 XMLParser 拆成数组，这是 RSS 里“标题有、正文没有”的
+ *  常见根因（阮一峰的 Movable Type 模板就属于这一类）。不能沿用 textValue 的“取第一个”。
+ *  顺序上 fast-xml-parser 无法完整保留混排节点，但对相邻 CDATA/文本数组按序拼接已能还原正文。 */
+function contentValue(value: unknown): string {
+    if (value == null) return "";
+    if (typeof value === "string" || typeof value === "number" || typeof value === "boolean") return String(value).trim();
+    if (Array.isArray(value)) return value.map(contentValue).filter(Boolean).join("");
+    if (!isRecord(value)) return "";
+    const parts: string[] = [];
+    for (const key of ["#cdata", "#text", "value"]) {
+        const text = contentValue(value[key]);
+        if (text) parts.push(text);
+    }
+    return parts.join("");
 }
 
 function firstRecord(value: unknown): UnknownRecord | null {
@@ -133,8 +151,10 @@ function entryFromRss(item: UnknownRecord, feedUrl: string, feedTitle: string): 
 	const url = feedLinkFromRss(item, feedUrl);
 	const guid = textValue(item.guid || item.id) || url || `${title}|${textValue(item.pubDate)}`;
 	const publishedAt = parseDate(item.pubDate || item.published || item.updated || item.date);
-	const contentRaw = textValue(item.encoded || item.content) || textValue(item.description || item.summary);
-	const summary = stripHtml(textValue(item.description || item.summary || contentRaw)).slice(0, 500);
+	const structuredContent = contentValue(item.encoded || item.content);
+	const descriptionContent = contentValue(item.description || item.summary);
+	const contentRaw = chooseRicherFeedContent(structuredContent, descriptionContent);
+	const summary = stripHtml(descriptionContent || contentRaw).slice(0, 500);
 	const enclosure = enclosureFrom(item.enclosure, feedUrl, item.duration);
 	const authorRecord = firstRecord(item.author);
 	const author = textValue(authorRecord?.name || item.author || item.creator || item["dc:creator"] || feedTitle);
@@ -151,6 +171,7 @@ function entryFromRss(item: UnknownRecord, feedUrl: string, feedTitle: string): 
 		contentHtml: contentRaw,
 		contentSource: "feed",
 		contentHash: stableHash(contentRaw || summary || title),
+		contentQuality: evaluateFeedContentQuality(contentRaw),
 		enclosure,
 	};
 }
@@ -171,8 +192,8 @@ function entryFromAtom(item: UnknownRecord, feedUrl: string, feedTitle: string):
 	const url = linkFrom(item.link, feedUrl, true);
 	const guid = textValue(item.id) || url || `${title}|${textValue(item.updated)}`;
 	const publishedAt = parseDate(item.published || item.updated || item.issued);
-	const contentRaw = textValue(item.content) || textValue(item.summary);
-	const summary = stripHtml(textValue(item.summary || contentRaw)).slice(0, 500);
+	const contentRaw = chooseRicherFeedContent(contentValue(item.content), contentValue(item.summary));
+	const summary = stripHtml(contentValue(item.summary) || contentRaw).slice(0, 500);
 	const enclosure = enclosureFrom(item.link, feedUrl, item.duration);
 	const authorRecord = firstRecord(item.author);
 	return {
@@ -188,6 +209,7 @@ function entryFromAtom(item: UnknownRecord, feedUrl: string, feedTitle: string):
 		contentHtml: contentRaw,
 		contentSource: "feed",
 		contentHash: stableHash(contentRaw || summary || title),
+		contentQuality: evaluateFeedContentQuality(contentRaw),
 		enclosure,
 	};
 }
@@ -211,8 +233,11 @@ function parseJsonFeed(raw: string, feedUrl: string): ParsedFeed {
 		const entryTitle = stripHtml(textValue(item.title)) || "未命名文章";
 		const url = normalizeHttpUrl(textValue(item.url || item.external_url), feedUrl);
 		const guid = textValue(item.id) || url || `${entryTitle}|${textValue(item.date_published)}`;
-		const contentRaw = textValue(item.content_html || item.content_text || item.summary);
-		const summary = stripHtml(textValue(item.summary || item.content_text || contentRaw)).slice(0, 500);
+		const contentRaw = chooseRicherFeedContent(
+			contentValue(item.content_html || item.content_text),
+			contentValue(item.summary),
+		);
+		const summary = stripHtml(contentValue(item.summary || item.content_text) || contentRaw).slice(0, 500);
 		const publishedAt = parseDate(item.date_published || item.date_modified);
 		const author = textValue(firstRecord(item.authors)?.name || item.author || authorRecord?.name || title);
 		const enclosure = enclosureFrom(item.attachments, feedUrl);
@@ -229,6 +254,7 @@ function parseJsonFeed(raw: string, feedUrl: string): ParsedFeed {
 			contentHtml: contentRaw,
 			contentSource: "feed" as const,
 			contentHash: stableHash(contentRaw || summary || entryTitle),
+			contentQuality: evaluateFeedContentQuality(contentRaw),
 			enclosure,
 		};
 	});

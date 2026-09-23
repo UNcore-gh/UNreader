@@ -1,7 +1,7 @@
 import { Plugin, TFile, Notice, FuzzySuggestModal, WorkspaceLeaf, Platform, normalizePath } from "obsidian";
 import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance, platformAppearanceDefaults } from "./types";
 import { UNreaderSettingTab } from "./settings";
-import { getBookFiles, SUPPORTED_BOOK_FORMATS } from "./core/bookService";
+import { getBookFiles, getRemovedBookshelfEntries, SUPPORTED_BOOK_FORMATS } from "./core/bookService";
 import { excludedFolderKey, normalizeExcludedFolder } from "./core/bookExclusions";
 import { clearBookPreviewCache } from "./core/bookPreview";
 import { ProgressStore } from "./core/progressStore";
@@ -26,6 +26,8 @@ import type { DiscoveredFeed } from "./core/feedParser";
 import { FeedStore } from "./core/feedStore";
 import { confirmAction } from "./ui/confirmModal";
 import { FeedService } from "./core/feedService";
+import { BookshelfCategoryManagerModal } from "./ui/bookshelfModals";
+import type { BookshelfCategory } from "./types";
 import { FeedMediaStore } from "./core/feedMediaStore";
 
 /** UNagent 写完库内文件后的显式刷新通道（见 UNagent 的 utils/pluginNotify.ts）。
@@ -261,7 +263,7 @@ export default class UNreaderPlugin extends Plugin {
 		// 资源文件与启用索引随库同步，设备外观和当前预设仍只存在本机。
 		this.resourceStore = new ResourceStore(this.app.vault, this.app.fileManager);
 		setActiveResourceStore(this.resourceStore);
-		this.feedStore = new FeedStore(this.app.vault);
+		this.feedStore = new FeedStore(this.app.vault, this.deviceScope());
 		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
 		this.feedMediaStore = new FeedMediaStore(() => this.settings.feeds);
 
@@ -457,6 +459,19 @@ export default class UNreaderPlugin extends Plugin {
 			}));
 		}
 
+		// 书籍改名 / 删除时同步书架元数据。分类和“手动移除”按路径记录；
+		// 若不同步，改名后的书会丢分类，删除的书还会留下永远不可见的隐藏记录。
+		this.registerEvent(this.app.vault.on("delete", f => {
+			if (!this.pruneBookshelfPaths(f.path)) return;
+			void this.persistData();
+			this.refreshBookshelfPanels();
+		}));
+		this.registerEvent(this.app.vault.on("rename", (f, oldPath) => {
+			if (!this.migrateBookshelfPaths(oldPath, f.path)) return;
+			void this.persistData();
+			this.refreshBookshelfPanels();
+		}));
+
 		// 启动时扫描自定义字体（字体文件随库同步到各端，每端按需建 blob URL）。
 		// 共享资源随库同步：他端新增/替换/删除图片或字体后，本端自动重扫。
 		{
@@ -561,6 +576,13 @@ export default class UNreaderPlugin extends Plugin {
 		}));
 
 		this.addCommand({
+			id: "open-reader",
+			name: "打开阅读器",
+			callback: () => {
+				void this.openReader();
+			},
+		});
+		this.addCommand({
 			id: "open-book",
 			name: "打开书籍",
 			callback: () => {
@@ -632,7 +654,7 @@ export default class UNreaderPlugin extends Plugin {
 		});
 		this.addCommand({
 			id: "toggle-full-immersion",
-			name: "切换全沉浸模式",
+			name: "切换全沉浸模式（进入/退出）",
 			callback: () => withReader(view => view.toggleFullImmersion()),
 		});
 		// 诊断：把缓冲里的日志一键导出到库根（等价于 设置 → 诊断 → 保存到库，
@@ -876,7 +898,7 @@ export default class UNreaderPlugin extends Plugin {
 		this.presetStore = new PresetStore(this.app.vault, PRESETS_FOLDER, this.app.fileManager);
 		this.resourceStore = new ResourceStore(this.app.vault, this.app.fileManager);
 		setActiveResourceStore(this.resourceStore);
-		this.feedStore = new FeedStore(this.app.vault);
+		this.feedStore = new FeedStore(this.app.vault, this.deviceScope());
 		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
 		this.feedMediaStore = new FeedMediaStore(() => this.settings.feeds);
 		await Promise.all([
@@ -1219,6 +1241,16 @@ export default class UNreaderPlugin extends Plugin {
 		return this.getActiveReader()?.getSelectionForExternal() ?? null;
 	}
 
+	/** 只打开/聚焦阅读器界面，不弹书单；空态里可再选书或进入订阅。 */
+	async openReader(): Promise<void> {
+		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)[0];
+		const leaf = existing ?? this.app.workspace.getLeaf(true);
+		if (leaf.view?.getViewType() !== VIEW_TYPE_UNREADER) {
+			await leaf.setViewState({ type: VIEW_TYPE_UNREADER });
+		}
+		this.app.workspace.revealLeaf(leaf);
+	}
+
 	/** 用阅读视图打开一本书。
 	 *
 	 *  常规路径是 `leaf.openFile(file)` —— 它按**扩展名注册表**路由到本视图。
@@ -1386,6 +1418,160 @@ export default class UNreaderPlugin extends Plugin {
 		new FeedManagerModal(this.app, this).open();
 	}
 
+	/** 把书架元数据里的旧路径迁到新路径；支持单个文件和整个文件夹。 */
+	private migrateBookshelfPaths(oldPath: string, newPath: string): boolean {
+		if (!oldPath || !newPath || oldPath === newPath) return false;
+		const remap = (path: string): string => {
+			if (path === oldPath) return newPath;
+			if (path.startsWith(`${oldPath}/`)) return `${newPath}${path.slice(oldPath.length)}`;
+			return path;
+		};
+		const remapList = (values: readonly string[]): string[] =>
+			[...new Set(values.map(remap))];
+
+		let changed = false;
+		const oldHidden = [...(this.settings.bookshelfHiddenBooks ?? [])];
+		const nextHidden = remapList(this.settings.bookshelfHiddenBooks ?? []);
+		if (JSON.stringify(oldHidden) !== JSON.stringify(nextHidden)) changed = true;
+		this.settings.bookshelfHiddenBooks = nextHidden;
+
+		const oldManual = [...(this.settings.bookshelfManualOrder ?? [])];
+		const nextManual = remapList(this.settings.bookshelfManualOrder ?? []);
+		if (JSON.stringify(oldManual) !== JSON.stringify(nextManual)) changed = true;
+		this.settings.bookshelfManualOrder = nextManual;
+
+		const oldPinned = [...(this.settings.bookshelfPinned ?? [])];
+		const nextPinned = remapList(this.settings.bookshelfPinned ?? []);
+		if (JSON.stringify(oldPinned) !== JSON.stringify(nextPinned)) changed = true;
+		this.settings.bookshelfPinned = nextPinned;
+
+		const assignments = this.settings.bookshelfCategoryAssignments ?? {};
+		const nextAssignments: Record<string, string> = {};
+		for (const [path, categoryId] of Object.entries(assignments)) {
+			nextAssignments[remap(path)] = categoryId;
+		}
+		if (JSON.stringify(assignments) !== JSON.stringify(nextAssignments)) changed = true;
+		this.settings.bookshelfCategoryAssignments = nextAssignments;
+		return changed;
+	}
+
+	/** 书籍被删除后清掉路径元数据；文件夹删除时一并清掉子路径。 */
+	private pruneBookshelfPaths(path: string): boolean {
+		if (!path) return false;
+		const isRemoved = (candidate: string): boolean =>
+			candidate === path || candidate.startsWith(`${path}/`);
+		const beforeHidden = [...(this.settings.bookshelfHiddenBooks ?? [])];
+		const beforeManual = [...(this.settings.bookshelfManualOrder ?? [])];
+		const beforePinned = [...(this.settings.bookshelfPinned ?? [])];
+		const beforeAssignments = { ...(this.settings.bookshelfCategoryAssignments ?? {}) };
+
+		this.settings.bookshelfHiddenBooks = beforeHidden.filter(candidate => !isRemoved(candidate));
+		this.settings.bookshelfManualOrder = beforeManual.filter(candidate => !isRemoved(candidate));
+		this.settings.bookshelfPinned = beforePinned.filter(candidate => !isRemoved(candidate));
+		this.settings.bookshelfCategoryAssignments = Object.fromEntries(
+			Object.entries(beforeAssignments).filter(([candidate]) => !isRemoved(candidate)),
+		);
+		return JSON.stringify(beforeHidden) !== JSON.stringify(this.settings.bookshelfHiddenBooks)
+			|| JSON.stringify(beforeManual) !== JSON.stringify(this.settings.bookshelfManualOrder)
+			|| JSON.stringify(beforePinned) !== JSON.stringify(this.settings.bookshelfPinned)
+			|| JSON.stringify(beforeAssignments) !== JSON.stringify(this.settings.bookshelfCategoryAssignments);
+	}
+
+	/** 书籍分类管理面板（书架工具栏的设置按钮）。 */
+	openBookshelfCategoryManager(): void {
+		new BookshelfCategoryManagerModal(this.app, this).open();
+	}
+
+	private refreshBookshelfPanels(): void {
+		this.getActiveReader()?.refreshBookshelfPanel();
+	}
+
+	async createBookshelfCategory(name: string): Promise<void> {
+		const label = name.trim();
+		if (!label) return;
+		if ((this.settings.bookshelfCategories ?? []).some(category => category.name === label)) {
+			new Notice(`已有分类：${label}`);
+			return;
+		}
+		const category: BookshelfCategory = {
+			id: `category-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+			name: label,
+			createdAt: Date.now(),
+		};
+		this.settings.bookshelfCategories = [...(this.settings.bookshelfCategories ?? []), category];
+		await this.persistData();
+		this.refreshBookshelfPanels();
+		new Notice(`已创建分类：${label}`);
+	}
+
+	async renameBookshelfCategory(categoryId: string, name: string): Promise<void> {
+		const label = name.trim();
+		if (!label) return;
+		const category = (this.settings.bookshelfCategories ?? []).find(item => item.id === categoryId);
+		if (!category) return;
+		if (label === category.name) return;
+		if ((this.settings.bookshelfCategories ?? []).some(item => item.id !== categoryId && item.name === label)) {
+			new Notice(`已有分类：${label}`);
+			return;
+		}
+		category.name = label;
+		await this.persistData();
+		this.refreshBookshelfPanels();
+		new Notice(`已重命名分类：${label}`);
+	}
+
+	async deleteBookshelfCategory(categoryId: string): Promise<void> {
+		const before = this.settings.bookshelfCategories ?? [];
+		const category = before.find(item => item.id === categoryId);
+		if (!category) return;
+		this.settings.bookshelfCategories = before.filter(item => item.id !== categoryId);
+		this.settings.bookshelfCategoryAssignments = Object.fromEntries(
+			Object.entries(this.settings.bookshelfCategoryAssignments ?? {})
+				.filter(([, id]) => id !== categoryId),
+		);
+		await this.persistData();
+		this.refreshBookshelfPanels();
+		new Notice(`已删除分类：${category.name}`);
+	}
+
+	async assignBookshelfCategory(path: string, categoryId: string | null): Promise<void> {
+		const assignments = { ...(this.settings.bookshelfCategoryAssignments ?? {}) };
+		if (categoryId == null) delete assignments[path];
+		else {
+			if (!(this.settings.bookshelfCategories ?? []).some(category => category.id === categoryId)) return;
+			assignments[path] = categoryId;
+		}
+		this.settings.bookshelfCategoryAssignments = assignments;
+		await this.persistData();
+		this.refreshBookshelfPanels();
+	}
+
+	async removeBookFromBookshelf(path: string): Promise<void> {
+		const file = this.app.vault.getFileByPath(path);
+		if (!(file instanceof TFile)) {
+			new Notice(`找不到书籍：${path}`);
+			return;
+		}
+		const hidden = new Set(this.settings.bookshelfHiddenBooks ?? []);
+		if (!hidden.has(path)) hidden.add(path);
+		this.settings.bookshelfHiddenBooks = [...hidden];
+		await this.persistData();
+		this.refreshBookshelfPanels();
+		new Notice(`已从书架移除：${file.basename}（文件保留）`);
+	}
+
+	async restoreBookToBookshelf(path: string): Promise<void> {
+		this.settings.bookshelfHiddenBooks = (this.settings.bookshelfHiddenBooks ?? []).filter(item => item !== path);
+		await this.persistData();
+		this.refreshBookshelfPanels();
+		const name = path.split("/").pop() || path;
+		new Notice(`已添加回书架：${name}`);
+	}
+
+	getRemovedBookshelfEntries() {
+		return getRemovedBookshelfEntries(this);
+	}
+
 	/** 启用 / 停用订阅：停用后不再参与刷新，文章也从「全部」聚合列表里收起。 */
 	async setFeedEnabled(feedId: string, enabled: boolean): Promise<void> {
 		await this.whenDataReady();
@@ -1456,6 +1642,22 @@ export default class UNreaderPlugin extends Plugin {
 
 	getPosition(path: string): BookPosition | undefined {
 		return this.progress?.get(path) ?? this.settings.positions[path];
+	}
+
+	/** 播客音频拖动/播放的同步热缓存入口；与正文位置分开存。 */
+	checkpointPodcastProgress(feedId: string, entryId: string, position: BookPosition): void {
+		this.feedStore?.checkpointEntryState(feedId, entryId, { audioPosition: position });
+	}
+
+	/** 阅读中每次可信 relocate 的同步热缓存入口（不等待任何磁盘 I/O）。 */
+	checkpointSourcePosition(key: string, position: BookPosition): void {
+		if (!key.startsWith("feed:")) {
+			this.progress?.checkpoint(key.slice("book:".length), position);
+			return;
+		}
+		const [, feedId, entryId] = key.split(":");
+		if (!feedId || !entryId) return;
+		this.feedStore?.checkpointEntryState(feedId, entryId, { position });
 	}
 
 	savePosition(path: string, position: BookPosition, immediate = false): void {
@@ -1591,6 +1793,41 @@ export default class UNreaderPlugin extends Plugin {
 		this.settings.bookshelfPinned = Array.isArray(this.settings.bookshelfPinned)
 			? this.settings.bookshelfPinned.filter((path): path is string => typeof path === "string")
 			: [];
+		// 分类 / 手动移除是书架的轻量元数据；旧 data.json 没有这些键时用默认值兜底。
+		// 这里收口类型、去重并丢掉指向已不存在分类的 assignment，避免手改或同步冲突
+		// 后的坏数据让书架整块渲染失败。
+		this.settings.bookshelfCategories = [
+			...new Map(
+				(Array.isArray(this.settings.bookshelfCategories) ? this.settings.bookshelfCategories : [])
+					.map((category, index): BookshelfCategory | null => {
+						const id = typeof category?.id === "string" ? category.id.trim() : "";
+						const name = typeof category?.name === "string" ? category.name.trim() : "";
+						if (!id || !name) return null;
+						const createdAt = Number(category.createdAt);
+						return { id, name, createdAt: Number.isFinite(createdAt) ? createdAt : Date.now() + index };
+					})
+					.filter((category): category is BookshelfCategory => category !== null)
+					.map(category => [category.id, category] as const),
+			).values(),
+		];
+		const categoryIds = new Set(this.settings.bookshelfCategories.map(category => category.id));
+		this.settings.bookshelfCategoryAssignments = Object.fromEntries(
+			Object.entries(
+				this.settings.bookshelfCategoryAssignments && typeof this.settings.bookshelfCategoryAssignments === "object"
+					? this.settings.bookshelfCategoryAssignments
+					: {},
+			).filter(entry => {
+				const [path, categoryId] = entry;
+				return typeof path === "string" && path !== ""
+					&& typeof categoryId === "string" && categoryIds.has(categoryId);
+			}),
+		);
+		this.settings.bookshelfHiddenBooks = [
+			...new Set(
+				(Array.isArray(this.settings.bookshelfHiddenBooks) ? this.settings.bookshelfHiddenBooks : [])
+					.filter((path): path is string => typeof path === "string" && path !== ""),
+			),
+		];
 		// 书架排除文件夹（老 data.json 没有这两个键，`Object.assign` 会保留默认值，
 		// 这里再收一次口：手改过 / 跨版本写坏的 data.json 不该让书架整体崩掉）。
 		// 归一化走 `normalizeExcludedFolder`（去首尾斜杠、统一分隔符、去空项、去重），
@@ -1607,6 +1844,7 @@ export default class UNreaderPlugin extends Plugin {
 		this.settings.bookshelfFollowObsidianExclusions = this.settings.bookshelfFollowObsidianExclusions !== false;
 			this.settings.positions = this.settings.positions ?? {};
 			this.settings.feeds = Object.assign({}, DEFAULT_SETTINGS.feeds, this.settings.feeds ?? {});
+			this.settings.feeds.autoFulltext = this.settings.feeds.autoFulltext !== false;
 			this.settings.feeds.entryLimit = Math.max(20, Math.min(2000, Math.floor(Number(this.settings.feeds.entryLimit) || DEFAULT_SETTINGS.feeds.entryLimit)));
 			this.settings.feeds.imageCacheMb = Math.max(0, Math.min(2048, Math.floor(Number(this.settings.feeds.imageCacheMb) || 0)));
 			this.settings.feeds.mediaCacheMb = Math.max(0, Math.min(8192, Math.floor(Number(this.settings.feeds.mediaCacheMb) || 0)));

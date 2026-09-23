@@ -1,4 +1,5 @@
-import type { FeedEntry, FeedEnclosure } from "../types";
+import type { BookPosition, FeedEntry, FeedEnclosure } from "../types";
+import { evaluateFeedContentQuality, type FeedContentQuality } from "./feedContentQuality";
 
 export function stableHash(input: string): string {
 	let a = 0x811c9dc5;
@@ -65,6 +66,7 @@ export function emptyFeedEntryState(now = Date.now()): FeedEntry["state"] {
 		starredAt: null,
 		openedAt: 0,
 		position: null,
+		audioPosition: null,
 		hasAnnotations: false,
 		stateUpdatedAt: now,
 	};
@@ -143,6 +145,22 @@ function byRecency(a: FeedEntry, b: FeedEntry): number {
 	return (b.publishedAt - a.publishedAt) || a.title.localeCompare(b.title);
 }
 
+/** fulltext 是网页提取结果，天然当全文；Feed 自带正文则按体量/结构保守评级。 */
+function qualityOf(entry: FeedEntry): FeedContentQuality {
+	if (entry.contentSource === "fulltext") return "full";
+	return entry.contentQuality ?? evaluateFeedContentQuality(entry.contentHtml);
+}
+
+function qualityRank(quality: FeedContentQuality): number {
+	return quality === "full" ? 2 : quality === "summary" ? 1 : 0;
+}
+
+function newerPosition(a: BookPosition | null | undefined, b: BookPosition | null | undefined): BookPosition | null {
+	if (!a) return b ?? null;
+	if (!b) return a;
+	return (a.updatedAt ?? 0) >= (b.updatedAt ?? 0) ? a : b;
+}
+
 export function mergeFeedEntries(existing: FeedEntry[], incoming: FeedEntry[], limit: number): FeedEntry[] {
 	const byId = new Map<string, FeedEntry>();
 	for (const entry of existing) byId.set(entry.id, entry);
@@ -159,28 +177,38 @@ export function mergeFeedEntries(existing: FeedEntry[], incoming: FeedEntry[], l
 			prev.state.starredAt || next.state.starredAt
 			|| prev.state.position || next.state.position
 		);
-		const keepOldContent = contentChanged && hasAnnotationsOrProgress;
+		const prevQuality = qualityOf(prev);
+		const nextQuality = next.contentQuality ?? evaluateFeedContentQuality(next.contentHtml);
+		// 已抓全文 / 已有完整 Feed 正文时，绝不能被下一次刷新拿到的标题或摘要覆盖。
+		// 有标注/进度时仍保留现有“旧正文 + pending 新正文”的迁移机制。
+		const keepOldContent = contentChanged && (hasAnnotationsOrProgress || qualityRank(nextQuality) < qualityRank(prevQuality));
+		const shouldPending = keepOldContent && qualityRank(nextQuality) >= qualityRank(prevQuality);
 		const keepPending = !contentChanged && !!prev.pendingContentHash;
 		byId.set(next.id, {
 			...next,
 			contentHtml: keepOldContent ? prev.contentHtml : next.contentHtml,
 			contentSource: keepOldContent ? prev.contentSource : next.contentSource,
 			contentHash: keepOldContent ? prev.contentHash : next.contentHash,
-			pendingContentHtml: keepOldContent
+			contentQuality: keepOldContent ? prevQuality : nextQuality,
+			pendingContentHtml: shouldPending
 				? next.contentHtml
 				: keepPending ? prev.pendingContentHtml : undefined,
-			pendingContentHash: keepOldContent
+			pendingContentHash: shouldPending
 				? next.contentHash
 				: keepPending ? prev.pendingContentHash : undefined,
-			pendingContentSource: keepOldContent
+			pendingContentSource: shouldPending
 				? next.contentSource
 				: keepPending ? prev.pendingContentSource : undefined,
+			pendingContentQuality: shouldPending
+				? nextQuality
+				: keepPending ? prev.pendingContentQuality : undefined,
 			state: {
 				...prev.state,
 				readAt: next.state.readAt ?? prev.state.readAt,
 				starredAt: next.state.starredAt ?? prev.state.starredAt,
 				openedAt: Math.max(prev.state.openedAt, next.state.openedAt),
-				position: prev.state.position ?? next.state.position,
+				position: newerPosition(prev.state.position, next.state.position),
+				audioPosition: newerPosition(prev.state.audioPosition, next.state.audioPosition),
 				hasAnnotations: !!(prev.state.hasAnnotations || next.state.hasAnnotations),
 				stateUpdatedAt: Math.max(prev.state.stateUpdatedAt, next.state.stateUpdatedAt),
 			},

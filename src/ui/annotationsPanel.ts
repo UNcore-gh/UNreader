@@ -7,9 +7,10 @@ import type { AnnotationFileData, StoredHighlight, StoredBookmark } from "../cor
 import { sanitizeBookmarkLabel } from "../core/annotationStore";
 import { highlightColorOf } from "../types";
 import { resolveAppearance, ensureHostCustomFont } from "../core/engineAdapter";
-import type { AppearanceSettings, BookshelfEntry, BookshelfSortMode, FeedEntry, FeedFilter, FeedSubscription } from "../types";
+import type { AppearanceSettings, BookshelfCategory, BookshelfCategoryFilter, BookshelfEntry, BookshelfSortMode, FeedEntry, FeedEntryKind, FeedFilter, FeedSubscription } from "../types";
 import type { BookPreview } from "../core/bookPreview";
 import { subscribeKeyboardGeometry, usableBottom } from "./keyboardInset";
+import { entryFeedContentQuality } from "../core/feedContentQuality";
 
 export interface AnnotationsPanelActions {
 	onJump: (cfi: string, textHint?: string) => void
@@ -41,6 +42,13 @@ export interface AnnotationsPanelActions {
 	onBookshelfSortModeChange?: (mode: BookshelfSortMode) => void
 	onBookshelfReorder?: (paths: string[]) => void
 	onToggleBookPin?: (path: string) => void
+	/** 分类筛选 / 单书分类与手动移除；数据落点由宿主统一持久化 */
+	getBookshelfCategories?: () => BookshelfCategory[]
+	getBookshelfCategoryFilter?: () => BookshelfCategoryFilter
+	onBookshelfCategoryFilterChange?: (filter: BookshelfCategoryFilter) => void
+	onAssignBookCategory?: (path: string, categoryId: string | null) => void
+	onRemoveBookFromShelf?: (path: string) => void
+	onOpenBookshelfCategoryManager?: () => void
 	onOpenBook?: (path: string) => void
 	loadBookPreview?: (path: string) => Promise<BookPreview>
 	onModeChange?: (mode: "annotations" | "bookshelf" | "feeds") => void
@@ -48,7 +56,7 @@ export interface AnnotationsPanelActions {
 	getFeedEntries?: () => FeedEntry[]
 	getFeedFilter?: () => FeedFilter
 	getFeedSourceFilter?: () => string | null
-	getCurrentFeedEntry?: () => { feedId: string; entryId: string } | null
+	getCurrentFeedEntry?: () => { feedId: string; entryId: string; kind?: FeedEntryKind } | null
 	onFeedFilterChange?: (filter: FeedFilter) => void
 	onFeedSourceFilterChange?: (feedId: string | null) => void
 	onOpenFeedEntry?: (feedId: string, entryId: string) => void
@@ -494,6 +502,9 @@ export class AnnotationsPanel {
 	private renderAnnotations(): void {
 		this.disconnectShelfPreviews();
 		const data = this.annotationData;
+		const current = this.actions.getCurrentFeedEntry?.();
+		const feed = !!current;
+		const podcast = current?.kind === "audio";
 		// 列表整体重建 → 旧的输入区连同其停靠订阅一起作废，先清理（否则 paddingBottom 会残留）
 		this.stopEditorReveal();
 		this.listEl.empty();
@@ -501,19 +512,20 @@ export class AnnotationsPanel {
 		if (!data.bookmarks.length && !data.highlights.length) {
 			// 当前读的是 Feed 文章时功能轨上是「星标」而不是「添加书签」（两枚互斥），
 			// 空态提示必须跟着走，否则指的那枚按钮根本不在屏幕上。
-			const feed = !!this.actions.getCurrentFeedEntry?.();
 			this.listEl.createDiv({
 				cls: "unreader-toc-empty",
-				text: feed
-					? "暂无标注。选中文字可高亮或评论，点击工具栏星标按钮可收藏这篇文章。"
-					: "暂无标注。选中文字可高亮或评论，点击工具栏书签按钮可收藏当前位置。",
+				text: podcast
+					? "暂无标注。选中正文文字可高亮或评论；播放时点底部「标记」可给当前时间写备注，作为时间点书签显示在这里。"
+					: feed
+						? "暂无标注。选中文字可高亮或评论，点击工具栏星标按钮可收藏这篇文章。"
+						: "暂无标注。选中文字可高亮或评论，点击工具栏书签按钮可收藏当前位置。",
 			});
 			return;
 		}
 
-		// 书签置顶：用户强调书签为最常用入口
+		// 书签置顶：用户强调书签为最常用入口；播客下同一区承载“时间点书签”。
 		if (data.bookmarks.length) {
-			this.listEl.createDiv({ cls: "unreader-anno-section unreader-anno-section--bookmark", text: `书签 · ${data.bookmarks.length}` });
+			this.listEl.createDiv({ cls: "unreader-anno-section unreader-anno-section--bookmark", text: `${podcast ? "书签与时间点" : "书签"} · ${data.bookmarks.length}` });
 			const ul = this.listEl.createEl("ul", { cls: "unreader-anno-list" });
 			for (const b of data.bookmarks) {
 				ul.appendChild(this.bookmarkRow(b));
@@ -533,13 +545,31 @@ export class AnnotationsPanel {
 		this.disconnectShelfPreviews();
 		this.listEl.empty();
 		this.bookmarkPageEls = [];
-		const entries = this.actions.getBookshelfEntries?.() ?? [];
+		const allEntries = this.actions.getBookshelfEntries?.() ?? [];
+		const categories = this.actions.getBookshelfCategories?.() ?? [];
+		const requestedFilter = this.actions.getBookshelfCategoryFilter?.() ?? "all";
+		// 分类删除后筛选值可能悬空；渲染时当场回到「全部」，避免留着一片空白。
+		const activeFilter: BookshelfCategoryFilter = requestedFilter === "uncategorized" || categories.some(category => category.id === requestedFilter)
+			? requestedFilter
+			: "all";
+		if (activeFilter !== requestedFilter) this.actions.onBookshelfCategoryFilterChange?.("all");
+		const entries = activeFilter === "all"
+			? allEntries
+			: activeFilter === "uncategorized"
+				? allEntries.filter(entry => !entry.categoryId)
+				: allEntries.filter(entry => entry.categoryId === activeFilter);
 		const sortMode = this.actions.getBookshelfSortMode?.() ?? "scan";
 		const currentPath = this.actions.getCurrentBookPath?.() ?? null;
+		const sourceLabel = activeFilter === "all"
+			? "全部书籍"
+			: activeFilter === "uncategorized"
+				? "未分类"
+				: categories.find(category => category.id === activeFilter)?.name ?? "全部书籍";
 
 		const toolbar = this.listEl.createDiv({ cls: "unreader-shelf-toolbar" });
-		toolbar.createDiv({ cls: "unreader-shelf-summary", text: `全库 · ${entries.length} 本` });
-		const select = toolbar.createEl("select", { cls: "unreader-shelf-sort" });
+		this.buildBookshelfCategoryButton(toolbar, allEntries, categories, activeFilter, sourceLabel);
+		const actions = toolbar.createDiv({ cls: "unreader-shelf-actions" });
+		const select = actions.createEl("select", { cls: "unreader-shelf-sort" });
 		select.setAttribute("aria-label", "书架排序");
 		const options: Array<[BookshelfSortMode, string]> = [
 			["scan", "默认排序"],
@@ -555,16 +585,99 @@ export class AnnotationsPanel {
 			e.stopPropagation();
 			this.actions.onBookshelfSortModeChange?.(select.value as BookshelfSortMode);
 		});
+		const managerBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-feed-action unreader-shelf-manager" });
+		managerBtn.setAttribute("aria-label", "分类管理");
+		managerBtn.setAttribute("title", "分类管理");
+		try { setIcon(managerBtn, "settings-2"); } catch { managerBtn.setText("⚙"); }
+		managerBtn.addEventListener("click", e => {
+			e.stopPropagation();
+			this.actions.onOpenBookshelfCategoryManager?.();
+		});
 
 		if (!entries.length) {
-			this.listEl.createDiv({ cls: "unreader-toc-empty", text: "全库中还没有可收录的书籍（EPUB / AZW3 / MOBI / TXT / HTML）。若书在排除的文件夹里，可在 设置 → UNreader → 书架 调整。" });
+			this.listEl.createDiv({
+				cls: "unreader-toc-empty",
+				text: activeFilter === "all"
+					? "全库中还没有可收录的书籍（EPUB / AZW3 / MOBI / TXT / HTML）。若书在排除的文件夹里，可在 设置 → UNreader → 书架 调整。"
+					: "这个分类里还没有书。点书籍卡片右键（或右侧 ⋯ 按钮）可以移动分类。",
+			});
 			return;
 		}
 		this.listEl.toggleClass("is-manual", sortMode === "manual");
 		const pinned = entries.filter(entry => entry.pinned);
 		const regular = entries.filter(entry => !entry.pinned);
 		if (pinned.length) this.renderShelfGroup(pinned, "置顶", sortMode, currentPath);
-		this.renderShelfGroup(regular, pinned.length ? "全部书籍" : "", sortMode, currentPath);
+		this.renderShelfGroup(regular, pinned.length ? sourceLabel : "", sortMode, currentPath);
+	}
+
+	/** 书架分类选择按钮：交互与 RSS 的订阅源按钮同族，低频管理操作收进右侧面板。 */
+	private buildBookshelfCategoryButton(
+		toolbar: HTMLElement,
+		allEntries: BookshelfEntry[],
+		categories: BookshelfCategory[],
+		activeFilter: BookshelfCategoryFilter,
+		sourceLabel: string,
+	): void {
+		const button = toolbar.createEl("button", { cls: "unreader-feed-source-btn" });
+		button.setAttribute("aria-label", "选择书籍分类");
+		button.setAttribute("title", sourceLabel);
+		const icon = button.createSpan({ cls: "unreader-feed-source-icon" });
+		try { setIcon(icon, activeFilter === "all" ? "library" : "folder"); } catch { /* ignore */ }
+		button.createSpan({ cls: "unreader-feed-source-label", text: sourceLabel });
+		const chevron = button.createSpan({ cls: "unreader-feed-source-chevron" });
+		try { setIcon(chevron, "chevron-down"); } catch { /* ignore */ }
+		button.addEventListener("click", e => {
+			e.stopPropagation();
+			const menu = new Menu();
+			this.actions.onHoldAutoClose?.(true);
+			menu.addItem(item => item
+				.setTitle(`全部书籍 · ${allEntries.length}`)
+				.setIcon("library")
+				.setChecked(activeFilter === "all")
+				.onClick(() => this.actions.onBookshelfCategoryFilterChange?.("all")));
+			menu.addItem(item => item
+				.setTitle(`未分类 · ${allEntries.filter(entry => !entry.categoryId).length}`)
+				.setIcon("folder-minus")
+				.setChecked(activeFilter === "uncategorized")
+				.onClick(() => this.actions.onBookshelfCategoryFilterChange?.("uncategorized")));
+			if (categories.length) menu.addSeparator();
+			for (const category of categories) {
+				const count = allEntries.filter(entry => entry.categoryId === category.id).length;
+				menu.addItem(item => item
+					.setTitle(`${category.name} · ${count}`)
+					.setIcon("folder")
+					.setChecked(activeFilter === category.id)
+					.onClick(() => this.actions.onBookshelfCategoryFilterChange?.(category.id)));
+			}
+			menu.onHide(() => this.actions.onHoldAutoClose?.(false));
+			const rect = button.getBoundingClientRect();
+			menu.showAtPosition({ x: rect.left, y: rect.bottom + 4 });
+		});
+	}
+
+	private showBookshelfCardMenu(event: MouseEvent, entry: BookshelfEntry): void {
+		const menu = new Menu();
+		this.actions.onHoldAutoClose?.(true);
+		menu.addItem(item => item
+			.setTitle("未分类")
+			.setIcon("folder-minus")
+			.setChecked(!entry.categoryId)
+			.onClick(() => this.actions.onAssignBookCategory?.(entry.path, null)));
+		const categories = this.actions.getBookshelfCategories?.() ?? [];
+		for (const category of categories) {
+			menu.addItem(item => item
+				.setTitle(category.name)
+				.setIcon("folder")
+				.setChecked(entry.categoryId === category.id)
+				.onClick(() => this.actions.onAssignBookCategory?.(entry.path, category.id)));
+		}
+		menu.addSeparator();
+		menu.addItem(item => item
+			.setTitle("从书架移除")
+			.setIcon("eye-off")
+			.onClick(() => this.actions.onRemoveBookFromShelf?.(entry.path)));
+		menu.onHide(() => this.actions.onHoldAutoClose?.(false));
+		menu.showAtMouseEvent(event);
 	}
 
 	/** 重建第三板块。所有数据从缓存读取，不在这里发网络请求。 */
@@ -782,9 +895,18 @@ export class AnnotationsPanel {
 		if (entry.author) meta.createSpan({ text: entry.author });
 		if (entry.kind === "audio") meta.createSpan({ text: "播客" });
 		if (entry.enclosure?.duration) meta.createSpan({ text: formatMediaDuration(entry.enclosure.duration) });
-		if (entry.contentSource === "fulltext") meta.createSpan({ cls: "is-fulltext", text: "已抓取全文" });
+		if (entry.kind === "article") {
+			const quality = entryFeedContentQuality(entry);
+			if (entry.contentSource === "fulltext") meta.createSpan({ cls: "is-fulltext", text: "已抓取全文" });
+			else if (quality === "full") meta.createSpan({ cls: "is-fulltext", text: "Feed 全文" });
+			else if (quality === "summary") meta.createSpan({ cls: "is-summary", text: "仅摘要" });
+			else meta.createSpan({ cls: "is-summary", text: "无正文" });
+		}
 		if (entry.pendingContentHash) meta.createSpan({ cls: "is-updated", text: "正文有更新" });
-		if (entry.state.position?.fraction) meta.createSpan({ text: `已听/读 ${Math.round(entry.state.position.fraction * 100)}%` });
+		const progress = entry.kind === "audio"
+			? (entry.state.audioPosition ?? entry.state.position)
+			: entry.state.position;
+		if (progress?.fraction) meta.createSpan({ text: `已听/读 ${Math.round(progress.fraction * 100)}%` });
 
 		const cardActions = card.createDiv({ cls: "unreader-feed-card-actions" });
 		const read = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
@@ -810,7 +932,7 @@ export class AnnotationsPanel {
 				this.actions.onOpenOriginal?.(entry.url);
 			});
 		}
-		if (entry.kind === "article" && entry.contentSource !== "fulltext") {
+		if (entry.kind === "article" && !!entry.url && entry.contentSource !== "fulltext" && entryFeedContentQuality(entry) !== "full") {
 			const fulltext = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
 			fulltext.setAttribute("aria-label", "抓取网页全文");
 			try { setIcon(fulltext, "text-select"); } catch { fulltext.setText("全文"); }
@@ -824,7 +946,9 @@ export class AnnotationsPanel {
 		// 合成一枚会让「只想看看全文」的人凭空多出一堆笔记文件。
 		if (entry.kind === "article") {
 			const save = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
-			save.setAttribute("aria-label", entry.contentSource === "fulltext" ? "保存为笔记" : "抓取全文并保存为笔记");
+			save.setAttribute("aria-label", entry.contentSource === "fulltext" || entryFeedContentQuality(entry) === "full"
+				? "保存为笔记"
+				: "抓取全文并保存为笔记");
 			// setIcon 碰到不存在的图标名不会抛错、只是什么都不画（按钮会整个空白），
 			// 所以画完看一眼 DOM 再决定要不要退到文字兜底。
 			setIcon(save, "file-down");
@@ -835,53 +959,6 @@ export class AnnotationsPanel {
 			});
 		}
 
-		if (entry.kind === "audio" && entry.enclosure?.url) {
-			const audioRow = card.createDiv({ cls: "unreader-feed-audio" });
-			const audio = audioRow.createEl("audio", { cls: "unreader-feed-audio-player" });
-			audio.controls = true;
-			// 列表渲染不能替用户触发媒体元数据请求；点击播放后才加载远程音频。
-			audio.preload = "none";
-			audio.src = entry.enclosure.url;
-			const useCachedSource = async (): Promise<void> => {
-				if (!this.actions.onResolvePodcastUrl || !audio.isConnected) return;
-				const source = await this.actions.onResolvePodcastUrl(entry.enclosure!.url);
-				if (source && audio.isConnected && audio.getAttribute("src") !== source) audio.setAttribute("src", source);
-			};
-			const download = audioRow.createEl("button", { cls: "unreader-feed-download", text: this.actions.isPodcastDownloaded?.(entry.enclosure.url) ? "已缓存" : "下载" });
-			if (this.actions.isPodcastDownloaded?.(entry.enclosure.url)) void useCachedSource();
-			if (!this.actions.isPodcastDownloaded?.(entry.enclosure.url) && this.actions.onCheckPodcastDownloaded) {
-				void this.actions.onCheckPodcastDownloaded(entry.enclosure.url).then(cached => {
-					if (cached && download.isConnected) {
-						download.setText("已缓存");
-						void useCachedSource();
-					}
-				}).catch(() => undefined);
-			}
-			download.addEventListener("click", e => {
-				void (async (): Promise<void> => {
-					e.stopPropagation();
-					if (download.disabled) return;
-					download.disabled = true;
-					download.setText("下载中…");
-					const ok = await this.actions.onDownloadPodcast?.(entry.feedId, entry.id);
-					download.setText(ok ? "已缓存" : "下载失败");
-					download.disabled = false;
-					if (ok) void useCachedSource();
-				})();
-			});
-			if (entry.state.position?.anchor.startsWith("audio:")) {
-				const seconds = Number(entry.state.position.anchor.slice("audio:".length));
-				if (Number.isFinite(seconds) && seconds > 0) {
-					audio.addEventListener("loadedmetadata", () => {
-						try { audio.currentTime = Math.min(seconds, Math.max(0, audio.duration - 2)); } catch { /* ignore */ }
-					}, { once: true });
-				}
-			}
-			audio.addEventListener("timeupdate", () => {
-				if (!Number.isFinite(audio.currentTime) || audio.currentTime < 1) return;
-				this.actions.onPodcastProgress?.(entry.feedId, entry.id, audio.currentTime, Number.isFinite(audio.duration) ? audio.duration : (entry.enclosure?.duration ?? 0));
-			});
-		}
 		return card;
 	}
 
@@ -911,6 +988,11 @@ export class AnnotationsPanel {
 			this.setMode("annotations");
 			this.actions.onOpenBook?.(entry.path);
 		});
+		card.addEventListener("contextmenu", e => {
+			e.preventDefault();
+			e.stopPropagation();
+			this.showBookshelfCardMenu(e, entry);
+		});
 
 		if (sortMode === "manual") {
 			const drag = card.createDiv({ cls: "unreader-shelf-drag" });
@@ -924,7 +1006,16 @@ export class AnnotationsPanel {
 		const body = card.createDiv({ cls: "unreader-shelf-body" });
 		const head = body.createDiv({ cls: "unreader-shelf-head" });
 		const title = head.createDiv({ cls: "unreader-shelf-title", text: entry.name });
-		const pin = head.createDiv({ cls: "unreader-shelf-pin" });
+		const cardActions = head.createDiv({ cls: "unreader-shelf-card-actions" });
+		const more = cardActions.createDiv({ cls: "unreader-shelf-more" });
+		more.setAttribute("aria-label", "书籍操作");
+		more.setAttribute("title", "书籍操作");
+		try { setIcon(more, "ellipsis-vertical"); } catch { more.setText("⋯"); }
+		more.addEventListener("click", e => {
+			e.stopPropagation();
+			this.showBookshelfCardMenu(e, entry);
+		});
+		const pin = cardActions.createDiv({ cls: "unreader-shelf-pin" });
 		pin.toggleClass("is-active", entry.pinned);
 		pin.setAttribute("aria-label", entry.pinned ? "取消置顶" : "置顶书籍");
 		pin.setAttribute("title", entry.pinned ? "取消置顶" : "置顶书籍");
@@ -1045,6 +1136,14 @@ export class AnnotationsPanel {
 
 	/** 把现算页码写进书签行的页码胶囊；算不出（书未就绪/畸形 token）时整块隐藏。 */
 	private paintBookmarkPage(el: HTMLElement, anchor: string): void {
+		if (anchor.startsWith("audio:")) {
+			const seconds = Number(anchor.slice("audio:".length));
+			const label = formatMediaDuration(Number.isFinite(seconds) ? seconds : 0);
+			el.setText(label || "时间点");
+			el.setAttribute("aria-label", `播客时间点 ${label}`);
+			el.removeClass("is-hidden");
+			return;
+		}
 		let res: { page: number; total: number } | null = null;
 		try { res = this.actions.getPageForAnchor?.(anchor) ?? null; } catch { res = null; }
 		if (res && res.page > 0) {
@@ -1275,7 +1374,9 @@ export class AnnotationsPanel {
 	 * bookmarkPageEls，排版模型变化时靠 refreshPages 就地刷新。
 	 */
 	private bookmarkRow(b: StoredBookmark): HTMLElement {
+		const isAudioBookmark = b.anchor.startsWith("audio:");
 		const li = this.listEl.createEl("li", { cls: "unreader-anno-row unreader-anno-row--bookmark" });
+		li.toggleClass("is-audio-bookmark", isAudioBookmark);
 		li.toggleClass("is-stale", b.stale === true);
 
 		// 书签：单击直接跳转（Cmd/Ctrl+单击同样跳转），双击全选
@@ -1321,7 +1422,8 @@ export class AnnotationsPanel {
 		// 第一行：书签图标 + 名称
 		const head = li.createDiv({ cls: "unreader-anno-bm-head" });
 		const icon = head.createDiv({ cls: "unreader-anno-bm-icon" });
-		setIcon(icon, "bookmark");
+		setIcon(icon, isAudioBookmark ? "headphones" : "bookmark");
+		if (!icon.querySelector("svg")) icon.setText(isAudioBookmark ? "播" : "书");
 		const texts = head.createDiv({ cls: "unreader-anno-texts" });
 		if (b.stale) texts.createDiv({ cls: "unreader-anno-stale", text: "原文已更新，书签位置可能已变化" });
 		texts.createDiv({ cls: "unreader-anno-excerpt" }).setText(b.label || "书签");

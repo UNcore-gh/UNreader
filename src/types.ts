@@ -1,3 +1,5 @@
+import type { FeedContentQuality } from "./core/feedContentQuality";
+
 /**
  * Reader appearance. `null` means "follow the current Obsidian theme"
  * and gets resolved at runtime (matching reading-mode typography).
@@ -207,6 +209,16 @@ export interface BookPosition {
 
 export type BookshelfSortMode = "scan" | "recent" | "manual"
 
+/** 书架分类：路径级轻量元数据；一本书至多属于一个分类。 */
+export interface BookshelfCategory {
+	id: string
+	name: string
+	createdAt: number
+}
+
+/** 书架分类筛选值：`all` / `uncategorized` / 某个分类 id。 */
+export type BookshelfCategoryFilter = "all" | "uncategorized" | (string & {})
+
 /** 本地 HTML（网页原样通道）的**设备模式**：给 frame 一个固定的布局视口宽度，
  *  再把整页按比例缩放到阅读区宽度 —— 模拟「以这台设备打开这个网页」。
  *  `auto` = 不给固定视口，跟随阅读区宽度（老口径）。见 engineAdapter.setWebDevice。 */
@@ -220,6 +232,8 @@ export interface BookshelfEntry {
 	progress: number
 	updatedAt: number
 	pinned: boolean
+	/** 所属分类 id；缺省 / null = 未分类。 */
+	categoryId?: string | null
 }
 
 /** 当前阅读区的统一内容源。电子书继续使用真实文件路径，RSS 文章/播客使用稳定条目键。 */
@@ -259,6 +273,8 @@ export interface FeedEntryState {
 	starredAt: number | null
 	openedAt: number
 	position: BookPosition | null
+	/** 播客音频进度；与正文滚动位置分开保存，避免两者互相覆盖。 */
+	audioPosition?: BookPosition | null
 	/** 这篇文章是否已有高亮/书签；刷新时用于保护旧快照并等待重定位。 */
 	hasAnnotations?: boolean
 	stateUpdatedAt: number
@@ -278,10 +294,13 @@ export interface FeedEntry {
 	contentHtml: string
 	contentSource: "feed" | "fulltext"
 	contentHash: string
+	/** Feed 自带正文是否足以当全文；旧数据缺省时由 FeedStore 现算补齐。 */
+	contentQuality?: FeedContentQuality
 	/** 刷新拿到的新正文。已有标注时先暂存，打开文章完成重定位后再提升为当前正文。 */
 	pendingContentHtml?: string
 	pendingContentHash?: string
 	pendingContentSource?: "feed" | "fulltext"
+	pendingContentQuality?: FeedContentQuality
 	enclosure: FeedEnclosure | null
 	state: FeedEntryState
 }
@@ -302,6 +321,8 @@ export interface FeedFileData {
 export interface FeedSettings {
 	refreshOnOpen: boolean
 	markReadOnOpen: boolean
+	/** Feed 只给摘要时，打开文章是否自动尝试抓网页全文。 */
+	autoFulltext: boolean
 	loadRemoteImages: boolean
 	entryLimit: number
 	imageCacheMb: number
@@ -324,6 +345,12 @@ export interface UNreaderSettings {
 	bookshelfManualOrder: string[]
 	/** 置顶书籍路径。 */
 	bookshelfPinned: string[]
+	/** 书架自定义分类；删除分类时其书自动回到「未分类」。 */
+	bookshelfCategories: BookshelfCategory[]
+	/** 书籍路径 → 分类 id；没有记录 = 未分类。 */
+	bookshelfCategoryAssignments: Record<string, string>
+	/** 手动从书架移除的书籍路径；只影响列表，不删除文件、进度或标注。 */
+	bookshelfHiddenBooks: string[]
 	/** 书架（书籍管理侧边栏）与「打开书籍」列表要**排除的文件夹**（库内相对路径）。
 	 *
 	 *  命中者不出现在这两个列表里，**但文件本身不受任何影响**：文件树 / 链接 / 原生入口
@@ -371,6 +398,9 @@ export const DEFAULT_SETTINGS: UNreaderSettings = {
 	bookshelfSortMode: "scan",
 	bookshelfManualOrder: [],
 	bookshelfPinned: [],
+	bookshelfCategories: [],
+	bookshelfCategoryAssignments: {},
+	bookshelfHiddenBooks: [],
 	bookshelfExcludedFolders: [],
 	bookshelfFollowObsidianExclusions: true,
 	positions: {},
@@ -385,6 +415,7 @@ export const DEFAULT_SETTINGS: UNreaderSettings = {
 	feeds: {
 		refreshOnOpen: true,
 		markReadOnOpen: true,
+		autoFulltext: true,
 		loadRemoteImages: true,
 		entryLimit: 200,
 		imageCacheMb: 100,

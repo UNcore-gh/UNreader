@@ -3,6 +3,8 @@ import { extractFulltext, mergeExtractedArticles, type ExtractedArticle } from "
 import { fetchPageForExtraction, fetchParsedFeed, resolveFeedInput, type FeedResolution } from "./feedFetcher";
 import type { FeedStore } from "./feedStore";
 import { parseOpml, type ParsedOpmlFeed } from "./feedParser";
+import { entryFeedContentQuality } from "./feedContentQuality";
+import { stripHtml } from "./feedUtils";
 
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 30 * 60_000;
@@ -11,6 +13,11 @@ const MAX_FULLTEXT_PAGES = 3;
 const MIN_CONTINUATION_LENGTH = 200;
 /** 合并后正文的兜底上限：防止被"永远有下一页"的站点拖着无限抓。 */
 const MAX_FULLTEXT_TEXT_LENGTH = 300_000;
+/** 自动抓全文失败的安静期；避免用户每次点开同一篇都重复打一次站点。 */
+const AUTO_FULLTEXT_RETRY_MS = 10 * 60_000;
+/** 自动模式下的收益门槛：网页提取结果至少要比 Feed 摘要明显更长才替换。 */
+const AUTO_FULLTEXT_MIN_GAIN_RATIO = 1.2;
+const AUTO_FULLTEXT_MIN_TEXT_LENGTH = 240;
 
 export interface FeedRefreshResult {
 	feedId: string
@@ -23,6 +30,7 @@ export interface FeedRefreshResult {
 export class FeedService {
 	private inFlight = new Map<string, Promise<FeedRefreshResult>>();
 	private fulltextInFlight = new Map<string, Promise<FeedEntry | null>>();
+	private autoFulltextFailures = new Map<string, number>();
 	private retryAt = new Map<string, { at: number; attempt: number }>();
 	private closed = false;
 
@@ -168,12 +176,42 @@ export class FeedService {
 		}
 	}
 
-	async fetchFulltext(feedId: string, entryId: string): Promise<FeedEntry | null> {
+	/** Feed 只给标题/摘要时，打开文章自动走网页兜底。失败后短暂退避，
+	 *  且提取结果必须明显比摘要更丰富，避免把广告/验证页缓存成“全文”。 */
+	async autoFetchFulltext(feedId: string, entryId: string): Promise<FeedEntry | null> {
+		this.assertOpen();
+		const entry = this.store.getEntry(feedId, entryId);
+		if (!entry) return null;
+		if (this.getSettings().autoFulltext === false) return entry;
+		if (!this.needsFulltext(entry)) return entry;
+		const key = `${feedId}:${entryId}`;
+		const failedAt = this.autoFulltextFailures.get(key) ?? 0;
+		if (Date.now() - failedAt < AUTO_FULLTEXT_RETRY_MS) return entry;
+		try {
+			const updated = await this.fetchFulltext(feedId, entryId, { auto: true });
+			// 提取结果不够丰富时 doFetchFulltext 不落盘，但也不能让每次打开都重新打站点。
+			if (updated && this.needsFulltext(updated)) this.autoFulltextFailures.set(key, Date.now());
+			else this.autoFulltextFailures.delete(key);
+			return updated ?? entry;
+		} catch {
+			this.autoFulltextFailures.set(key, Date.now());
+			return entry;
+		}
+	}
+
+	needsFulltext(entry: FeedEntry): boolean {
+		return entry.kind === "article"
+			&& !!entry.url
+			&& entry.contentSource !== "fulltext"
+			&& entryFeedContentQuality(entry) !== "full";
+	}
+
+	async fetchFulltext(feedId: string, entryId: string, options?: { auto?: boolean }): Promise<FeedEntry | null> {
 		this.assertOpen();
 		const key = `${feedId}:${entryId}`;
 		const running = this.fulltextInFlight.get(key);
 		if (running) return running;
-		const run = this.doFetchFulltext(feedId, entryId);
+		const run = this.doFetchFulltext(feedId, entryId, options);
 		this.fulltextInFlight.set(key, run);
 		try {
 			return await run;
@@ -182,10 +220,18 @@ export class FeedService {
 		}
 	}
 
-	private async doFetchFulltext(feedId: string, entryId: string): Promise<FeedEntry | null> {
+	private async doFetchFulltext(feedId: string, entryId: string, options?: { auto?: boolean }): Promise<FeedEntry | null> {
 		const entry = this.store.getEntry(feedId, entryId);
 		if (!entry?.url) throw new Error("这篇文章没有可抓取的原文地址");
 		const extracted = await this.collectFulltext(entry.url);
+		// 自动兜底必须比已有摘要“值得换”；手动点“全文”仍按用户意图直接替换。
+		if (options?.auto) {
+			const beforeLength = stripHtml(entry.contentHtml || entry.summary).length;
+			if (extracted.text.length < AUTO_FULLTEXT_MIN_TEXT_LENGTH
+				|| extracted.text.length < beforeLength * AUTO_FULLTEXT_MIN_GAIN_RATIO) {
+				return entry;
+			}
+		}
 		return this.store.replaceEntryContent(feedId, entryId, extracted.html, extracted.hash, {
 			title: extracted.title,
 			author: extracted.byline,
@@ -234,6 +280,7 @@ export class FeedService {
 		this.closed = true;
 		this.inFlight.clear();
 		this.fulltextInFlight.clear();
+		this.autoFulltextFailures.clear();
 		this.retryAt.clear();
 	}
 }

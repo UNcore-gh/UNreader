@@ -65,6 +65,23 @@
 	/* 浮动按钮框/目录条尺寸基准：外观设置「按钮/目录条大小」倍率（railScale），
 	   下文相关组件尺寸一律 calc(<设计px> * var(--ur-u)) */
 	--ur-u: calc(var(--unreader-rail-scale, 1) * 1px);
+	/* 左右两条浮动轨共用同一个宽度基准；目录面板另按同一倍率放大到可读宽度。 */
+	--ur-float-rail-w: calc(32 * var(--ur-u));
+	/* 手机悬浮页首可见时，灯绳要从按钮顶边延伸到页首下缘之后；页首滑走时
+	   avoid=0，grip-top 自动回到常规长度 30u。avoid 由 readerView.syncProgressTop
+	   按实测几何写入；grip-top 同时供竖线末端和第一横线上沿使用，保证两者精确相接。 */
+	--ur-immersion-switch-avoid: 0px;
+	--ur-immersion-switch-left: calc(env(safe-area-inset-left, 0px) + calc(9 * var(--ur-u)));
+	--ur-immersion-switch-stem-top: 0px;
+	--ur-immersion-switch-bar-height: calc(1.8 * var(--ur-u));
+	--ur-immersion-switch-bar-gap: calc(2.7 * var(--ur-u));
+	--ur-immersion-switch-bar-step: calc(
+		var(--ur-immersion-switch-bar-height) + var(--ur-immersion-switch-bar-gap)
+	);
+	--ur-immersion-switch-grip-top: max(
+		calc(30 * var(--ur-u)),
+		calc(var(--ur-immersion-switch-avoid) + 2 * var(--ur-u))
+	);
 	/* 工具栏半隐藏时，浮动目录短横轨的淡化档位（桌面 0.3；触屏在
 	   @media (hover:none) 里抬到 0.4，那里没有 hover 恢复路径）。
 	   用法见下方「工具栏半隐藏 → 浮动目录条同步加深淡化」段。 */
@@ -218,11 +235,11 @@
 .unreader-root .unreader-immersion-switch.mobile-tap {
 	position: absolute;
 	top: var(--ur-immersion-switch-top, calc(var(--view-header-top-offset, 0px) + var(--view-header-height, 48px)));
-	left: calc(env(safe-area-inset-left, 0px) + calc(9 * var(--ur-u)));
+	left: var(--ur-immersion-switch-left, calc(env(safe-area-inset-left, 0px) + calc(9 * var(--ur-u))));
 	z-index: 61;
 	display: none;
-	width: calc(22 * var(--ur-u));
-	height: calc(27 * var(--ur-u));
+	width: calc(26 * var(--ur-u));
+	height: calc(var(--ur-immersion-switch-grip-top) + 3 * var(--ur-immersion-switch-bar-step));
 	margin: 0;
 	padding: 0;
 	border: 0 !important;
@@ -238,7 +255,8 @@
 	touch-action: manipulation;
 	line-height: 0;
 	overflow: visible;
-	transition: top 0.3s ease-in-out, color 0.15s ease;
+	pointer-events: none;
+	transition: top 0.3s ease-in-out, left 0.3s ease-in-out, height 0.3s ease-in-out, color 0.15s ease;
 }
 .unreader-root .unreader-immersion-switch::before,
 .unreader-root .unreader-immersion-switch::after {
@@ -262,6 +280,16 @@
 	opacity: 0.46;
 	transition: opacity 0.15s ease;
 }
+/* 只把底部灯绳结这一小段做成可点击区：动态延长时上半段仍是透明、不可点，
+   不会跨在悬浮页首按钮上抢走触摸事件。点击冒泡到父级 button，键盘焦点也仍在 button 上。 */
+.unreader-immersion-switch-hit {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
+	height: calc(18 * var(--ur-u));
+	pointer-events: auto;
+}
 .unreader-immersion-switch-stem,
 .unreader-immersion-switch-bar-mid,
 .unreader-immersion-switch-bar-long,
@@ -273,24 +301,28 @@
 	transform: translateX(-50%);
 }
 .unreader-immersion-switch-stem {
-	top: 0;
-	width: calc(1.5 * var(--ur-u));
-	height: calc(13.5 * var(--ur-u));
+	top: var(--ur-immersion-switch-stem-top);
+	width: calc(1.8 * var(--ur-u));
+	height: calc(var(--ur-immersion-switch-grip-top) - var(--ur-immersion-switch-stem-top));
+	transition: top 0.3s ease-in-out, height 0.3s ease-in-out;
 }
 .unreader-immersion-switch-bar-mid {
-	top: calc(12 * var(--ur-u));
-	width: calc(7.5 * var(--ur-u));
-	height: calc(1.5 * var(--ur-u));
+	top: var(--ur-immersion-switch-grip-top);
+	width: calc(8.5 * var(--ur-u));
+	height: var(--ur-immersion-switch-bar-height);
+	transition: top 0.3s ease-in-out;
 }
 .unreader-immersion-switch-bar-long {
-	top: calc(17.5 * var(--ur-u));
-	width: calc(10 * var(--ur-u));
-	height: calc(1.5 * var(--ur-u));
+	top: calc(var(--ur-immersion-switch-grip-top) + var(--ur-immersion-switch-bar-step));
+	width: calc(11.5 * var(--ur-u));
+	height: var(--ur-immersion-switch-bar-height);
+	transition: top 0.3s ease-in-out;
 }
 .unreader-immersion-switch-bar-short {
-	top: calc(23 * var(--ur-u));
-	width: calc(5 * var(--ur-u));
-	height: calc(1.5 * var(--ur-u));
+	top: calc(var(--ur-immersion-switch-grip-top) + 2 * var(--ur-immersion-switch-bar-step));
+	width: calc(5.7 * var(--ur-u));
+	height: var(--ur-immersion-switch-bar-height);
+	transition: top 0.3s ease-in-out;
 }
 .unreader-root .unreader-immersion-switch:hover .unreader-immersion-switch-pull,
 .unreader-root .unreader-immersion-switch.is-on .unreader-immersion-switch-pull {
@@ -595,6 +627,14 @@ body.is-tablet .view-header.unreader-header-hidden {
 	   **页首滑走的过程本身就是揭示过程**。 */
 }
 
+/* 钉住态：stage 已经是 body 的 flex 子项，不能再只给 stage 写负 top（那会变成
+   整块阅读区下移，侧栏面板还留在下面）。把让位提到 body 这一层，正文和侧栏
+   整行一起收回页首占位；body 自己带阅读区底色，收回后不会露出背景板。
+   页首可见时 --ur-header-hole 为 0，这条自动退化为无位移。 */
+.unreader-root > .unreader-body.is-pinned {
+	top: calc(-1 * var(--ur-hole-px, var(--ur-header-hole, 0px)));
+}
+
 /* 让位后 stage 会伸到 `.unreader-body` 盒子**上方** 36px，而 body 自己的
    `overflow: hidden`（立它是为了裁半隐藏的功能轨 / 面板入场动画）会把那一段裁掉 ——
    **两端都放开**（2026-09-14；旧写法只放开桌面端，若移动端页首其实占位，让位会被这里
@@ -758,10 +798,13 @@ body .unreader-body {
 	top: 50%;
 	bottom: auto;
 	transform: translateY(-50%);
-	max-height: min(75%, calc(100% - 160px));
-	width: calc(32 * var(--ur-u));
-	min-width: calc(32 * var(--ur-u));
-	max-width: calc(32 * var(--ur-u));
+	max-height: var(--ur-nav-max-height, min(75%, calc(100% - 160px)));
+	width: var(--ur-float-rail-w);
+	min-width: var(--ur-float-rail-w);
+	max-width: var(--ur-float-rail-w);
+	box-sizing: border-box;
+	margin-top: var(--ur-nav-center-shift, 0px);
+	min-height: 0;
 	padding: 0;
 	display: flex;
 	flex-direction: column;
@@ -1047,8 +1090,8 @@ body .unreader-body {
 	   但主题可能改掉它，一旦退回 content-box，面板就会比轨高出上下各 4px 的内边距，
 	   那两条带里又出现死区（本轮夹具正是这么把它抓出来的）。 */
 	box-sizing: border-box;
-	min-width: 176px;
-	max-width: min(280px, calc(100vw - 60px));
+	min-width: calc(176 * var(--ur-u));
+	max-width: min(calc(280 * var(--ur-u)), calc(100vw - 60px));
 	max-height: var(--ur-nav-panel-max);
 	overflow-y: auto;
 	overscroll-behavior: contain;
@@ -2156,7 +2199,8 @@ body:not(.is-phone) .unreader-continuous {
 .unreader-selection-toolbar,
 .unreader-highlight-popover {
 	position: absolute;
-	z-index: 30;
+	/* 播客底部播放条是 70；划线工具条必须在其上，否则会被盖住。 */
+	z-index: 80;
 	display: flex;
 	flex-direction: column;
 	align-items: stretch;
@@ -2360,6 +2404,11 @@ body.is-phone .unreader-anno-resize-w {
 	box-shadow: 8px 0 32px rgba(0, 0, 0, 0.08), 2px 0 8px rgba(0, 0, 0, 0.06);
 }
 
+.unreader-anno-panel.is-immersion-hidden {
+	display: none;
+	pointer-events: none;
+}
+
 .theme-dark .unreader-anno-panel {
 	background-color: var(--background-secondary);
 	border-right: 1px solid var(--background-modifier-border);
@@ -2501,17 +2550,56 @@ body.is-tablet .unreader-anno-panel {
 	align-items: center;
 	justify-content: space-between;
 	gap: 8px;
-	margin: 2px 8px 9px;
+	margin: 8px 8px 9px;
 	padding: 0 2px;
 }
 
-.unreader-shelf-summary {
-	min-width: 0;
-	font-size: var(--font-ui-smaller);
+.unreader-shelf-actions {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: center;
+	gap: 5px;
+}
+
+.unreader-shelf-manager {
+	width: 26px;
+	height: 28px;
+}
+
+.unreader-shelf-card-actions {
+	display: flex;
+	flex: 0 0 auto;
+	align-items: flex-start;
+	gap: 1px;
+	margin: -3px -3px 0 0;
+}
+
+.unreader-shelf-more {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	width: 25px;
+	height: 25px;
+	border-radius: 6px;
 	color: var(--text-faint);
-	white-space: nowrap;
-	overflow: hidden;
-	text-overflow: ellipsis;
+	cursor: pointer;
+	opacity: 0.62;
+	transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
+}
+
+.unreader-shelf-card:hover .unreader-shelf-more,
+.unreader-shelf-more:hover {
+	opacity: 1;
+}
+
+.unreader-shelf-more:hover {
+	background: var(--background-modifier-hover);
+	color: var(--text-normal);
+}
+
+.unreader-shelf-more .svg-icon {
+	width: 14px;
+	height: 14px;
 }
 
 .unreader-shelf-sort {
@@ -2689,7 +2777,6 @@ body.is-tablet .unreader-anno-panel {
 	justify-content: center;
 	width: 25px;
 	height: 25px;
-	margin: -3px -3px 0 0;
 	border-radius: 6px;
 	color: var(--text-faint);
 	cursor: pointer;
@@ -2807,7 +2894,8 @@ body.is-tablet .unreader-anno-panel {
    它们天生跟随主题，深色下**不需要**再各自写一遍 —— 写一遍就是上面那场故障）。 */
 
 @media (hover: none) {
-	.unreader-shelf-pin {
+	.unreader-shelf-pin,
+	.unreader-shelf-more {
 		opacity: 0.86;
 	}
 }
@@ -3488,50 +3576,15 @@ body.is-mobile .unreader-kb-safe .modal {
 	background-color: var(--background-modifier-hover);
 }
 
-/* 返回上一位置：右下角悬浮图标钮，无底无框仅图标；智能显隐（跳转后出现，滑动满 3 页 + 3 秒后隐藏） */
+/* 回到之前阅读：常驻左侧工具栏。平时黑色；有可跳回位置时用工具栏统一的高亮色。 */
 .unreader-back-btn {
-	position: absolute;
-	left: 8px;
-	bottom: 49px;
-	width: 34px;
-	height: 34px;
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	z-index: 16;
-	pointer-events: none;
-	background: transparent;
-	border: none;
-	border-radius: 0;
-	box-shadow: none;
-	color: var(--text-muted);
+	color: var(--text-normal);
 	cursor: pointer;
-	opacity: 0;
-	transform: scale(0.9);
-	transition: opacity 0.2s ease, transform 0.2s ease, color 0.15s ease;
 }
 
-.unreader-back-btn.is-visible {
-	opacity: 0.65;
-	pointer-events: auto;
-	transform: scale(1);
-}
-
-.unreader-back-btn.is-visible:hover {
-	opacity: 1;
-	transform: scale(1.08);
-	color: var(--icon-color-hover);
-}
-
-.unreader-back-btn.is-hidden {
-	opacity: 0;
-	pointer-events: none;
-	transform: scale(0.9);
-}
-
-.unreader-back-btn .svg-icon {
-	width: 20px;
-	height: 20px;
+.unreader-actions .unreader-back-btn.is-active {
+	color: var(--text-accent);
+	background-color: var(--ur-accent-soft, color-mix(in srgb, var(--interactive-accent) 14%, transparent));
 }
 
 /* 左侧边功能按钮排：半隐藏于左缘（垂直居中），仅露出右缘细条，悬停整排滑入；
@@ -3549,9 +3602,15 @@ body.is-mobile .unreader-kb-safe .modal {
 	align-items: center;
 	gap: calc(2 * var(--ur-u));
 	padding: calc(3 * var(--ur-u));
-	width: auto;
-	min-width: calc(32 * var(--ur-u));
-	max-width: calc(48 * var(--ur-u));
+	width: var(--ur-float-rail-w);
+	min-width: var(--ur-float-rail-w);
+	max-width: var(--ur-float-rail-w);
+	box-sizing: border-box;
+	/* 轨道仍用 top:50% + translateY(-50%) 定位；这个 margin 只负责把它的中心
+	   从阅读区中心移到「沉浸按钮底边 ↔ 播客条顶边」这段真实可用区的中心。 */
+	margin-top: var(--ur-actions-center-shift, 0px);
+	min-height: 0;
+	max-height: var(--ur-actions-max-height, calc(100% - 48px));
 	pointer-events: auto;
 	background-color: var(--background-secondary);
 	border: 1px solid var(--background-modifier-border);
@@ -3563,6 +3622,10 @@ body.is-mobile .unreader-kb-safe .modal {
 	/* 与官方移动端 chrome 同节奏：opacity 0.2s / transform 0.3s ease-in-out
 	   （`.is-phone .view-header`、`.mobile-navbar`）。此前是 220ms —— 滑动显隐时
 	   功能轨比原生底栏早到 80ms，读起来是「两拨东西各自动」。 */
+	/* margin-top 承载「可用区中心偏移」。它必须和 transform 同步过渡：
+	   页首滑下时可用区中心会下移，若 margin-top 瞬时跳变，
+	   工具栏看起来就是「向右下窜」而不是水平滑入。 */
+	/* margin-top 不参与过渡：点按唤出时工具栏只向右滑出，纵向直接落在最终避让位。 */
 	transition: opacity 0.2s ease-in-out, transform 0.3s ease-in-out, left 0.3s ease-in-out, box-shadow 0.15s ease;
 }
 
@@ -3706,7 +3769,7 @@ body.is-mobile .unreader-kb-safe .modal {
 	display: none;
 	width: auto;
 	min-width: calc(16 * var(--ur-u));
-	max-width: calc(42 * var(--ur-u));
+	max-width: calc(24 * var(--ur-u));
 	padding: 0 2px;
 	box-sizing: border-box;
 	font-size: calc(10 * var(--ur-u));
@@ -4540,17 +4603,18 @@ body.is-tablet .unreader-search {
 	max-width: 100%;
 	height: 30px;
 	padding: 0 9px;
-	border: 1px solid var(--background-modifier-border);
+	border: none;
 	border-radius: 7px;
-	background: var(--background-primary);
+	background-color: var(--ur-feed-btn-bg, rgba(255, 255, 255, 0.82));
 	color: var(--text-muted);
 	font-size: 0.78em;
-	box-shadow: none;
+	box-shadow: var(--ur-feed-btn-shadow, 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07));
 }
 
 .unreader-feed-source-btn:hover:not(:disabled) {
 	color: var(--text-normal);
-	background: var(--background-modifier-hover);
+	background-color: var(--ur-feed-btn-bg-hover, #ffffff);
+	box-shadow: var(--ur-feed-btn-shadow-hover, 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1));
 }
 
 .unreader-feed-source-btn:disabled {
@@ -4610,6 +4674,17 @@ body.is-tablet .unreader-search {
 	background: var(--background-modifier-hover);
 }
 
+.unreader-feed-action .svg-icon {
+	width: 14px;
+	height: 14px;
+}
+
+body.is-phone .unreader-feed-action .svg-icon,
+body.is-tablet .unreader-feed-action .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
 .unreader-feed-filter {
 	display: grid;
 	grid-template-columns: repeat(3, minmax(0, 1fr));
@@ -4620,18 +4695,19 @@ body.is-tablet .unreader-search {
 .unreader-feed-filter-btn {
 	height: 30px;
 	padding: 0 9px;
-	border: 1px solid var(--background-modifier-border);
+	border: none;
 	border-radius: 7px;
-	background: var(--background-primary);
+	background-color: var(--ur-feed-btn-bg, rgba(255, 255, 255, 0.82));
 	color: var(--text-muted);
 	font-size: 0.78em;
-	box-shadow: none;
+	box-shadow: var(--ur-feed-btn-shadow, 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07));
 }
 
 .unreader-feed-filter-btn.is-active {
-	border-color: color-mix(in srgb, var(--interactive-accent) 56%, var(--background-modifier-border));
-	background: color-mix(in srgb, var(--interactive-accent) 14%, var(--background-primary));
-	color: var(--text-normal);
+	background-color: var(--ur-feed-btn-bg-active, color-mix(in srgb, #ffffff 90%, var(--interactive-accent) 10%));
+	color: var(--text-accent);
+	font-weight: 600;
+	box-shadow: var(--ur-feed-btn-shadow-hover, 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1));
 }
 
 .unreader-shelf-sort {
@@ -4663,8 +4739,8 @@ body.is-tablet .unreader-search {
 }
 
 .unreader-feed-manager-bar-icon .svg-icon {
-	width: 15px;
-	height: 15px;
+	width: 14px;
+	height: 14px;
 }
 
 .unreader-feed-manager-list .setting-item {
@@ -4819,6 +4895,10 @@ body.is-tablet .unreader-search {
 	color: var(--text-accent);
 }
 
+.unreader-feed-card-meta .is-summary {
+	color: var(--text-faint);
+}
+
 .unreader-feed-card-meta .is-updated {
 	color: var(--text-warning, var(--color-orange));
 }
@@ -4832,23 +4912,49 @@ body.is-tablet .unreader-search {
 	border-top: 1px solid color-mix(in srgb, var(--background-modifier-border) 68%, transparent);
 }
 
-.unreader-feed-inline-action {
+.unreader-feed-card .unreader-feed-inline-action {
 	display: inline-flex;
 	align-items: center;
 	justify-content: center;
-	width: 27px;
-	height: 27px;
+	width: 28px;
+	height: 28px;
 	padding: 0;
+	appearance: none;
+	-webkit-appearance: none;
 	border: 0;
 	border-radius: 6px;
 	background: transparent;
-	color: var(--text-faint);
 	box-shadow: none;
+	color: var(--text-faint);
+	transition: color 0.15s ease, transform 0.1s ease;
 }
 
-.unreader-feed-inline-action:hover {
-	background: var(--background-modifier-hover);
-	color: var(--text-normal);
+.unreader-feed-card .unreader-feed-inline-action:hover {
+	border: 0;
+	background: transparent;
+	box-shadow: none;
+	color: var(--text-accent);
+}
+
+.unreader-feed-card .unreader-feed-inline-action:active {
+	transform: scale(0.92);
+}
+
+.unreader-feed-card .unreader-feed-inline-action .svg-icon {
+	width: 15px;
+	height: 15px;
+}
+
+body.is-phone .unreader-feed-card .unreader-feed-inline-action,
+body.is-tablet .unreader-feed-card .unreader-feed-inline-action {
+	width: 32px;
+	height: 32px;
+}
+
+body.is-phone .unreader-feed-card .unreader-feed-inline-action .svg-icon,
+body.is-tablet .unreader-feed-card .unreader-feed-inline-action .svg-icon {
+	width: 17px;
+	height: 17px;
 }
 
 .unreader-feed-inline-action .svg-icon {
@@ -4876,6 +4982,378 @@ body.is-tablet .unreader-search {
 	border-radius: 7px;
 	font-size: 0.72em;
 	white-space: nowrap;
+}
+
+/* 通用悬浮按钮：无边框、半透明近白面、柔和投影。
+   以后 RSS/播客等“浮在内容上”的次级按钮统一加 .unreader-surface-btn，
+   避免各组件各写一套、又在 Obsidian 原生 button 皮肤上出现内描边。 */
+.unreader-surface-btn {
+	border: none !important;
+	background-color: var(--ur-feed-btn-bg, rgba(255, 255, 255, 0.82)) !important;
+	box-shadow: var(--ur-feed-btn-shadow, 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07)) !important;
+	color: var(--text-muted);
+	font-weight: 500;
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+	transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
+}
+
+.unreader-surface-btn:hover:not(:disabled) {
+	background-color: var(--ur-feed-btn-bg-hover, #ffffff) !important;
+	box-shadow: var(--ur-feed-btn-shadow-hover, 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1)) !important;
+	color: var(--text-normal);
+}
+
+.unreader-surface-btn:disabled {
+	opacity: 0.58;
+}
+
+.unreader-surface-btn:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: 2px;
+}
+
+/* 播客播放条：浮在阅读区底部，圆角矩形胶囊形态。
+   上排一条进度条，下排左边是按钮组、右边是时间数字。
+   左右不贴边并读取安全区；手机等窄屏时下排按钮可横向滑动。
+   bottom 读取现有原生底栏让位量，手机有悬浮导航/底部控制栏时自动抬到它上方。 */
+.unreader-podcast-bar {
+	display: none;
+	position: absolute;
+	left: max(calc(8 * var(--ur-u)), env(safe-area-inset-left, 0px));
+	right: max(calc(8 * var(--ur-u)), env(safe-area-inset-right, 0px));
+	bottom: calc(max(var(--ur-bottom-inset, 0px), env(safe-area-inset-bottom, 0px)) + calc(8 * var(--ur-u)));
+	z-index: 70;
+	flex-direction: column;
+	align-items: stretch;
+	gap: calc(5 * var(--ur-u));
+	padding: calc(8 * var(--ur-u)) calc(13 * var(--ur-u));
+	/* 背景/边框/阴影与左侧浮动工具栏（.unreader-actions）完全一致：
+	   同一套底色、同一条边框、同一组投影，视觉上属于同一个控件家族。 */
+	background-color: var(--background-secondary);
+	border: 1px solid var(--background-modifier-border);
+	border-radius: calc(17 * var(--ur-u));
+	box-shadow:
+		0 2px 8px rgba(0, 0, 0, 0.10),
+		0 8px 18px rgba(0, 0, 0, 0.08);
+	box-sizing: border-box;
+	pointer-events: auto;
+}
+
+.unreader-root.has-book.has-podcast .unreader-podcast-bar {
+	display: flex;
+}
+
+/* 音频本体不显示原生控件，只作为播放引擎；界面由下面两行控件表达。 */
+.unreader-podcast-audio {
+	display: none;
+}
+
+.unreader-podcast-progress-row,
+.unreader-podcast-controls-row {
+	width: 100%;
+	min-width: 0;
+}
+
+.unreader-podcast-progress-row {
+	display: flex;
+	align-items: center;
+	height: calc(19 * var(--ur-u));
+}
+
+.unreader-podcast-controls-row {
+	display: flex;
+	align-items: center;
+	justify-content: flex-start;
+	flex-wrap: nowrap;
+	width: 100%;
+	min-width: 0;
+	min-height: calc(28 * var(--ur-u));
+	gap: calc(8 * var(--ur-u));
+}
+
+/* 固定的播放按钮：不随滚动移动，始终在最左边 */
+.unreader-podcast-control.is-pinned {
+	flex: 0 0 auto;
+	color: var(--text-accent);
+}
+
+.unreader-podcast-control.is-pinned .svg-icon {
+	width: calc(16 * var(--ur-u));
+	height: calc(16 * var(--ur-u));
+}
+
+/* 中间可滚动按钮组：快退/快进/倍速/定时/标记/下载 */
+.unreader-podcast-btns {
+	display: flex;
+	align-items: center;
+	flex: 1 1 auto;
+	min-width: 0;
+	gap: calc(12 * var(--ur-u));
+	overflow-x: auto;
+	overscroll-behavior-x: contain;
+	scrollbar-width: none;
+	-webkit-overflow-scrolling: touch;
+	touch-action: pan-x;
+	scroll-snap-type: x proximity;
+}
+
+.unreader-podcast-btns::-webkit-scrollbar {
+	display: none;
+}
+
+/* 右侧时间组：固定在最右边，不参与滚动 */
+.unreader-podcast-time-group {
+	display: flex;
+	align-items: center;
+	flex: 0 0 auto;
+	gap: calc(4 * var(--ur-u));
+}
+
+body:not(.is-phone):not(.is-tablet) .unreader-podcast-progress-row,
+body:not(.is-phone):not(.is-tablet) .unreader-podcast-controls-row {
+	padding-inline: 4px;
+}
+
+.unreader-podcast-seek {
+	/* Obsidian 的 input[type=range] 默认规则有更高特异性，会把滑轨压回
+	   固定小宽度；这里必须把类型选择器一起抬上去，否则桌面端只剩一小段。 */
+	flex: 1 1 auto;
+	width: 100% !important;
+	min-width: 0;
+	margin: 0;
+	height: calc(19 * var(--ur-u));
+	accent-color: var(--interactive-accent);
+	cursor: pointer;
+}
+
+.unreader-podcast-time {
+	flex: 0 0 auto;
+	min-width: 0;
+	color: var(--text-muted);
+	font-size: max(11px, calc(11 * var(--ur-u)));
+	font-variant-numeric: tabular-nums;
+	white-space: nowrap;
+	line-height: 1;
+	/* 时间数字可点击（弹出跳转输入框），给出手型与悬停反馈 */
+	cursor: pointer;
+	border-radius: 4px;
+	padding: 1px 3px;
+	transition: color 0.12s ease, background-color 0.12s ease;
+}
+
+.unreader-podcast-time:hover {
+	color: var(--text-normal);
+	background-color: var(--background-modifier-hover);
+}
+
+.unreader-podcast-time-sep {
+	flex: 0 0 auto;
+	color: var(--text-faint);
+	line-height: 1;
+	user-select: none;
+}
+
+.unreader-podcast-control,
+.unreader-podcast-download {
+	display: flex;
+	align-items: center;
+	justify-content: center;
+	flex: 0 0 auto;
+	width: calc(23 * var(--ur-u));
+	height: calc(23 * var(--ur-u));
+	padding: 0;
+	/* 纯图标：不用悬浮按钮面，也不再显示任何可见的按钮底块。 */
+	appearance: none;
+	-webkit-appearance: none;
+	border: none !important;
+	background-color: transparent !important;
+	box-shadow: none !important;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	border-radius: 50%;
+	color: var(--text-muted);
+	font-size: 0.72em;
+	white-space: nowrap;
+	cursor: pointer;
+	scroll-snap-align: start;
+}
+
+.unreader-podcast-control:hover:not(:disabled),
+.unreader-podcast-download:hover:not(:disabled) {
+	color: var(--text-normal);
+}
+
+.unreader-podcast-control.is-active {
+	color: var(--text-accent);
+}
+
+/* 倍速不是图标，而是当前值本身；点击后数字变化就是明确反馈。 */
+.unreader-podcast-control.is-speed {
+	width: auto;
+	min-width: max(36px, calc(34 * var(--ur-u)));
+	padding: 0 calc(6 * var(--ur-u));
+	border-radius: 999px;
+	color: var(--text-accent);
+	font-size: max(12px, calc(12 * var(--ur-u)));
+	font-weight: 650;
+	letter-spacing: 0.01em;
+}
+
+.unreader-podcast-control.is-cached,
+.unreader-podcast-download.is-cached {
+	color: var(--text-accent);
+}
+
+.unreader-podcast-control .svg-icon,
+.unreader-podcast-download .svg-icon {
+	width: max(15px, calc(16 * var(--ur-u)));
+	height: max(15px, calc(16 * var(--ur-u)));
+	flex: 0 0 auto;
+}
+
+/* 底部播放条会盖住正文/侧栏最后一段，给两者补足可滚到播放条上方的空间；
+   除播放条自身高度外，再计入它离底边的 8px 悬浮间距。 */
+.unreader-root.has-podcast .unreader-continuous {
+	padding-bottom: calc(6em + 84 * var(--ur-u) + max(var(--ur-bottom-inset, 0px), env(safe-area-inset-bottom, 0px)));
+}
+
+.unreader-root.has-podcast .unreader-anno-panel .unreader-toc-scroll {
+	padding-bottom: calc(max(18px, env(safe-area-inset-bottom, 0px)) + 84 * var(--ur-u) + var(--ur-bottom-inset, 0px));
+}
+
+/* ---------- 浮动元素智能避让系统 v6 · 精准实测版 ----------
+ *
+ * 核心思路：
+ *   · JS 在 syncProgressTop 里实测「沉浸按钮底部」和「播客条顶部」，
+ *     算出精确的可用高度，写成 CSS 变量 --ur-actions-max-height。
+ *   · 工具栏和右侧目录条直接读这个变量，
+ *     从一开始就刚好填满可用空间，不会重叠，也不会空一大截。
+ *   · 顶部/底部各留 8px 呼吸位，刚好接触但不压在一起。
+ *
+ * JS 写入的变量（在 .unreader-root 上）：
+ *   --ur-actions-max-height   工具栏可用高度（像素）
+ *   --ur-actions-max-pct      工具栏可用高度（百分比，相对 body 高）
+ *   --ur-nav-max-height       右侧目录条可用高度（像素）
+ *   --ur-nav-max-pct          右侧目录条可用高度（百分比）
+ * ------------------------------------------------------------------ */
+
+/* 左缘功能轨与播客条共用同一套半透明玻璃面、模糊和投影。
+   放在所有主题覆写之后，用 root 子树提高特异性，避免浅色/深色规则各写一套后再次漂移。 */
+body .unreader-root .unreader-actions,
+body .unreader-root .unreader-actions:hover,
+body .unreader-root .unreader-actions.is-expanded,
+body .unreader-root .unreader-podcast-bar {
+	background-color: var(--ur-float-surface);
+	border: none;
+	box-shadow: var(--ur-panel-shadow);
+	backdrop-filter: var(--ur-float-blur);
+	-webkit-backdrop-filter: var(--ur-float-blur);
+}
+
+/* ===== 1. 底部播客播放条 vs 左侧目录面板 ===== */
+.unreader-anno-panel.is-open ~ .unreader-stage .unreader-podcast-bar {
+	left: calc(var(--ur-anno-w) + max(8px, env(safe-area-inset-left, 0px)));
+}
+
+/* ===== 2. 左上角沉浸退出按钮 vs 左侧目录面板 ===== */
+.unreader-root.is-full-immersion .unreader-anno-panel.is-open ~ .unreader-stage .unreader-immersion-switch {
+	left: calc(var(--ur-anno-w) + env(safe-area-inset-left, 0px) + calc(9 * var(--ur-u)));
+}
+
+/* ===== 3. 左侧浮动工具栏（actions）：用 JS 算出的精确高度 =====
+   --ur-actions-max-height 是 JS 实测出来的，
+   内容超出时内部面板滚动，整体不会溢出撞到上下元素。 */
+
+.unreader-actions {
+	/* 默认值：JS 还没算出来时的兜底，和以前行为一致 */
+	max-height: var(--ur-actions-max-height, calc(100% - 48px));
+}
+
+/* 按钮区内部支持上下滑动；滚动条隐藏，间距保持不变 */
+.unreader-actions-panel {
+	overflow-y: auto;
+	overflow-x: hidden;
+	scrollbar-width: none;
+	-webkit-overflow-scrolling: touch;
+	touch-action: pan-y;
+	padding-top: calc(2 * var(--ur-u));
+	padding-bottom: calc(2 * var(--ur-u));
+	flex: 1 1 auto;
+	min-height: 0;
+	max-height: max(0px, calc(var(--ur-actions-max-height, calc(100% - 48px)) - calc(30 * var(--ur-u))));
+}
+
+.unreader-actions-panel::-webkit-scrollbar {
+	display: none;
+}
+
+/* 极端窄窗/横屏：上下 UI 已经挤到没有一条按钮的空间时，隐藏浮动轨道，
+   避免边框和内容以 6~8px 的残余高度继续压住上下元素。 */
+.unreader-root.is-floating-cramped .unreader-actions,
+.unreader-root.is-floating-cramped .unreader-nav-nodes,
+.unreader-root.is-floating-cramped .unreader-nav-panel {
+	opacity: 0 !important;
+	visibility: hidden !important;
+	pointer-events: none !important;
+}
+
+/* ===== 4. 右侧章节短横轨（nav-nodes）：同样用精确高度 ===== */
+
+.unreader-nav-nodes {
+	max-height: var(--ur-nav-max-height, min(75%, calc(100% - 160px)));
+}
+
+/* ===== 5. 目录面板宽度变化时的自动适配 =====
+   所有「left 让开」都用 var(--ur-anno-w)，
+   用户拖拽调整面板宽度后，所有避让自动同步更新。 */
+
+
+
+body.is-phone .unreader-podcast-bar,
+body.is-tablet .unreader-podcast-bar {
+	gap: calc(6 * var(--ur-u));
+	padding: calc(9 * var(--ur-u)) calc(12 * var(--ur-u));
+}
+
+body.is-phone .unreader-podcast-btns,
+body.is-tablet .unreader-podcast-btns {
+	gap: calc(11 * var(--ur-u));
+}
+
+body.is-phone .unreader-podcast-control,
+body.is-phone .unreader-podcast-download,
+body.is-tablet .unreader-podcast-control,
+body.is-tablet .unreader-podcast-download {
+	width: calc(26 * var(--ur-u));
+	height: calc(26 * var(--ur-u));
+	padding: 0;
+}
+
+body.is-phone .unreader-podcast-control .svg-icon,
+body.is-phone .unreader-podcast-download .svg-icon,
+body.is-tablet .unreader-podcast-control .svg-icon,
+body.is-tablet .unreader-podcast-download .svg-icon {
+	width: max(15px, calc(16 * var(--ur-u)));
+	height: max(15px, calc(16 * var(--ur-u)));
+}
+
+body.is-phone .unreader-podcast-control.is-speed,
+body.is-tablet .unreader-podcast-control.is-speed {
+	width: auto;
+	min-width: max(40px, calc(38 * var(--ur-u)));
+	padding: 0 calc(7 * var(--ur-u));
+}
+
+body.is-phone .unreader-podcast-time,
+body.is-tablet .unreader-podcast-time {
+	font-size: max(12px, calc(12 * var(--ur-u)));
+}
+
+@media (max-width: 380px) {
+	.unreader-podcast-time {
+		font-size: 0.62em;
+	}
 }
 
 .unreader-feed-empty {
@@ -5031,6 +5509,9 @@ body {
 	--ur-surface: #ffffff;
 	--ur-surface-soft: #fafbfc;
 	--ur-surface-hover: #f2f4f6;
+	/* 左右浮动轨道与播客条共用的半透明玻璃面（浅色近白、深色由 --ur-surface 派生） */
+	--ur-float-surface: color-mix(in srgb, var(--ur-surface) 86%, transparent);
+	--ur-float-blur: blur(14px) saturate(1.12);
 	/* 投影：1px 环（替掉描边）+ 大范围低透明度抬起，两层 */
 	--ur-ring: rgba(15, 23, 42, 0.06);
 	--ur-card-shadow: 0 0 0 1px var(--ur-ring), 0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 8px rgba(15, 23, 42, 0.04);
@@ -5058,6 +5539,9 @@ body.theme-dark {
 	--ur-surface: color-mix(in srgb, var(--background-primary) 84%, #ffffff);
 	--ur-surface-soft: color-mix(in srgb, var(--background-primary) 90%, #ffffff);
 	--ur-surface-hover: color-mix(in srgb, var(--background-primary) 74%, #ffffff);
+	/* 深色同样只在这里换一次；控件规则只消费 --ur-float-surface。 */
+	--ur-float-surface: color-mix(in srgb, var(--ur-surface) 86%, transparent);
+	--ur-float-blur: blur(14px) saturate(1.12);
 	--ur-ring: var(--background-modifier-border);
 	--ur-card-shadow: 0 0 0 1px var(--ur-ring), 0 1px 2px rgba(0, 0, 0, 0.22), 0 2px 8px rgba(0, 0, 0, 0.16);
 	--ur-card-shadow-hover: 0 0 0 1px var(--background-modifier-border-hover, var(--ur-ring)), 0 6px 18px rgba(0, 0, 0, 0.3), 0 2px 6px rgba(0, 0, 0, 0.2);
@@ -5731,21 +6215,44 @@ body.theme-dark .unreader-modal {
 
 /* ---------- 8. RSS / 书架残余按钮与卡片收尾 ---------- */
 
-/* 订阅工具栏左端：仍是文字次按钮，但不再使用旧的中性描边皮肤；悬停统一走
-   UN 的面色反馈。限定在本插件自己的按钮类上，不碰 Obsidian 原生工具栏。 */
+/* 订阅工具栏与筛选区：和 UNmemos 输入框下方按钮同一套「无边框 + 近白面 +
+   柔和投影」语言。亮色用固定近白玻璃面，深色换成轻微提亮的透明面，
+   避免在深色主题里出现刺眼的大白块。变量挂在 body 上（与 UNmemos 同口径），
+   因为订阅面板可能被挂到 .unreader-root 之外的浮层/夹具中；只写自定义属性，
+   不会影响宿主其它按钮。 */
+body {
+	--ur-feed-btn-bg: rgba(255, 255, 255, 0.82);
+	--ur-feed-btn-bg-hover: #ffffff;
+	--ur-feed-btn-bg-active: color-mix(in srgb, #ffffff 90%, var(--interactive-accent) 10%);
+	--ur-feed-btn-shadow: 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07);
+	--ur-feed-btn-shadow-hover: 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1);
+}
+
+body.theme-dark {
+	--ur-feed-btn-bg: rgba(255, 255, 255, 0.08);
+	--ur-feed-btn-bg-hover: rgba(255, 255, 255, 0.16);
+	--ur-feed-btn-bg-active: color-mix(in srgb, rgba(255, 255, 255, 0.12) 82%, var(--interactive-accent) 18%);
+	--ur-feed-btn-shadow: 0 1px 1px rgba(0, 0, 0, 0.22), 0 1px 3px rgba(0, 0, 0, 0.13);
+	--ur-feed-btn-shadow-hover: 0 1px 2px rgba(0, 0, 0, 0.28), 0 2px 6px rgba(0, 0, 0, 0.17);
+}
+
+/* 订阅切换按钮：去掉描边，只保留近白面与投影；长订阅名仍由 flex 省略号兜住。 */
 .unreader-feed-source-btn {
-	border: 1px solid var(--background-modifier-border);
+	border: none !important;
 	border-radius: var(--ur-radius-sm);
-	background-color: transparent;
+	background-color: var(--ur-feed-btn-bg, rgba(255, 255, 255, 0.82)) !important;
 	color: var(--text-muted);
 	font-weight: 500;
-	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+	box-shadow: var(--ur-feed-btn-shadow, 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07)) !important;
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+	transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .unreader-feed-source-btn:hover:not(:disabled) {
-	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
-	background-color: var(--background-modifier-hover);
+	background-color: var(--ur-feed-btn-bg-hover, #ffffff) !important;
 	color: var(--text-normal);
+	box-shadow: var(--ur-feed-btn-shadow-hover, 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1)) !important;
 }
 
 /* RSS 工具栏图标钮与卡片内图标钮：静息透明，悬停/激活走强调色淡染。 */
@@ -5760,29 +6267,40 @@ body.theme-dark .unreader-modal {
 	color: var(--text-accent);
 }
 
-/* 全部 / 未读 / 收藏：做成三段筛选控件。选中态用强调色淡染 + 强调色文字，
-   不再用普通的主题混合色。 */
+/* 全部 / 未读 / 收藏：同样无边框、近白面 + 柔和投影；选中态只靠
+   强调色文字/轻染和抬升的投影区分，不再用描边。 */
 .unreader-feed-filter-btn {
-	border: 1px solid var(--background-modifier-border);
+	border: none !important;
 	border-radius: var(--ur-radius-sm);
-	background-color: transparent;
+	background-color: var(--ur-feed-btn-bg, rgba(255, 255, 255, 0.82)) !important;
 	color: var(--text-muted);
 	font-weight: 500;
-	transition: background-color 0.15s ease, color 0.15s ease, border-color 0.15s ease, box-shadow 0.15s ease;
+	box-shadow: var(--ur-feed-btn-shadow, 0 1px 2px rgba(15, 23, 42, 0.1), 0 2px 6px rgba(15, 23, 42, 0.07)) !important;
+	backdrop-filter: blur(8px);
+	-webkit-backdrop-filter: blur(8px);
+	transition: background-color 0.15s ease, color 0.15s ease, box-shadow 0.15s ease;
 }
 
 .unreader-feed-filter-btn:hover {
-	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
-	background-color: var(--background-modifier-hover);
+	background-color: var(--ur-feed-btn-bg-hover, #ffffff) !important;
 	color: var(--text-normal);
+	box-shadow: var(--ur-feed-btn-shadow-hover, 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1)) !important;
 }
 
 .unreader-feed-filter-btn.is-active,
 .unreader-feed-filter-btn.is-active:hover {
-	border-color: color-mix(in srgb, var(--interactive-accent) 38%, transparent);
-	background-color: var(--ur-accent-soft);
+	border: none !important;
+	background-color: var(--ur-feed-btn-bg-active, color-mix(in srgb, #ffffff 90%, var(--interactive-accent) 10%)) !important;
 	color: var(--text-accent);
 	font-weight: 600;
+	box-shadow: var(--ur-feed-btn-shadow-hover, 0 2px 5px rgba(15, 23, 42, 0.13), 0 4px 14px rgba(15, 23, 42, 0.1)) !important;
+}
+
+/* 静息态无边框，但键盘焦点必须有可辨认的轮廓（不能把可访问性一起压掉）。 */
+.unreader-feed-source-btn:focus-visible,
+.unreader-feed-filter-btn:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: 2px;
 }
 
 /* 订阅空态的两个按钮此前没有命中 `.unreader-empty button`：单独补齐同一套
@@ -5815,18 +6333,7 @@ body.theme-dark .unreader-modal {
 	color: var(--text-on-accent);
 }
 
-/* 文章卡片操作：与侧边栏图标按钮共用强调色悬停；下载是文字次按钮。 */
-.unreader-feed-inline-action {
-	border-radius: var(--ur-radius-sm);
-	color: var(--text-faint);
-	transition: background-color 0.15s ease, color 0.15s ease;
-}
-
-.unreader-feed-inline-action:hover {
-	background-color: var(--ur-accent-soft);
-	color: var(--text-accent);
-}
-
+/* 文章卡片操作：无边框、无底色，只保留图标；下载是文字次按钮。 */
 .unreader-feed-download {
 	border: 1px solid var(--background-modifier-border);
 	border-radius: var(--ur-radius-sm);

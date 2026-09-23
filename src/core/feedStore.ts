@@ -3,8 +3,11 @@ import type { FeedEntry, FeedEntryState, FeedFileData, FeedIndexFile, FeedSubscr
 import { FEEDS_FOLDER } from "./paths";
 import type { ParsedFeedEntry } from "./feedParser";
 import { emptyFeedEntryState, mergeFeedEntries, stableFeedId } from "./feedUtils";
+import { evaluateFeedContentQuality, type FeedContentQuality } from "./feedContentQuality";
 
 const INDEX_FILE = "index.json";
+/** 订阅条目阅读进度的本机热缓存前缀（按库 scope 隔离）。 */
+const FEED_HOT_PREFIX = "unreader-feed-pos-hot";
 
 function feedFileName(feedId: string): string {
 	return `${feedId.replace(/[^a-z0-9_-]/gi, "_")}.json`;
@@ -37,14 +40,24 @@ function normalizeState(value: Partial<FeedEntryState> | undefined): FeedEntrySt
 		starredAt: typeof value.starredAt === "number" ? value.starredAt : null,
 		openedAt: typeof value.openedAt === "number" ? value.openedAt : 0,
 		position: value.position ?? null,
+		audioPosition: value.audioPosition ?? null,
 		hasAnnotations: value.hasAnnotations === true,
 		stateUpdatedAt: typeof value.stateUpdatedAt === "number" ? value.stateUpdatedAt : base.stateUpdatedAt,
 	};
 }
 
+function normalizeContentQuality(value: unknown, fallbackHtml: string, fulltext = false): FeedContentQuality {
+	if (fulltext) return "full";
+	if (value === "full" || value === "summary" || value === "empty") return value;
+	return evaluateFeedContentQuality(fallbackHtml);
+}
+
 function normalizeEntry(value: Partial<FeedEntry>, feedId: string): FeedEntry | null {
 	if (!value.id || !value.title) return null;
 	const contentHtml = typeof value.contentHtml === "string" ? value.contentHtml : "";
+	const contentSource = value.contentSource === "fulltext" ? "fulltext" as const : "feed" as const;
+	const pendingContentHtml = typeof value.pendingContentHtml === "string" ? value.pendingContentHtml : undefined;
+	const pendingContentSource = value.pendingContentSource === "fulltext" ? "fulltext" as const : value.pendingContentSource === "feed" ? "feed" as const : undefined;
 	return {
 		id: value.id,
 		feedId,
@@ -57,11 +70,15 @@ function normalizeEntry(value: Partial<FeedEntry>, feedId: string): FeedEntry | 
 		updatedAt: typeof value.updatedAt === "number" ? value.updatedAt : 0,
 		summary: typeof value.summary === "string" ? value.summary : "",
 		contentHtml,
-		contentSource: value.contentSource === "fulltext" ? "fulltext" : "feed",
+		contentSource,
 		contentHash: typeof value.contentHash === "string" ? value.contentHash : "",
-		pendingContentHtml: typeof value.pendingContentHtml === "string" ? value.pendingContentHtml : undefined,
+		contentQuality: normalizeContentQuality(value.contentQuality, contentHtml, contentSource === "fulltext"),
+		pendingContentHtml,
 		pendingContentHash: typeof value.pendingContentHash === "string" ? value.pendingContentHash : undefined,
-		pendingContentSource: value.pendingContentSource === "fulltext" ? "fulltext" : value.pendingContentSource === "feed" ? "feed" : undefined,
+		pendingContentSource,
+		pendingContentQuality: pendingContentHtml
+			? normalizeContentQuality(value.pendingContentQuality, pendingContentHtml, pendingContentSource === "fulltext")
+			: undefined,
 		enclosure: value.enclosure ?? null,
 		state: normalizeState(value.state),
 	};
@@ -72,7 +89,7 @@ export class FeedStore {
 	private entries = new Map<string, Map<string, FeedEntry>>();
 	private initialized = false;
 
-	constructor(private vault: Vault) {}
+	constructor(private vault: Vault, private scope = "default") {}
 
 	async init(): Promise<void> {
 		this.feeds.clear();
@@ -87,7 +104,9 @@ export class FeedStore {
 			const map = new Map<string, FeedEntry>();
 			for (const raw of Array.isArray(data?.entries) ? data.entries : []) {
 				const entry = normalizeEntry(raw, feed.id);
-				if (entry) map.set(entry.id, entry);
+				if (!entry) continue;
+				this.mergeHotState(entry);
+				map.set(entry.id, entry);
 			}
 			this.entries.set(feed.id, map);
 		});
@@ -206,18 +225,40 @@ export class FeedStore {
 		return merged;
 	}
 
+	private nextStateUpdatedAt(previous: number): number {
+		const now = Date.now();
+		return now > previous ? now : previous + 1;
+	}
+
 	async updateEntryState(feedId: string, entryId: string, patch: Partial<FeedEntryState>): Promise<FeedEntry | null> {
 		const entry = this.entries.get(feedId)?.get(entryId);
 		if (!entry) return null;
 		const next: FeedEntryState = {
 			...entry.state,
 			...patch,
-			stateUpdatedAt: Date.now(),
+			stateUpdatedAt: this.nextStateUpdatedAt(entry.state.stateUpdatedAt),
 		};
 		entry.state = next;
 		entry.updatedAt = Math.max(entry.updatedAt, next.stateUpdatedAt);
+		// 文件写是异步的；先把同一份状态同步写进本机热缓存，闪退时下一轮 init 能救回。
+		this.hotWrite(feedId, entryId, next);
 		await this.writeFeed(feedId);
 		return entry;
+	}
+
+	/** 只更新内存 + 本机热缓存，不等待订阅文件写盘。
+	 *  供阅读视图每次可信 relocate 调用，避免 800ms/异步写窗口里闪退丢位置。 */
+	checkpointEntryState(feedId: string, entryId: string, patch: Partial<FeedEntryState>): void {
+		const entry = this.entries.get(feedId)?.get(entryId);
+		if (!entry) return;
+		const next: FeedEntryState = {
+			...entry.state,
+			...patch,
+			stateUpdatedAt: this.nextStateUpdatedAt(entry.state.stateUpdatedAt),
+		};
+		entry.state = next;
+		entry.updatedAt = Math.max(entry.updatedAt, next.stateUpdatedAt);
+		this.hotWrite(feedId, entryId, next);
 	}
 
 	/** 一次写入多条阅读状态，供播客进度等高频小更新合并落盘。 */
@@ -231,10 +272,11 @@ export class FeedStore {
 			const next: FeedEntryState = {
 				...entry.state,
 				...patch,
-				stateUpdatedAt: Date.now(),
+				stateUpdatedAt: this.nextStateUpdatedAt(entry.state.stateUpdatedAt),
 			};
 			entry.state = next;
 			entry.updatedAt = Math.max(entry.updatedAt, next.stateUpdatedAt);
+			this.hotWrite(feedId, entryId, next);
 			changed = true;
 		}
 		if (changed) await this.writeFeed(feedId);
@@ -252,11 +294,13 @@ export class FeedStore {
 		entry.contentHtml = contentHtml;
 		entry.contentHash = contentHash;
 		entry.contentSource = "fulltext";
+		entry.contentQuality = "full";
 		if (metadata?.title?.trim()) entry.title = metadata.title.trim();
 		if (!entry.author && metadata?.author?.trim()) entry.author = metadata.author.trim();
 		entry.pendingContentHtml = undefined;
 		entry.pendingContentHash = undefined;
 		entry.pendingContentSource = undefined;
+		entry.pendingContentQuality = undefined;
 		entry.updatedAt = Date.now();
 		await this.writeFeed(feedId);
 		return entry;
@@ -269,12 +313,43 @@ export class FeedStore {
 		entry.contentHtml = entry.pendingContentHtml;
 		entry.contentHash = entry.pendingContentHash;
 		entry.contentSource = entry.pendingContentSource ?? "feed";
+		entry.contentQuality = entry.pendingContentQuality ?? evaluateFeedContentQuality(entry.contentHtml);
 		entry.pendingContentHtml = undefined;
 		entry.pendingContentHash = undefined;
 		entry.pendingContentSource = undefined;
+		entry.pendingContentQuality = undefined;
 		entry.updatedAt = Date.now();
 		await this.writeFeed(feedId);
 		return entry;
+	}
+
+	private hotKey(feedId: string, entryId: string): string {
+		return `${FEED_HOT_PREFIX}:${encodeURIComponent(this.scope)}:${encodeURIComponent(feedId)}:${encodeURIComponent(entryId)}`;
+	}
+
+	private hotWrite(feedId: string, entryId: string, state: FeedEntryState): void {
+		try {
+			if (typeof window.localStorage === "undefined") return;
+			window.localStorage.setItem(this.hotKey(feedId, entryId), JSON.stringify(state));
+		} catch { /* 隐私模式 / 配额满：尽力而为，不打断主链 */ }
+	}
+
+	private hotRead(feedId: string, entryId: string): FeedEntryState | null {
+		try {
+			if (typeof window.localStorage === "undefined") return null;
+			const raw = window.localStorage.getItem(this.hotKey(feedId, entryId));
+			if (!raw) return null;
+			return normalizeState(JSON.parse(raw) as Partial<FeedEntryState>);
+		} catch {
+			return null;
+		}
+	}
+
+	private mergeHotState(entry: FeedEntry): void {
+		const hot = this.hotRead(entry.feedId, entry.id);
+		if (!hot || hot.stateUpdatedAt <= entry.state.stateUpdatedAt) return;
+		entry.state = hot;
+		entry.updatedAt = Math.max(entry.updatedAt, hot.stateUpdatedAt);
 	}
 
 	async flush(): Promise<void> {

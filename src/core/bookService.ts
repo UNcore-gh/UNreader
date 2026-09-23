@@ -63,7 +63,8 @@ export function createVaultResourceResolver(app: App, sourcePath: string): (raw:
 			candidates.push(rel);
 		}
 		for (const candidate of candidates) {
-			const file = app.vault.getAbstractFileByPath(normalizePath(candidate));
+			const normalized = normalizePath(candidate);
+			const file = app.vault.getAbstractFileByPath(normalized);
 			if (file instanceof TFile) return app.vault.getResourcePath(file);
 		}
 		// 兜底：官方链接解析（能处理「同名文件在别处」这类库内引用）
@@ -76,28 +77,47 @@ export function createVaultResourceResolver(app: App, sourcePath: string): (raw:
  *  它们也是 .txt，但显然不是书——不加白名单会把「保存到库」生成的日志混进打开列表。 */
 const DIAG_TXT = /^unreader-(?:debug-log|neighbor)-/;
 
+/** 书籍路径集合；手动移除 / 分类只针对真实存在的书。 */
+function hiddenBookPaths(plugin: UNreaderPlugin): Set<string> {
+	return new Set(plugin.settings.bookshelfHiddenBooks ?? []);
+}
+
 /** 打开书籍列表可读取的书：**全库扫描**，按书名排序。
  *
  *  书籍不限位置（「资料文件夹」是插件**数据**的落点，不是书的落点，见 core/paths.ts）；
- *  跳过 0 字节文件、插件自己写在库根的诊断 .txt，以及**被排除文件夹命中的书**
- *  （默认跟随 Obsidian 的「排除文件」，见 core/bookExclusions.ts）。 */
+ *  跳过 0 字节文件、插件自己写在库根的诊断 .txt、**被排除文件夹命中的书**以及
+ *  **用户手动从书架移除的书**（后者可在书架的“已移除书籍”里添加回来）。
+ */
 export function getBookFiles(plugin: UNreaderPlugin): TFile[] {
-	return collectBookFiles(plugin, true);
+	const hidden = hiddenBookPaths(plugin);
+	return collectBookFiles(plugin, true).filter(file => !hidden.has(file.path));
 }
 
-/** 书架使用全库扫描（同样应用排除文件夹），并保留 Vault 返回的顺序作为默认排名。 */
+/** 书架使用全库扫描（同样应用排除与手动移除），并保留 Vault 返回的顺序作为默认排名。 */
 export function getLibraryBookFiles(plugin: UNreaderPlugin): TFile[] {
-	return collectBookFiles(plugin, false);
+	const hidden = hiddenBookPaths(plugin);
+	return collectBookFiles(plugin, false).filter(file => !hidden.has(file.path));
+}
+
+/** “已移除书籍”管理列表：只列真实存在、被手动隐藏的书，不包含排除文件夹的常规过滤结果。 */
+export function getRemovedBookFiles(plugin: UNreaderPlugin): TFile[] {
+	const hidden = hiddenBookPaths(plugin);
+	return collectBookFiles(plugin, true)
+		.filter(file => hidden.has(file.path));
 }
 
 /** 轻量书架数据：只读文件索引与进度缓存，不在这里读封面或解析正文。 */
 export function getBookshelfEntries(plugin: UNreaderPlugin): BookshelfEntry[] {
 	const pinned = new Set(plugin.settings.bookshelfPinned ?? []);
+	const categories = plugin.settings.bookshelfCategories ?? [];
+	const categoryIds = new Set(categories.map(category => category.id));
+	const assignments = plugin.settings.bookshelfCategoryAssignments ?? {};
 	return getLibraryBookFiles(plugin).map(file => {
 		const pos = plugin.getPosition(file.path);
 		const progress = typeof pos?.fraction === "number" && Number.isFinite(pos.fraction)
 			? Math.max(0, Math.min(1, pos.fraction))
 			: 0;
+		const assigned = assignments[file.path];
 		return {
 			path: file.path,
 			name: file.basename,
@@ -105,6 +125,31 @@ export function getBookshelfEntries(plugin: UNreaderPlugin): BookshelfEntry[] {
 			progress,
 			updatedAt: typeof pos?.updatedAt === "number" && Number.isFinite(pos.updatedAt) ? pos.updatedAt : 0,
 			pinned: pinned.has(file.path),
+			categoryId: assigned && categoryIds.has(assigned) ? assigned : null,
+		};
+	});
+}
+
+/** 已移除书籍的轻量数据；分类字段照常保留，方便添加回来后立刻显示正确归属。 */
+export function getRemovedBookshelfEntries(plugin: UNreaderPlugin): BookshelfEntry[] {
+	const pinned = new Set(plugin.settings.bookshelfPinned ?? []);
+	const categories = plugin.settings.bookshelfCategories ?? [];
+	const categoryIds = new Set(categories.map(category => category.id));
+	const assignments = plugin.settings.bookshelfCategoryAssignments ?? {};
+	return getRemovedBookFiles(plugin).map(file => {
+		const pos = plugin.getPosition(file.path);
+		const progress = typeof pos?.fraction === "number" && Number.isFinite(pos.fraction)
+			? Math.max(0, Math.min(1, pos.fraction))
+			: 0;
+		const assigned = assignments[file.path];
+		return {
+			path: file.path,
+			name: file.basename,
+			extension: file.extension.toLowerCase(),
+			progress,
+			updatedAt: typeof pos?.updatedAt === "number" && Number.isFinite(pos.updatedAt) ? pos.updatedAt : 0,
+			pinned: pinned.has(file.path),
+			categoryId: assigned && categoryIds.has(assigned) ? assigned : null,
 		};
 	});
 }

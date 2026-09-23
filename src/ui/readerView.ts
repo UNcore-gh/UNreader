@@ -65,7 +65,7 @@ function hasIcon(name: string): boolean {
 import { collectHeaderBandFacts } from "./headerBandDiag";
 import { importFontFile, isFontExt, MAX_FONT_BYTES } from "../core/fontService";
 import { FONTS_FOLDER, IMAGES_FOLDER } from "../core/paths";
-import type { AppearanceSettings, BookshelfSortMode, BookPosition, WebDeviceMode } from "../types";
+import type { AppearanceSettings, BookshelfCategoryFilter, BookshelfSortMode, BookPosition, WebDeviceMode } from "../types";
 import type { FeedEntry, FeedFilter, ReaderSource } from "../types";
 import { DEFAULT_APPEARANCE, activeTheme } from "../types";
 import { resolveActiveColors } from "../core/engineAdapter";
@@ -80,6 +80,7 @@ import {
 } from "../core/annotationStore";
 import { makeFeedBook } from "../core/feedBookFactory";
 import { reconcileFeedAnnotationAnchors } from "../core/feedUtils";
+import { entryFeedContentQuality } from "../core/feedContentQuality";
 import { sanitizeArticleHtml } from "../core/articleExtractor";
 import { openExternalLink } from "../core/externalLink";
 import { saveArticleNote } from "../core/noteExporter";
@@ -90,10 +91,13 @@ import { HighlightPopover } from "./highlightPopover";
 import { AnnotationsPanel } from "./annotationsPanel";
 import { BookmarkModal } from "./bookmarkModal";
 import { PageJumpModal } from "./pageJumpModal";
+import { PodcastSleepModal } from "./podcastSleepModal";
+import { PodcastSeekModal } from "./podcastSeekModal";
 import { BackgroundImageModal, type BackgroundImagePick } from "./backgroundImageModal";
 import { FontPickModal, type FontPick } from "./fontPickModal";
 import { SideNav } from "./sideNav";
 import { NativeNavGuard, PLUGIN_NAV_HIDDEN_CLASS } from "./nativeNavGuard";
+import { NativeChromeGate } from "./nativeChromeGate";
 import { hasCoreModal, watchCoreModal, blurIfFocusInside, focusModalPrimary, arbitrateReaderFocus } from "../core/modalFocusGate";
 import { bottomBarHiddenByUs, headerHiddenByUs, type ImmersiveNativeInputs } from "./nativeNavPolicy";
 import { scheduleBottomBandDiag, cancelBottomBandDiag } from "./bottomBandDiag";
@@ -103,11 +107,19 @@ import { idleYield } from "../core/idle";
 
 export const VIEW_TYPE_UNREADER = "unreader-view";
 
+/** 播客倍速档位（按顺序循环；1 为默认档）。 */
+const PODCAST_SPEEDS = [0.75, 1, 1.25, 1.5, 2] as const;
+const PODCAST_SPEED_KEY = "unreader-podcast-speed";
+
 /** 底栏「让位」类（挂 `document.body`，app 级；样式见 styles.css 的 `unreader-nav-float` 段） */
 const NAV_FLOAT_CLASS = "unreader-nav-float";
 /** 唤出底栏后延迟多久撤销让位（ms）：官方底栏 `transform 0.3s ease-out` + 一点余量。
  *  提前撤销 = 那 80px 先露出窗口底色再被滑回来的底栏盖住（一次 300ms 的闪）。 */
 const NAV_FLOAT_RELEASE_MS = 340;
+
+/** 点按投递去重窗口（ms）：同一手势的不同事件若落在该窗口内，只认第一次。
+ *  远小于人手连点间隔（实测有意连点普遍 >200ms），所以不会吞掉用户的连续点按。 */
+const TAP_DEDUP_MS = 120;
 
 /** 全沉浸「返回哨兵」在视图状态里的标记键（见 UNreaderView.immersionHistoryGuard）。 */
 const IMMERSION_HISTORY_GUARD_KEY = "__unreaderImmersionGuard";
@@ -162,9 +174,29 @@ export class UNreaderView extends ItemView {
 	private activeFeedContentHash: string | null = null;
 	private feedFilter: FeedFilter = "all";
 	private feedSourceFilter: string | null = null;
+	private bookshelfCategoryFilter: BookshelfCategoryFilter = "all";
 	private feedAutoRefreshDone = false;
 	private podcastProgressTimer: number | null = null;
 	private podcastProgressPending = new Map<string, { feedId: string; entryId: string; position: BookPosition }>();
+	private lastPodcastCheckpointAt = 0;
+	/** 播客播放条：挂在 root 顶部，随当前文章出现；不放进卡片，避免刷新列表时把正在播放的 audio 销毁。 */
+	private podcastBarEl: HTMLElement | null = null;
+	private podcastAudioEl: HTMLAudioElement | null = null;
+	private podcastPlayBtn: HTMLButtonElement | null = null;
+	private podcastSeekEl: HTMLInputElement | null = null;
+	private podcastTimeEl: HTMLElement | null = null;
+	private podcastTotalEl: HTMLElement | null = null;
+	private podcastDownloadBtn: HTMLButtonElement | null = null;
+	private podcastSpeedBtn: HTMLButtonElement | null = null;
+	private podcastSleepBtn: HTMLButtonElement | null = null;
+	private podcastMarkBtn: HTMLButtonElement | null = null;
+	private podcastBarRef: { feedId: string; entryId: string; url: string } | null = null;
+	private podcastSpeed = 1;
+	private podcastPendingSeek: number | null = null;
+	/** 重开播客时的恢复目标；与用户显式 seek 分开，避免缓存换源竞态把位置冲掉。 */
+	private podcastResumeTarget: number | null = null;
+	private podcastSleepUntil = 0;
+	private podcastSleepTimer: number | null = null;
 	private loadedPath: string | null = null;
 	private loadingToken = 0;
 	/** 正在开书恢复上次阅读位置（见 loadBook 的 is-restoring / whenRestored）。
@@ -186,6 +218,9 @@ export class UNreaderView extends ItemView {
 	 *  见 core/progressCursor.ts —— 它挡的是「打开没开完就退出 → 书首位置被写回进度」
 	 *  与「换书后旧书落点写进新书」这两类偶发的位置丢失。 */
 	private cursor = new ProgressCursor();
+	/** 本机热缓存 checkpoint 的节流状态：不跟 800ms 去抖走，最多丢很短一拍。 */
+	private lastCheckpointKey = "";
+	private lastCheckpointAt = 0;
 
 	private notePath = "";
 	private annotations: AnnotationFileData = { highlights: [], bookmarks: [] };
@@ -240,6 +275,8 @@ export class UNreaderView extends ItemView {
 	private railAnnoBtn: HTMLElement | null = null;
 	private railAppearanceBtn: HTMLElement | null = null;
 	private railSearchBtn: HTMLElement | null = null;
+	/** 左侧工具栏里的全沉浸备用入口：Android 悬浮导航可能遮住左上角拉绳按钮。 */
+	private railImmersionBtn: HTMLElement | null = null;
 	/** Feed 专属：在系统默认浏览器打开当前文章原文（正文里不再注入这条链接） */
 	private railOriginalBtn: HTMLElement | null = null;
 	/** Feed 专属：收藏（星标）当前文章；书源下由 CSS 收走（`is-feed-only-control`） */
@@ -252,6 +289,15 @@ export class UNreaderView extends ItemView {
 	private pinBtnHidden = false;
 	private debouncedPinVisibility: (() => void) | null = null;
 	private stageResizeObserver: ResizeObserver | null = null;
+	/** 上下避让边界（沉浸拉绳 / 播客条）的尺寸观察器；几何一变就重算浮动轨道可用区。 */
+	private floatingFitObserver: ResizeObserver | null = null;
+	private floatingFitRaf: number | null = null;
+	/** 页首/拉绳过渡期间的逐帧跟随截止时间（performance.now() 时间戳）。 */
+	private floatingFitBurstUntil = 0;
+	/** 最近一次“页首可见”时沉浸按钮的底边（视口坐标）。
+	 *  点按唤出工具栏时，页首会从隐藏态滑回；工具栏不应跟着这条过渡逐帧下移，
+	 *  而应直接落在页首可见后的最终避让位置。 */
+	private lastVisibleHeaderBottom: number | null = null;
 	/** 模态框打开归还焦点观察器（见 onOpen：命令面板第一次执行无效的修复） */
 	/** 核心模态框观察的取消订阅（见 core/modalFocusGate 与 onOpen 里的接线） */
 	private unwatchCoreModal: (() => void) | null = null;
@@ -455,12 +501,16 @@ export class UNreaderView extends ItemView {
 
 	private applyReaderSource(source: ReaderSource): void {
 		if (source.kind === "book") {
+			this.hidePodcastBar();
 			this.feedRef = null;
 			this.currentFeedEntry = null;
 			this.activeFeedContentHash = null;
 			const file = this.app.vault.getFileByPath(source.filePath);
 			this.file = file instanceof TFile ? file : null;
 			return;
+		}
+		if (this.podcastBarRef && (this.podcastBarRef.feedId !== source.feedId || this.podcastBarRef.entryId !== source.entryId)) {
+			this.hidePodcastBar();
 		}
 		this.file = null;
 		this.feedRef = { feedId: source.feedId, entryId: source.entryId };
@@ -526,6 +576,7 @@ export class UNreaderView extends ItemView {
 		// 按 nativeNavWanted() 这一份权威判据补回。
 		this.nativeNavGuard = new NativeNavGuard({
 			wantsHidden: () => this.nativeNavWanted(),
+			onExternalRestore: () => this.reassertStatusBarHidden(),
 			sync: () => this.syncNativeNav("guard"),
 		});
 		this.nativeNavGuard.start();
@@ -707,6 +758,8 @@ export class UNreaderView extends ItemView {
 		this.scheduleLoad();
 		// 尺寸变化会改变页首几何（横竖屏、分栏、iPad 分屏），进度条让位需重测
 		this.syncProgressTop();
+		// 侧栏宽度也可能随设备形态变化，灯绳要重新避让
+		this.syncImmersionSwitchOffset();
 		// 换设备/横竖屏/分屏 → 页码模型可能变，书签页码同步刷新
 		this.refreshAnnotationPages();
 	}
@@ -757,6 +810,14 @@ export class UNreaderView extends ItemView {
 			try { this.stageResizeObserver.disconnect(); } catch { /* ignore */ }
 			this.stageResizeObserver = null;
 		}
+		if (this.floatingFitObserver) {
+			try { this.floatingFitObserver.disconnect(); } catch { /* ignore */ }
+			this.floatingFitObserver = null;
+		}
+		if (this.floatingFitRaf != null) {
+			window.cancelAnimationFrame(this.floatingFitRaf);
+			this.floatingFitRaf = null;
+		}
 		if (this.bodyThemeObserver) {
 			try { this.bodyThemeObserver.disconnect(); } catch { /* ignore */ }
 			this.bodyThemeObserver = null;
@@ -780,6 +841,11 @@ export class UNreaderView extends ItemView {
 			this.cancelAnnoAutoClose();
 			this.clearMirrorSelection();
 			try { await this.flushPodcastProgress(); } catch { /* 关闭路径不能因进度落盘失败而跳过清理 */ }
+			this.hidePodcastBar();
+			if (this.floatingFitRaf != null) {
+				window.cancelAnimationFrame(this.floatingFitRaf);
+				this.floatingFitRaf = null;
+			}
 			this.adapter.destroy();
 		this.contentHost?.empty();
 		await super.onClose();
@@ -852,6 +918,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	showEmptyState(): void {
+		this.hidePodcastBar();
 		this.loadedPath = null;
 		this.feedRef = null;
 		this.currentFeedEntry = null;
@@ -927,16 +994,37 @@ export class UNreaderView extends ItemView {
 		this.annotationsPanel.refreshFeeds();
 	}
 
-	private async fetchFeedFulltext(feedId: string, entryId: string): Promise<void> {
+	private async fetchFeedFulltext(feedId: string, entryId: string, options?: { auto?: boolean }): Promise<void> {
 		try {
-			new Notice("正在抓取网页全文…");
-			const entry = await this.plugin.feedService.fetchFulltext(feedId, entryId);
+			if (!options?.auto) new Notice("正在抓取网页全文…");
+			const entry = await this.plugin.feedService.fetchFulltext(feedId, entryId, options);
 			if (!entry) throw new Error("文章不存在");
-			new Notice("全文已缓存");
+			if (!options?.auto) new Notice("全文已缓存");
 			this.annotationsPanel.refreshFeeds();
-			if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId) this.scheduleLoad();
+			if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId) {
+				// scheduleLoad 对“同一篇文章已加载”会早退；抓到全文后必须清掉当前 key 才会重渲染。
+				this.loadedPath = null;
+				this.scheduleLoad();
+			}
 		} catch (error) {
-			new Notice(`全文抓取失败：${error instanceof Error ? error.message : String(error)}`);
+			if (!options?.auto) {
+				new Notice(`全文抓取失败：${error instanceof Error ? error.message : String(error)}`);
+			}
+		}
+	}
+
+	/** Feed 里只有标题/摘要时，打开文章先读摘要，再在后台尝试网页全文。 */
+	private async autoFetchFeedFulltext(feedId: string, entryId: string): Promise<void> {
+		const entry = this.plugin.feedStore.getEntry(feedId, entryId);
+		if (!entry || !this.plugin.feedService.needsFulltext(entry)) return;
+		await this.plugin.feedService.autoFetchFulltext(feedId, entryId);
+		this.annotationsPanel.refreshFeeds();
+		if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId) {
+			const updated = this.plugin.feedStore.getEntry(feedId, entryId);
+			if (updated && entryFeedContentQuality(updated) === "full") {
+				this.loadedPath = null;
+				this.scheduleLoad();
+			}
 		}
 	}
 
@@ -968,7 +1056,7 @@ export class UNreaderView extends ItemView {
 			return;
 		}
 		let entry = current;
-		if (entry.contentSource !== "fulltext") {
+		if (entry.kind === "article" && entryFeedContentQuality(entry) !== "full") {
 			await this.fetchFeedFulltext(feedId, entryId);
 			const fetched = store.getEntry(feedId, entryId);
 			// 抓取失败（或抓完仍是 Feed 摘要）：`fetchFeedFulltext` 已经报过错了，不再叠一条
@@ -995,14 +1083,632 @@ export class UNreaderView extends ItemView {
 		}
 	}
 
+	/** 创建播客播放条。audio 常驻宿主 DOM，卡片刷新不会把它销毁。 */
+	private buildPodcastBar(): void {
+		const bar = this.podcastBarEl;
+		if (!bar) return;
+		bar.empty();
+		const audio = this.podcastAudioEl = bar.createEl("audio", { cls: "unreader-podcast-audio" });
+		audio.controls = false;
+		audio.preload = "metadata";
+		audio.setAttribute("playsinline", "");
+		audio.setAttribute("webkit-playsinline", "");
+		this.podcastSpeed = this.readPodcastSpeed();
+		audio.playbackRate = this.podcastSpeed;
+
+		// 上排只放进度条；下排放全部播放控制和已播/总时长两个数字。
+		const progressRow = bar.createDiv({ cls: "unreader-podcast-progress-row" });
+		const seek = this.podcastSeekEl = progressRow.createEl("input", { cls: "unreader-podcast-seek" });
+		seek.type = "range";
+		seek.min = "0";
+		seek.max = "1000";
+		seek.step = "1";
+		seek.value = "0";
+		seek.setAttribute("aria-label", "播客播放进度");
+		seek.addEventListener("input", () => {
+			if (!Number.isFinite(audio.duration) || audio.duration <= 0) return;
+			try { audio.currentTime = (Number(seek.value) / 1000) * audio.duration; } catch { /* ignore */ }
+			this.syncPodcastProgressUi();
+			this.capturePodcastProgress();
+		});
+		const controls = bar.createDiv({ cls: "unreader-podcast-controls-row" });
+		// 播放按钮固定在最左边，不随滚动移动
+		const play = this.podcastPlayBtn = controls.createEl("button", { cls: "unreader-podcast-control is-play is-pinned" });
+		play.setAttribute("aria-label", "播放播客");
+		play.addEventListener("click", e => {
+			e.stopPropagation();
+			void this.togglePodcastPlayback();
+		});
+
+		// 可滚动按钮组：快退 / 快进 / 倍速 / 定时 / 标记 / 下载
+		const leftGroup = controls.createDiv({ cls: "unreader-podcast-btns" });
+
+		const rewind = leftGroup.createEl("button", { cls: "unreader-podcast-control" });
+		rewind.setAttribute("aria-label", "快退 15 秒");
+		paintIcon(rewind, "undo-2", "rotate-ccw");
+		rewind.addEventListener("click", e => {
+			e.stopPropagation();
+			this.seekPodcastBy(-15);
+		});
+
+		const forward = leftGroup.createEl("button", { cls: "unreader-podcast-control" });
+		forward.setAttribute("aria-label", "快进 30 秒");
+		paintIcon(forward, "redo-2", "rotate-cw");
+		forward.addEventListener("click", e => {
+			e.stopPropagation();
+		this.seekPodcastBy(30);
+		});
+
+		const sleep = this.podcastSleepBtn = leftGroup.createEl("button", {
+			cls: "unreader-podcast-control",
+		});
+		paintIcon(sleep, "timer", "clock");
+		sleep.setAttribute("aria-label", "设置睡眠定时");
+		sleep.addEventListener("click", e => {
+			e.stopPropagation();
+			this.openPodcastSleepModal();
+		});
+
+		const mark = this.podcastMarkBtn = leftGroup.createEl("button", {
+			cls: "unreader-podcast-control",
+		});
+		paintIcon(mark, "bookmark", "star");
+		mark.setAttribute("aria-label", "标记当前时间点");
+		mark.addEventListener("click", e => {
+			e.stopPropagation();
+			void this.addPodcastBookmark();
+		});
+
+		const download = this.podcastDownloadBtn = leftGroup.createEl("button", {
+			cls: "unreader-podcast-download",
+		});
+		paintIcon(download, "download", "file-down");
+		download.setAttribute("aria-label", "下载播客");
+		download.addEventListener("click", e => {
+			e.stopPropagation();
+			void this.downloadCurrentPodcast();
+		});
+		// 倍速按钮不用图标：直接显示当前倍速，点击后数字变化本身就是反馈。
+		const speed = this.podcastSpeedBtn = leftGroup.createEl("button", {
+			cls: "unreader-podcast-control is-speed",
+			attr: { type: "button" },
+		});
+		speed.setAttribute("aria-label", "切换播放速度");
+		speed.addEventListener("click", e => {
+			e.stopPropagation();
+			this.cyclePodcastSpeed();
+		});
+
+		// 右侧时间显示：已播 / 总时长，固定在最右边，不参与横向滚动。
+		// 点这两个数字会弹出输入框跳到指定时间——此前它们只是纯文本，
+		// 点击会冒泡出去触发界面显隐切换，用户看到的就是「点了没反应/只是切换界面」。
+		const timeGroup = controls.createDiv({ cls: "unreader-podcast-time-group" });
+		this.podcastTimeEl = timeGroup.createSpan({ cls: "unreader-podcast-time", text: "0:00" });
+		timeGroup.createSpan({ cls: "unreader-podcast-time-sep", text: "/" });
+		this.podcastTotalEl = timeGroup.createSpan({ cls: "unreader-podcast-time is-total", text: "0:00" });
+		for (const el of [this.podcastTimeEl, this.podcastTotalEl]) {
+			el.setAttribute("role", "button");
+			el.setAttribute("tabindex", "0");
+			el.setAttribute("title", "点击跳转到指定时间");
+			el.setAttribute("aria-label", "跳转到指定时间");
+			const openSeek = (e: Event): void => {
+				e.stopPropagation();
+				this.openPodcastSeekModal();
+			};
+			el.addEventListener("click", openSeek);
+			el.addEventListener("keydown", e => {
+				if (e.key === "Enter" || e.key === " ") {
+					e.preventDefault();
+					openSeek(e);
+				}
+			});
+		}
+
+		audio.addEventListener("play", () => this.paintPodcastPlayButton());
+		audio.addEventListener("pause", () => this.paintPodcastPlayButton());
+		audio.addEventListener("ended", () => this.paintPodcastPlayButton());
+		audio.addEventListener("loadedmetadata", () => {
+			this.paintPodcastPlayButton();
+			this.syncPodcastProgressUi();
+		});
+		audio.addEventListener("durationchange", () => this.syncPodcastProgressUi());
+		audio.addEventListener("timeupdate", () => {
+			this.syncPodcastProgressUi();
+			this.capturePodcastProgress();
+		});
+		audio.addEventListener("seeked", () => {
+			this.syncPodcastProgressUi();
+			this.capturePodcastProgress();
+		});
+		audio.addEventListener("error", () => {
+			if (!this.podcastBarRef) return;
+			const code = audio.error?.code;
+			new Notice(`播客加载失败${code ? `（错误码 ${code}）` : ""}，请检查网络，或先下载后再播放`);
+		});
+		this.paintPodcastPlayButton();
+		this.syncPodcastSpeedButton();
+		this.syncPodcastSleepButton();
+	}
+
+	private paintPodcastPlayButton(): void {
+		const button = this.podcastPlayBtn;
+		if (!button) return;
+		const playing = !!this.podcastAudioEl && !this.podcastAudioEl.paused;
+		button.empty();
+		setIcon(button, playing ? "pause" : "play");
+		if (!button.querySelector("svg")) button.setText(playing ? "❚❚" : "▶");
+		button.setAttribute("aria-label", playing ? "暂停播客" : "播放播客");
+	}
+
+	private syncPodcastProgressUi(): void {
+		const audio = this.podcastAudioEl;
+		const seek = this.podcastSeekEl;
+		const time = this.podcastTimeEl;
+		if (!audio || !seek || !time) return;
+		const current = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+		const duration = Number.isFinite(audio.duration) ? audio.duration : 0;
+		if (!seek.matches(":active")) seek.value = duration > 0 ? String(Math.round((current / duration) * 1000)) : "0";
+		time.setText(this.formatPodcastTime(current));
+		this.podcastTotalEl?.setText(this.formatPodcastTime(duration));
+	}
+
+	private formatPodcastTime(seconds: number): string {
+		if (!Number.isFinite(seconds) || seconds <= 0) return "0:00";
+		const total = Math.floor(seconds);
+		const hours = Math.floor(total / 3600);
+		const minutes = Math.floor((total % 3600) / 60);
+		const rest = total % 60;
+		return hours > 0
+			? `${hours}:${String(minutes).padStart(2, "0")}:${String(rest).padStart(2, "0")}`
+			: `${minutes}:${String(rest).padStart(2, "0")}`;
+	}
+
+	private formatPodcastSpeed(speed: number): string {
+		return `${speed.toFixed(2).replace(/0+$/, "").replace(/\.$/, "")}×`;
+	}
+
+	private syncPodcastSpeedButton(): void {
+		const button = this.podcastSpeedBtn;
+		if (!button) return;
+		const label = this.formatPodcastSpeed(this.podcastSpeed);
+		button.textContent = label;
+		button.setAttribute("aria-label", `当前播放速度 ${label}，点击切换`);
+		button.setAttribute("title", `当前播放速度 ${label}，点击切换`);
+	}
+
+	private readPodcastSpeed(): number {
+		try {
+			const value = Number(window.localStorage.getItem(PODCAST_SPEED_KEY));
+			return (PODCAST_SPEEDS as readonly number[]).includes(value) ? value : 1;
+		} catch { return 1; }
+	}
+
+	private setPodcastSpeed(speed: number): void {
+		this.podcastSpeed = speed;
+		if (this.podcastAudioEl) this.podcastAudioEl.playbackRate = speed;
+		this.syncPodcastSpeedButton();
+		try { window.localStorage.setItem(PODCAST_SPEED_KEY, String(speed)); } catch { /* ignore */ }
+	}
+
+	private cyclePodcastSpeed(): void {
+		const index = (PODCAST_SPEEDS as readonly number[]).indexOf(this.podcastSpeed);
+		const next = PODCAST_SPEEDS[(index + 1) % PODCAST_SPEEDS.length] ?? 1;
+		this.setPodcastSpeed(next);
+	}
+
+	private seekPodcastBy(seconds: number): void {
+		const audio = this.podcastAudioEl;
+		if (!audio) return;
+		const duration = Number.isFinite(audio.duration) ? audio.duration : Number.POSITIVE_INFINITY;
+		try { audio.currentTime = Math.max(0, Math.min(duration, audio.currentTime + seconds)); } catch { /* ignore */ }
+		this.syncPodcastProgressUi();
+	}
+
+	/** 点时间数字弹出的跳转输入框。 */
+	private openPodcastSeekModal(): void {
+		const audio = this.podcastAudioEl;
+		if (!audio || !this.podcastBarRef) {
+			new Notice("请先打开播客，再跳转时间");
+			return;
+		}
+		const total = Number.isFinite(audio.duration) ? audio.duration : 0;
+		new PodcastSeekModal(
+			this.app,
+			audio.currentTime || 0,
+			total,
+			seconds => this.jumpPodcastTo(seconds),
+		).open();
+	}
+
+	private openPodcastSleepModal(): void {
+		const remaining = this.podcastSleepUntil - Date.now();
+		new PodcastSleepModal(
+			this.app,
+			remaining,
+			minutes => this.setPodcastSleepTimer(minutes),
+			() => {
+				this.clearPodcastSleepTimer();
+				new Notice("已关闭睡眠定时");
+			},
+		).open();
+	}
+
+	private setPodcastSleepTimer(minutes: number): void {
+		this.podcastSleepUntil = Date.now() + minutes * 60_000;
+		this.syncPodcastSleepButton();
+		if (this.podcastSleepTimer == null) {
+			this.podcastSleepTimer = window.setInterval(() => this.tickPodcastSleepTimer(), 1000);
+		}
+		new Notice(`睡眠定时：${minutes} 分钟`);
+	}
+
+	private tickPodcastSleepTimer(): void {
+		if (!this.podcastSleepUntil) return;
+		const left = this.podcastSleepUntil - Date.now();
+		if (left > 0) {
+			this.syncPodcastSleepButton();
+			return;
+		}
+		this.podcastAudioEl?.pause();
+		this.clearPodcastSleepTimer();
+		new Notice("睡眠定时已到，播客已暂停");
+	}
+
+	private syncPodcastSleepButton(): void {
+		const button = this.podcastSleepBtn;
+		if (!button) return;
+		const left = this.podcastSleepUntil - Date.now();
+		if (left <= 0) {
+			button.removeClass("is-active");
+			button.setAttribute("aria-label", "设置睡眠定时");
+			button.setAttribute("title", "设置睡眠定时");
+			return;
+		}
+		const minutes = Math.floor(left / 60_000);
+		const seconds = Math.floor((left % 60_000) / 1000);
+		button.addClass("is-active");
+		button.setAttribute("aria-label", `睡眠定时剩余 ${minutes} 分 ${seconds} 秒`);
+		button.setAttribute("title", `睡眠定时剩余 ${minutes} 分 ${seconds} 秒`);
+	}
+
+	private clearPodcastSleepTimer(): void {
+		if (this.podcastSleepTimer != null) {
+			window.clearInterval(this.podcastSleepTimer);
+			this.podcastSleepTimer = null;
+		}
+		this.podcastSleepUntil = 0;
+		this.syncPodcastSleepButton();
+	}
+
+	private addPodcastBookmark(): void {
+		const ref = this.podcastBarRef;
+		const audio = this.podcastAudioEl;
+		const entry = this.currentFeedEntry;
+		if (!ref || !audio || !entry) return;
+		const seconds = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+		if (seconds < 1) {
+			new Notice("请先开始播放，再标注时间点");
+			return;
+		}
+		const timeLabel = this.formatPodcastTime(seconds);
+		const fallbackLabel = sanitizeBookmarkLabel(`${entry.title || "播客"} · ${timeLabel}`);
+		new BookmarkModal(this.app, label => {
+			const finalLabel = sanitizeBookmarkLabel(label) || fallbackLabel;
+			this.annotations.bookmarks.push({
+				id: Date.now(),
+				anchor: `audio:${seconds.toFixed(2)}`,
+				label: finalLabel,
+			});
+			void this.persistAnnotations().then(ok => {
+				if (!ok) return;
+				this.syncAnnotationViews();
+				new Notice(`已标注 ${timeLabel}`);
+			});
+		}, {
+			title: "标注播客时间点",
+			description: `给 ${timeLabel} 写一句备注，保存后会出现在书签与高亮面板。`,
+			placeholder: "例如：这里讲到关键结论",
+		}).open();
+	}
+
+	private jumpPodcastTo(seconds: number): void {
+		const audio = this.podcastAudioEl;
+		if (!audio || !this.podcastBarRef) {
+			new Notice("请先打开播客，再点击时间戳");
+			return;
+		}
+		const duration = Number.isFinite(audio.duration) && audio.duration > 0 ? audio.duration : Number.POSITIVE_INFINITY;
+		const target = Math.max(0, Math.min(duration, seconds));
+
+		// 不管元数据到没到，先尝试设置；很多浏览器在 HAVE_METADATA 之前也能接受 seek。
+		try {
+			audio.currentTime = target;
+		} catch {
+			// 设不了的话放到 pending 里，等 loadedmetadata 后再跳
+			this.podcastPendingSeek = target;
+		}
+
+		// 同步 UI 并开始播放（播放在某些浏览器里需要用户手势，
+		// 点时间戳本身就是用户手势，所以直接 play 应该能成功）
+		this.syncPodcastProgressUi();
+		this.capturePodcastProgress();
+		void audio.play().catch(() => {
+			// 播放失败没关系，至少跳到了对应时间
+		});
+
+		// 给用户一个反馈：跳转到了几分几秒
+		const mins = Math.floor(target / 60);
+		const secs = Math.floor(target % 60);
+		const timeStr = mins > 59
+			? `${Math.floor(mins / 60)}:${String(mins % 60).padStart(2, "0")}:${String(secs).padStart(2, "0")}`
+			: `${mins}:${String(secs).padStart(2, "0")}`;
+		new Notice(`跳转到 ${timeStr}`);
+	}
+
+	private async togglePodcastPlayback(): Promise<void> {
+		const audio = this.podcastAudioEl;
+		if (!audio || !this.podcastBarRef) return;
+		if (audio.paused) {
+			audio.playbackRate = this.podcastSpeed;
+			try {
+				await audio.play();
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				new Notice(`播客播放失败：${message}`);
+			}
+		} else {
+			audio.pause();
+		}
+		this.paintPodcastPlayButton();
+	}
+
+	/** 当前文章是播客时显示播放条；切换到其它文章/书时由 applyReaderSource 收起。 */
+	private showPodcastBar(entry: FeedEntry): void {
+		const url = entry.enclosure?.url;
+		const audio = this.podcastAudioEl;
+		if (entry.kind !== "audio" || !url || !audio || !this.podcastBarEl) {
+			this.hidePodcastBar();
+			return;
+		}
+		this.rootEl.addClass("has-podcast");
+		this.scheduleFloatingFit();
+		audio.playbackRate = this.podcastSpeed;
+		this.syncPodcastSleepButton();
+		const same = this.podcastBarRef?.feedId === entry.feedId
+			&& this.podcastBarRef.entryId === entry.id
+			&& !!audio.getAttribute("src");
+		if (same && this.podcastBarRef) {
+			void this.refreshPodcastDownloadState(this.podcastBarRef);
+			return;
+		}
+		const ref = { feedId: entry.feedId, entryId: entry.id, url };
+		this.podcastBarRef = ref;
+		this.podcastPendingSeek = null;
+		const resumeTarget = this.podcastResumeSeconds(entry);
+		this.podcastResumeTarget = resumeTarget > 0 ? resumeTarget : null;
+		audio.pause();
+		if (this.podcastSeekEl) this.podcastSeekEl.value = "0";
+		this.podcastTimeEl?.setText("0:00");
+		this.podcastTotalEl?.setText("0:00");
+		this.paintPodcastPlayButton();
+		audio.onloadedmetadata = () => {
+			if (this.podcastBarRef !== ref) return;
+			const pending = this.podcastPendingSeek;
+			if (pending != null) {
+				try { audio.currentTime = Math.max(0, pending); } catch { /* ignore */ }
+				this.podcastPendingSeek = null;
+				this.podcastResumeTarget = null;
+				this.syncPodcastProgressUi();
+				void audio.play().catch(() => undefined);
+				return;
+			}
+			const seconds = this.podcastResumeTarget;
+			if (seconds != null && seconds > 0 && Number.isFinite(audio.duration)) {
+				try { audio.currentTime = Math.min(seconds, Math.max(0, audio.duration - 2)); } catch { /* ignore */ }
+				this.podcastResumeTarget = null;
+				// 暂停状态没有后续 timeupdate；必须在这里立刻刷新，否则滑块仍显示 0。
+				this.syncPodcastProgressUi();
+			}
+		};
+		audio.src = url;
+		audio.load();
+		this.syncPodcastDownloadState(false);
+		void this.refreshPodcastDownloadState(ref);
+	}
+
+	private async refreshPodcastDownloadState(ref: { feedId: string; entryId: string; url: string }): Promise<void> {
+		try {
+			const cached = await this.plugin.feedMediaStore.has(ref.url);
+			if (this.podcastBarRef !== ref) return;
+			this.syncPodcastDownloadState(cached);
+			if (cached) await this.upgradePodcastSource(ref, false);
+		} catch { /* 缓存查询失败不影响在线播放 */ }
+	}
+
+	private syncPodcastDownloadState(cached: boolean): void {
+		const button = this.podcastDownloadBtn;
+		if (!button) return;
+		button.disabled = false;
+		button.toggleClass("is-cached", cached);
+		paintIcon(button, cached ? "check" : "download", cached ? "check" : "file-down");
+		const label = cached ? "播客已缓存" : "下载播客";
+		button.setAttribute("aria-label", label);
+		button.setAttribute("title", label);
+	}
+
+	private async upgradePodcastSource(ref: { feedId: string; entryId: string; url: string }, force: boolean): Promise<void> {
+		const audio = this.podcastAudioEl;
+		if (!audio || this.podcastBarRef !== ref) return;
+		if (!force && !audio.paused) return;
+		const playable = await this.plugin.feedMediaStore.playableUrl(ref.url);
+		if (playable === ref.url || this.podcastBarRef !== ref) return;
+		const seconds = this.podcastResumeTarget ?? (Number.isFinite(audio.currentTime) ? audio.currentTime : 0);
+		const resumeTarget = this.podcastResumeTarget != null;
+		const wasPlaying = !audio.paused;
+		const pendingSeek = this.podcastPendingSeek;
+		audio.onloadedmetadata = () => {
+			if (this.podcastBarRef !== ref) return;
+			if (pendingSeek != null) {
+				try { audio.currentTime = Math.max(0, pendingSeek); } catch { /* ignore */ }
+				this.podcastPendingSeek = null;
+				this.podcastResumeTarget = null;
+				this.syncPodcastProgressUi();
+				if (wasPlaying) void audio.play().catch(() => undefined);
+				return;
+			}
+			if (seconds > 0 && Number.isFinite(audio.duration)) {
+				try { audio.currentTime = Math.min(seconds, Math.max(0, audio.duration - 2)); } catch { /* ignore */ }
+				if (resumeTarget) this.podcastResumeTarget = null;
+				this.syncPodcastProgressUi();
+			}
+			if (wasPlaying) void audio.play().catch(() => undefined);
+		};
+		audio.src = playable;
+		audio.load();
+	}
+
+	/** 播客下载按钮：音频进 Obsidian 附件库，正文抓成 Markdown，笔记开头嵌入音频。 */
+	private async downloadCurrentPodcast(): Promise<void> {
+		const ref = this.podcastBarRef;
+		const button = this.podcastDownloadBtn;
+		if (!ref || !button || button.disabled) return;
+		const entry = this.plugin.feedStore.getEntry(ref.feedId, ref.entryId);
+		if (!entry) return;
+		button.disabled = true;
+		button.addClass("is-downloading");
+		paintIcon(button, "loader", "download");
+		button.setAttribute("aria-label", "正在下载并保存播客");
+		button.setAttribute("title", "正在下载并保存播客");
+		try {
+			// 播客简介经常就是真正的 show notes；只有明显只是标题/摘要时才去抓原网页。
+			let bodyEntry = entry;
+			if (entryFeedContentQuality(bodyEntry) !== "full") {
+				new Notice("正在抓取播客正文…");
+				try {
+					await this.plugin.feedService.fetchFulltext(ref.feedId, ref.entryId);
+				} catch {
+					new Notice("网页正文抓取失败，将使用播客简介保存");
+				}
+				bodyEntry = this.plugin.feedStore.getEntry(ref.feedId, ref.entryId) ?? bodyEntry;
+			}
+
+			// 不先写 IndexedDB，再读 Blob 落附件；移动端长音频会同时持有两三份大缓冲。
+			// 这里让 saveArticleNote 一次请求后直接写入 Obsidian 附件。
+			new Notice("正在保存播客笔记…");
+			const result = await saveArticleNote(this.app, {
+				title: bodyEntry.title || "未命名播客",
+				author: bodyEntry.author,
+				url: bodyEntry.url,
+				feedTitle: this.plugin.feedStore.getFeed(ref.feedId)?.title,
+				publishedAt: bodyEntry.publishedAt,
+				contentHtml: bodyEntry.contentHtml || `<p>${bodyEntry.summary || "暂无播客简介。"}</p>`,
+				audio: {
+					sourceUrl: ref.url,
+					preferredName: bodyEntry.title || "播客",
+				},
+			});
+			if (this.podcastBarRef !== ref) return;
+			if (result.audioPath) this.useLocalPodcastSource(result.audioPath);
+			const images = result.imageCount ? `，图片 ${result.imageCount} 张` : "";
+			const failedImages = result.failedImages ? `，${result.failedImages} 张图片未保存` : "";
+			const failedAudio = result.failedAudio ? "，音频未保存" : "";
+			new Notice(`已保存播客笔记：${result.path}（音频 ${result.audioPath ? "已嵌入" : "未嵌入"}${images}${failedImages}${failedAudio}）`);
+		} catch (error) {
+			if (this.podcastBarRef === ref) {
+				paintIcon(button, "x", "download");
+				button.setAttribute("aria-label", "下载失败，点击重试");
+				button.setAttribute("title", "下载失败，点击重试");
+				new Notice(`播客下载失败：${error instanceof Error ? error.message : String(error)}`);
+				window.setTimeout(() => {
+					if (!button.disabled) return;
+					button.disabled = false;
+					button.removeClass("is-downloading");
+					void this.refreshPodcastDownloadState(ref);
+				}, 2500);
+			}
+			return;
+		}
+		button.disabled = false;
+		button.removeClass("is-downloading");
+		paintIcon(button, "check", "download");
+	}
+
+	/** 播客已保存进 vault 后改用本地附件播放；保留当前进度，避免保存动作打断收听。 */
+	private useLocalPodcastSource(path: string): void {
+		const audio = this.podcastAudioEl;
+		const file = this.app.vault.getAbstractFileByPath(path);
+		if (!audio || !(file instanceof TFile) || !this.podcastBarRef) return;
+		const seconds = Number.isFinite(audio.currentTime) ? audio.currentTime : 0;
+		const resumeTarget = this.podcastResumeTarget;
+		const wasPlaying = !audio.paused;
+		const pendingSeek = this.podcastPendingSeek;
+		audio.onloadedmetadata = () => {
+			if (this.podcastBarRef == null) return;
+			const target = pendingSeek ?? resumeTarget ?? seconds;
+			if (target > 0 && Number.isFinite(audio.duration)) {
+				try { audio.currentTime = Math.min(target, Math.max(0, audio.duration - 2)); } catch { /* ignore */ }
+			}
+			this.podcastPendingSeek = null;
+			this.podcastResumeTarget = null;
+			this.syncPodcastProgressUi();
+			if (wasPlaying || pendingSeek != null) void audio.play().catch(() => undefined);
+		};
+		audio.src = this.app.vault.getResourcePath(file);
+		audio.load();
+	}
+
+	private podcastResumeSeconds(entry: FeedEntry): number {
+		// 新格式优先读独立的 audioPosition；旧数据里音频位置曾写在 position，做一次兼容。
+		const anchor = entry.state.audioPosition?.anchor
+			?? (entry.state.position?.anchor?.startsWith("audio:") ? entry.state.position.anchor : "");
+		if (!anchor.startsWith("audio:")) return 0;
+		const seconds = Number(anchor.slice("audio:".length));
+		return Number.isFinite(seconds) && seconds > 0 ? seconds : 0;
+	}
+
+	private hidePodcastBar(): void {
+		this.rootEl?.removeClass("has-podcast");
+		this.scheduleFloatingFit();
+		this.podcastBarRef = null;
+		this.podcastPendingSeek = null;
+		this.podcastResumeTarget = null;
+		const audio = this.podcastAudioEl;
+		if (audio) {
+			audio.pause();
+			audio.onloadedmetadata = null;
+			audio.removeAttribute("src");
+			try { audio.load(); } catch { /* ignore */ }
+		}
+		if (this.podcastSeekEl) this.podcastSeekEl.value = "0";
+		this.podcastTimeEl?.setText("0:00");
+		this.podcastTotalEl?.setText("0:00");
+		this.clearPodcastSleepTimer();
+		this.paintPodcastPlayButton();
+		this.syncPodcastDownloadState(false);
+	}
+
+	/** 从当前 audio 抓一帧播客进度：拖动、seek、timeupdate 共用。 */
+	private capturePodcastProgress(): void {
+		const ref = this.podcastBarRef;
+		const audio = this.podcastAudioEl;
+		if (!ref || !audio) return;
+		const entry = this.plugin.feedStore.getEntry(ref.feedId, ref.entryId);
+		if (!entry || entry.kind !== "audio") return;
+		const duration = Number.isFinite(audio.duration) ? audio.duration : (entry.enclosure?.duration ?? 0);
+		this.queuePodcastProgress(ref.feedId, ref.entryId, audio.currentTime, duration);
+	}
+
 	private queuePodcastProgress(feedId: string, entryId: string, seconds: number, duration: number): void {
 		if (!Number.isFinite(seconds) || seconds < 1) return;
 		const fraction = duration > 0 ? Math.max(0, Math.min(1, seconds / duration)) : 0;
-		this.podcastProgressPending.set(`${feedId}:${entryId}`, {
-			feedId,
-			entryId,
-			position: { anchor: `audio:${seconds.toFixed(2)}`, fraction, updatedAt: Date.now() },
-		});
+		const position: BookPosition = { anchor: `audio:${seconds.toFixed(2)}`, fraction, updatedAt: Date.now() };
+		this.podcastProgressPending.set(`${feedId}:${entryId}`, { feedId, entryId, position });
+		// 闪退窗口先由本机热缓存兜住；拖动滑块时按 250ms 节流，避免每个像素都写 localStorage。
+		const now = performance.now();
+		if (now - this.lastPodcastCheckpointAt >= 250) {
+			this.lastPodcastCheckpointAt = now;
+			this.plugin.checkpointPodcastProgress(feedId, entryId, position);
+		}
 		if (this.podcastProgressTimer != null) return;
 		this.podcastProgressTimer = window.setTimeout(() => { void this.flushPodcastProgress(); }, 5_000);
 	}
@@ -1013,10 +1719,10 @@ export class UNreaderView extends ItemView {
 			this.podcastProgressTimer = null;
 		}
 		if (!this.podcastProgressPending.size) return;
-		const byFeed = new Map<string, Array<{ entryId: string; patch: { position: BookPosition } }>>();
+		const byFeed = new Map<string, Array<{ entryId: string; patch: { audioPosition: BookPosition } }>>();
 		for (const item of this.podcastProgressPending.values()) {
 			const patches = byFeed.get(item.feedId) ?? [];
-			patches.push({ entryId: item.entryId, patch: { position: item.position } });
+			patches.push({ entryId: item.entryId, patch: { audioPosition: item.position } });
 			byFeed.set(item.feedId, patches);
 		}
 		this.podcastProgressPending.clear();
@@ -1061,12 +1767,34 @@ export class UNreaderView extends ItemView {
 	}
 
 	private reorderBookshelf(paths: string[]): void {
-		const seen = new Set<string>();
-		this.plugin.settings.bookshelfManualOrder = paths.filter(path => {
-			if (!path || seen.has(path)) return false;
-			seen.add(path);
-			return true;
-		});
+		// 分类筛选下只能看到当前分类的卡片；若直接用这批路径覆盖全量手动排序，
+		// 会把其他分类的顺序悄悄丢掉。这里把当前可见项作为“块”放回其原本的
+		// 首个位置，未出现在当前筛选里的书保持原相对顺序。
+		const incoming: string[] = [];
+		const incomingSet = new Set<string>();
+		for (const path of paths) {
+			if (!path || incomingSet.has(path)) continue;
+			incoming.push(path);
+			incomingSet.add(path);
+		}
+
+		const previous = this.plugin.settings.bookshelfManualOrder ?? [];
+		const preserved = previous.filter(path => !incomingSet.has(path));
+		const previousFirstVisible = previous.findIndex(path => incomingSet.has(path));
+		let insertAt = preserved.length;
+		if (previousFirstVisible >= 0) {
+			insertAt = 0;
+			for (const path of previous) {
+				if (path === previous[previousFirstVisible]) break;
+				if (!incomingSet.has(path)) insertAt++;
+			}
+		}
+
+		this.plugin.settings.bookshelfManualOrder = [
+			...preserved.slice(0, insertAt),
+			...incoming,
+			...preserved.slice(insertAt),
+		];
 		this.plugin.settings.bookshelfSortMode = "manual";
 		void this.plugin.persistData();
 		this.annotationsPanel.setMode("bookshelf");
@@ -1100,6 +1828,7 @@ export class UNreaderView extends ItemView {
 	/** 按钮排紧贴标注面板右缘：读取面板实际宽度设置 left（CSS 变量在面板宽度
 	 *  被拖拽过的情况下可能不同步，导致按钮排与面板之间出现空隙/重叠） */
 	private alignActionsRail(): void {
+		this.syncImmersionSwitchOffset();
 		const panel = this.annotationsPanel?.containerEl;
 		const rail = this.sideNav?.actionsEl;
 		if (!panel || !rail) return;
@@ -1117,6 +1846,28 @@ export class UNreaderView extends ItemView {
 				rail.style.removeProperty("opacity");
 			}
 		} catch { /* ignore */ }
+	}
+
+	/** 侧栏打开时把灯绳移到抽屉右缘之外；关闭后恢复左缘。宽度取实测值，
+	 *  手机 75vw、桌面拖拽宽度、横竖屏切换都无需另写公式。 */
+	private syncImmersionSwitchOffset(): void {
+		const root = this.rootEl;
+		if (!root) return;
+		try {
+			const panel = this.annotationsPanel?.containerEl;
+			if (!panel?.hasClass("is-open")) {
+				root.style.removeProperty("--ur-immersion-switch-left");
+				return;
+			}
+			const rootWidth = root.clientWidth || this.bodyEl?.clientWidth || window.innerWidth || 0;
+			const panelWidth = panel.offsetWidth || 0;
+			const switchWidth = this.immersionSwitchEl?.offsetWidth || 26;
+			const maxLeft = Math.max(0, rootWidth - switchWidth - 8);
+			const left = Math.max(0, Math.min(panelWidth + 10, maxLeft));
+			root.style.setProperty("--ur-immersion-switch-left", Math.round(left) + "px");
+		} catch {
+			root.style.removeProperty("--ur-immersion-switch-left");
+		}
 	}
 
 	getFile(): TFile | null {
@@ -1640,6 +2391,7 @@ export class UNreaderView extends ItemView {
 					this.plugin.settings.feeds.loadRemoteImages !== false && this.plugin.settings.feeds.imageCacheMb > 0,
 				);
 				this.currentFeedEntry = { ...this.currentFeedEntry, contentHtml: prepared };
+				this.showPodcastBar(this.currentFeedEntry);
 				target = makeFeedBook(this.currentFeedEntry, feed);
 			}
 			if (token !== this.loadingToken) return;
@@ -1665,7 +2417,8 @@ export class UNreaderView extends ItemView {
 				},
 				onScrollActivity: active => this.handleScrollActivity(active),
 				onSwipe: info => this.handleFrameSwipe(info),
-				onTapZone: ratio => this.handleTapZone(ratio),
+				onTapZone: (ratio, stamp) => this.handleTapZone(ratio, stamp),
+				onPodcastTimestamp: seconds => this.jumpPodcastTo(seconds),
 				onNavDerived: () => this.renderNavPanel(),
 			});
 
@@ -1771,6 +2524,9 @@ export class UNreaderView extends ItemView {
 				this.rootEl.removeClass("chrome-revealed");
 			}
 			this.syncNativeNav("open");
+			if (source.kind === "feed-entry") {
+				void this.autoFetchFeedFulltext(source.feedId, source.entryId);
+			}
 		} catch (e) {
 			console.error("[UNreader] failed to open book", e);
 			const label = this.currentFeedEntry?.title || this.file?.basename || "内容";
@@ -1820,14 +2576,15 @@ export class UNreaderView extends ItemView {
 			this.clearMirrorSelection();
 		}
 		this.dismissHover();
-		if (this.footnoteBackdrop) this.closeFootnotePopup();
 		// 恢复落定前不落盘：此刻视口还在书首（或占位估算落点），写进去等于把
 		// 用户的阅读位置冲掉。恢复期结束后的第一次 relocate 会把真实位置补上。
 		// 去抖写之外还有一条**关闭/退出时**的立即写（flushPosition），它读的是
 		// cursor —— 所以「可落盘的位置」必须在这一处统一登记，否则两条路会分叉。
 		const sourceKey = this.currentSourceKey();
 		if (sourceKey && !this.restoring) {
-			this.cursor.note(sourceKey, info.cfi, info.fraction, Date.now(), true);
+			const capturedAt = Date.now();
+			this.cursor.note(sourceKey, info.cfi, info.fraction, capturedAt, true);
+			this.checkpointPosition(sourceKey, info, capturedAt);
 			this.savePositionDebounced(sourceKey, info);
 		}
 		this.updateChapterProgress(info.sectionFraction);
@@ -1854,6 +2611,7 @@ export class UNreaderView extends ItemView {
 		// 接上之后：关掉它，顶部整条进度条消失 —— 一眼可见。
 		this.progressEl?.toggleClass("is-off", !on);
 		if (on) this.updateChapterProgress(this.lastRelocate?.sectionFraction ?? 0);
+		this.syncImmersionSwitchJoin();
 		this.syncFullImmersionPresentation();
 	}
 
@@ -1878,14 +2636,18 @@ export class UNreaderView extends ItemView {
 			this.fullImmersion && a.showTocRail === true && a.fullImmersionShowTocRail === true);
 		root.toggleClass("full-immersion-show-progress",
 			this.fullImmersion && a.chapterProgress !== false && a.fullImmersionShowChapterProgress === true);
+		this.syncImmersionSwitchJoin();
+		const label = this.fullImmersion ? "退出全沉浸" : "进入全沉浸";
 		const switchEl = this.immersionSwitchEl;
 		if (switchEl) {
-			const label = this.fullImmersion ? "退出全沉浸" : "进入全沉浸";
 			switchEl.toggleClass("is-on", this.fullImmersion);
 			switchEl.setAttribute("aria-pressed", this.fullImmersion ? "true" : "false");
 			switchEl.setAttribute("aria-label", label);
 			switchEl.setAttribute("title", label);
 		}
+		this.railImmersionBtn?.toggleClass("is-active", this.fullImmersion);
+		this.railImmersionBtn?.setAttribute("aria-label", label);
+		this.railImmersionBtn?.setAttribute("title", label);
 	}
 
 	/** 打开目录面板（若可开）。浮动目录独立于工具层，不通过命令改写 chrome 显隐。
@@ -1912,6 +2674,21 @@ export class UNreaderView extends ItemView {
 		const f = Number.isFinite(fraction) ? Math.min(1, Math.max(0, fraction)) : 0;
 		this.progressFill?.style.setProperty("--p", String(f));
 		this.sideNav?.setChapterProgress(f);
+	}
+
+	/** 把当前位置同步写进本机热缓存；节流只影响写入频率，不影响 cursor 的完整记录。
+	 *  真正的文件写仍走 800ms 去抖 + ProgressStore 的 1s 去抖。 */
+	private checkpointPosition(key: string, info: RelocateInfo, capturedAt: number): void {
+		if (!info.cfi) return;
+		const now = performance.now();
+		if (key === this.lastCheckpointKey && now - this.lastCheckpointAt < 250) return;
+		this.lastCheckpointKey = key;
+		this.lastCheckpointAt = now;
+		this.plugin.checkpointSourcePosition(key, {
+			anchor: info.cfi,
+			fraction: info.fraction,
+			updatedAt: capturedAt,
+		});
 	}
 
 	/** 立即落盘当前位置（关闭视图 / 退出应用 / 切后台）。
@@ -2109,6 +2886,8 @@ export class UNreaderView extends ItemView {
 		contentEl.addClass("unreader-content-el");
 
 		this.rootEl = contentEl.createDiv({ cls: "unreader-root" });
+		this.podcastBarEl = this.rootEl.createDiv({ cls: "unreader-podcast-bar" });
+		this.buildPodcastBar();
 
 		const body = (this.bodyEl = this.rootEl.createDiv({ cls: "unreader-body" }));
 
@@ -2133,10 +2912,21 @@ export class UNreaderView extends ItemView {
 		// 都来自同一个数值，设置应用推迟到 sideNav 建好之后（见 applyChapterProgressSetting）。
 
 		this.annotationsPanel = new AnnotationsPanel({
-			onJump: (cfi, textHint) => {
+			onJump: (anchor, textHint) => {
+				// 播客书签用 audio:秒 作为位置 token；点击后直接回到音频时间点。
+				if (anchor.startsWith("audio:")) {
+					const seconds = Number(anchor.slice("audio:".length));
+					const audio = this.podcastAudioEl;
+					if (audio && this.podcastBarRef && Number.isFinite(seconds)) {
+						try { audio.currentTime = Math.max(0, seconds); } catch { /* ignore */ }
+						void audio.play().catch(() => undefined);
+						this.syncPodcastProgressUi();
+						return;
+					}
+				}
 				this.pendingBackJump = true;
 				// 书签/高亮点击：jumpToCfi 精确定位（章内比例/文本位置），而非只到章节开头
-				void this.adapter.jumpToCfi(cfi, textHint);
+				void this.adapter.jumpToCfi(anchor, textHint);
 				this.adapter.focusContent();
 			},
 			onPreviewHighlight: (item, anchorEl) => {
@@ -2150,8 +2940,11 @@ export class UNreaderView extends ItemView {
 			// 书签页码现算（不落盘）：口径与右下角页码指示器完全同源
 			getPageForAnchor: anchor => this.adapter.getPageForAnchor(anchor),
 			onTogglePin: () => this.togglePinned(),
-			// 面板开合（含被外部关闭）→ 功能轨「标注列表」按钮高亮跟随
-			onOpenChange: () => this.syncRailButtons(),
+			// 面板开合（含被外部关闭）→ 功能轨高亮与灯绳避让同步跟随
+			onOpenChange: () => {
+				this.syncRailButtons();
+				this.syncImmersionSwitchOffset();
+			},
 			onModeChange: () => this.syncRailButtons(),
 			getBookshelfEntries: () => sortBookshelfEntries(
 				getBookshelfEntries(this.plugin),
@@ -2164,6 +2957,12 @@ export class UNreaderView extends ItemView {
 			onBookshelfSortModeChange: mode => this.setBookshelfSortMode(mode),
 			onBookshelfReorder: paths => this.reorderBookshelf(paths),
 			onToggleBookPin: path => this.toggleBookPin(path),
+			getBookshelfCategories: () => this.plugin.settings.bookshelfCategories ?? [],
+			getBookshelfCategoryFilter: () => this.bookshelfCategoryFilter,
+			onBookshelfCategoryFilterChange: filter => { this.bookshelfCategoryFilter = filter; },
+			onAssignBookCategory: (path, categoryId) => void this.plugin.assignBookshelfCategory(path, categoryId),
+			onRemoveBookFromShelf: path => void this.plugin.removeBookFromBookshelf(path),
+			onOpenBookshelfCategoryManager: () => this.plugin.openBookshelfCategoryManager(),
 			onOpenBook: path => void this.openBookFromShelf(path),
 			loadBookPreview: path => {
 				const file = this.app.vault.getFileByPath(path);
@@ -2174,7 +2973,7 @@ export class UNreaderView extends ItemView {
 			getFeedEntries: () => this.plugin.feedStore.listEntries(),
 			getFeedFilter: () => this.feedFilter,
 			getFeedSourceFilter: () => this.feedSourceFilter,
-			getCurrentFeedEntry: () => this.feedRef ? { ...this.feedRef } : null,
+			getCurrentFeedEntry: () => this.feedRef ? { ...this.feedRef, kind: this.currentFeedEntry?.kind } : null,
 			onFeedFilterChange: filter => { this.feedFilter = filter; },
 			onFeedSourceFilterChange: feedId => { this.feedSourceFilter = feedId; },
 				onOpenFeedEntry: (feedId, entryId) => void this.openFeedEntry(feedId, entryId),
@@ -2285,8 +3084,6 @@ export class UNreaderView extends ItemView {
 			});
 			this.stageResizeObserver.observe(this.contentHost);
 		}
-		this.contentHost.addEventListener("pointerdown", () => {
-		});
 		// 分页模式已删除：连续模式下横向滑动由 Obsidian 原生侧栏手势接管，
 		// 不再挂载任何触摸拦截监听器（capture+stopPropagation 一律撤掉）。
 
@@ -2306,7 +3103,7 @@ export class UNreaderView extends ItemView {
 			void this.plugin.openBookPicker();
 		});
 
-						this.sideNav = new SideNav();
+		this.sideNav = new SideNav();
 		this.bookOnlyNavControls.push(this.sideNav.addIconButton("chevron-up", "上一章", () => this.goPrevChapter()));
 		this.bookOnlyNavControls.push(this.sideNav.addIconButton("chevron-left", "上一页", () => void this.adapter.prev()));
 		// 页码显示在上一页/下一页按钮之间，点击弹出页码跳转面板
@@ -2324,6 +3121,7 @@ export class UNreaderView extends ItemView {
 		this.sideNav.onPanelOpenChange = () => this.syncRailButtons();
 		this.railShelfBtn = this.sideNav.addIconButton("library", "书籍侧边栏", () => this.toggleBookshelf());
 		this.railFeedsBtn = this.sideNav.addIconButton("rss", "订阅", () => this.toggleFeeds());
+		this.sideNav.addSeparator();
 		// 「阅读原文」只对 Feed 文章有意义：非 Feed 源下由 CSS 收走（is-feed-only-control）
 		this.railOriginalBtn = this.sideNav.addIconButton("external-link", "在浏览器打开原文", () => this.openCurrentFeedOriginal());
 		this.railOriginalBtn.addClass("is-feed-only-control");
@@ -2341,8 +3139,14 @@ export class UNreaderView extends ItemView {
 		this.railStarBtn.addClass("is-feed-only-control");
 		const railBookmarkBtn = this.sideNav.addIconButton("bookmark", "添加书签", () => this.openBookmarkModal());
 		railBookmarkBtn.addClass("is-book-only-control");
+		this.sideNav.addSeparator();
 		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", "阅读外观", () => this.toggleAppearance());
 		this.railSearchBtn = this.sideNav.addIconButton("search", "搜索正文", () => this.toggleSearch());
+		this.railImmersionBtn = this.sideNav.addIconButton("maximize-2", "进入全沉浸", () => {
+			this.playImmersionSwitchPull();
+			this.toggleFullImmersion();
+		});
+		paintIcon(this.railImmersionBtn, "maximize-2", "scan");
 		// 「阅读设备」：只对本地 HTML（网页原样通道）有意义 —— 固定宽度 / min-width 的桌面页面
 		// 在手机上会横向溢出，而 frame 内 touch-action:pan-y 把横滑让给了原生侧栏手势，
 		// 右半页永远够不着（用户报的「手机上打开 HTML 看不全」）。这枚按钮把整页按设备视口
@@ -2354,7 +3158,6 @@ export class UNreaderView extends ItemView {
 		this.sideNav.addIconButton("settings", "打开设置", () => this.openPluginSettings());
 		this.sideNav.setBackHandler(() => this.goBack());
 		body.appendChild(this.sideNav.actionsEl);
-		body.appendChild(this.sideNav.backEl);
 		body.appendChild(this.sideNav.navEl);
 		// 沉浸模式拉绳开关：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏。
 		// 图形完全由 CSS 绘制，避免 iPad / 旧版本图标集缺名时只剩系统按钮底框。
@@ -2374,6 +3177,7 @@ export class UNreaderView extends ItemView {
 		pull.createSpan({ cls: "unreader-immersion-switch-bar-mid" });
 		pull.createSpan({ cls: "unreader-immersion-switch-bar-long" });
 		pull.createSpan({ cls: "unreader-immersion-switch-bar-short" });
+		this.immersionSwitchEl.createSpan({ cls: "unreader-immersion-switch-hit" });
 		this.immersionSwitchEl.addEventListener("pointerdown", e => e.stopPropagation());
 		this.immersionSwitchEl.addEventListener("click", e => {
 			e.preventDefault();
@@ -2381,6 +3185,20 @@ export class UNreaderView extends ItemView {
 			this.playImmersionSwitchPull();
 			this.toggleFullImmersion();
 		});
+
+		// 这两个元素就是浮动轨道的上下边界：页首下压按钮、原生底栏顶起播客条时，
+		// 观察器会立刻重算，不必等下一次窗口 resize。
+		if (typeof ResizeObserver !== "undefined") {
+			this.floatingFitObserver = new ResizeObserver(() => this.scheduleFloatingFit());
+			this.floatingFitObserver.observe(this.immersionSwitchEl);
+			if (this.podcastBarEl) this.floatingFitObserver.observe(this.podcastBarEl);
+		}
+		// `top` 过渡不一定改变元素尺寸（ResizeObserver 可能不响），所以过渡期间
+		// 主动跑一段逐帧测量；页首下压/回收时轨道会跟着连续移动，不会中途压住。
+		const followTransition = (): void => this.scheduleFloatingFit(380);
+		this.immersionSwitchEl.addEventListener("transitionrun", followTransition);
+		this.immersionSwitchEl.addEventListener("transitionstart", followTransition);
+		this.immersionSwitchEl.addEventListener("transitionend", followTransition);
 
 		// 章节进度外观开关：sideNav 此时才建好（进度显示在章节轨的当前章短横内部）
 		this.applyChapterProgressSetting();
@@ -2400,7 +3218,7 @@ export class UNreaderView extends ItemView {
 			)) return;
 			const w = this.rootEl?.clientWidth ?? 0;
 			if (w <= 0) return;
-			this.handleTapZone(e.clientX / w);
+			this.handleTapZone(e.clientX / w, e.timeStamp);
 		});
 
 		// 点击空白处自动关闭浮动工具条/高亮气泡（与 Obsidian 原生 hover 行为一致）
@@ -3468,7 +4286,15 @@ export class UNreaderView extends ItemView {
 	 *  只开后者时，工具栏保持常显、原生界面照样随滚动让位；
 	 *  两个都关时滚动什么都不做。 */
 	private handleScrollActivity(direction: "up" | "down"): void {
-		if (this.fullImmersion) return;
+		// 全沉浸时工具层状态机冻结，但滑动过程中官方仍可能把系统状态栏放出来，
+		// 这里不展开任何 UI，只把状态栏重新压住（内部按当前隐藏态去重）。
+		if (this.fullImmersion) {
+			this.reassertStatusBarHidden();
+			return;
+		}
+		// 真正的用户滚动才是脚注气泡的关闭信号。不能放在 handleRelocate：看书时
+		// 补载章节也会让 relocate 连续刷新，悬停气泡刚出现就会被误关。
+		if (this.footnoteBackdrop) this.closeFootnotePopup();
 		const appearance = this.plugin.settings.appearance;
 		const scrollHide = appearance.normalModeScrollHide !== false;
 		const takeOverNative = appearance.normalModeHideNativeChrome === true;
@@ -3485,8 +4311,21 @@ export class UNreaderView extends ItemView {
 			}
 			if (takeOverNative) this.nativeScrollHidden = true;
 		} else {
+			// 上滑唤出的是**插件工具层**（chrome-hidden → 亮出工具栏）；Obsidian 的原生
+			// 页首/底栏**不能跟着一起出来** —— 用户 2026-09-20 的明确要求是
+			// 「向下滚动隐藏、向上滚动不出现，就像桌面端一样」。
+			//
+			// ⚠️ **只靠「不复位 nativeScrollHidden」是不够的**（2026-09-23 修，用户报
+			// 「快速滑动时底栏弹出来、又被立刻藏回去，快速闪烁」）：判据 headerHiddenByUs
+			// 里含 chromeHidden 这一项，而上滑恰好会清掉它 —— 于是当本次会话还没下滑过
+			// （nativeScrollHidden 仍为 false）时，上滑会让原生判据整体变假，底栏被放出来；
+			// 下一拍下滑再把它藏回去 = 一闪。快速滑动时方向反复翻转，这一闪会连续复现。
+			// 因此：**上滑前工具层本来就收起着（= 此刻确实处于沉浸态）时，把「原生已被接管」
+			// 这个事实钉住**，让上滑只亮工具栏、不放原生。若工具层本来就是亮的（原生本就在
+			// 显示），则不改变现状 —— 那一步用户看到的是一致的，不该凭空把底栏藏掉。
+			const wasChromeHidden = this.rootEl?.hasClass("chrome-hidden") ?? false;
 			if (scrollHide) this.rootEl?.removeClass("chrome-hidden");
-			// 「接管原生界面」不在这里复位：向上滚动不把原生界面顶出来（只藏不自动显）。
+			if (takeOverNative && wasChromeHidden) this.nativeScrollHidden = true;
 			// 复位只走显式唤出：handleTapZone / releaseNativeNav / 外观变更 / 退出全沉浸。
 		}
 		this.syncNativeNav(direction === "down" ? "scroll-down" : "scroll-up");
@@ -3569,6 +4408,10 @@ export class UNreaderView extends ItemView {
 	private appliedHole = 0;
 	/** 开书宽限期：布局稳定期间的滚动不触发下滑隐藏（不影响上滑唤出） */
 	private immersiveGraceUntil = 0;
+	/** 点按投递去重：上一次已处理点按的原生事件时间戳与处理时刻。
+	 *  见 handleTapZone 头注释 —— 防「一次手势被投递两次」把翻转开关翻两下。 */
+	private lastTapStamp = -1;
+	private lastTapAt = 0;
 
 	/** 本机是否处于**手机形态**（官方 `body.is-phone`）。
 	 *
@@ -3778,6 +4621,11 @@ export class UNreaderView extends ItemView {
 			// 判据的**唯一来源**：五条输入事实一次性读出（页首与底栏共用同一份事实，
 			// 保证「要藏一起藏」）。
 			const inputs = this.immersiveNativeInputs();
+			// 源头闸门：目标态是隐藏时，官方 restoreNavigation/show 不再执行，
+			// 底栏和键盘工具条不会进入 DOM；目标态恢复显示时立即还原官方方法。
+			// 这里只传判据，不把 wrapper 分散进各条同步路径。
+			NativeChromeGate.sync(this, this.app, () => this.nativeNavWanted());
+
 			// 顶栏：元素级类，只作用于本视图自己的 view-header。
 			// 仅在隐藏状态真正翻转时操作（滚动事件会高频重复调用）。
 			// 只做 transform+opacity 合成器动画，不碰布局（不动 margin/display），
@@ -3801,6 +4649,7 @@ export class UNreaderView extends ItemView {
 			// 跟上），而 DOM 只在「实际与目标不一致」时动 —— 既保持热路径（滚动会
 			// 高频调用本函数）上的零开销（`classList.contains` 是纯读、不变则不写
 			// 样式、不失效），又能在**下一次任何同步**里自愈。
+			if (headerHidden && this.headerHiddenState === false) this.captureVisibleHeaderBottom();
 			if (headerHidden !== this.headerHiddenState) this.headerHiddenState = headerHidden;
 			if (header && header.classList.contains("unreader-header-hidden") !== headerHidden) {
 				header.toggleClass("unreader-header-hidden", headerHidden);
@@ -4139,6 +4988,159 @@ export class UNreaderView extends ItemView {
 		this.appliedHole = hole;
 	}
 
+	/**
+	 * 精准避让：把左右两条浮动轨道夹在真实上下边界之间。
+	 *
+	 * 旧版只算出「可用高度」，却仍让轨道按阅读区中心点摆放。只要页首把左上角
+	 * 沉浸按钮压下来，或原生底栏把播客条顶上去，中心点没有跟着移动，轨道就会
+	 * 仍然压到按钮/播客条。这里改成两件事同时做：
+	 *   1. 实测上边界（沉浸按钮底边）和下边界（播客条顶边 / 原生底栏上沿）；
+	 *   2. 把「可用高度」和「区间中心相对 body 中心的偏移」一起写给 CSS。
+	 *
+	 * 这样轨道内容短时在可用区内居中；内容长到装不下时，会先被 max-height
+	 * 夹住，再贴着上下边界滚动，绝不会继续越过边界。
+	 */
+	private syncActionsAvailableHeight(): void {
+		const root = this.rootEl;
+		const body = this.bodyEl;
+		if (!root || !body) return;
+		const bodyRect = body.getBoundingClientRect();
+		if (bodyRect.height <= 0) return;
+
+		const bodyTop = bodyRect.top;
+		const bodyBottom = bodyRect.bottom;
+		let topLimit = bodyTop;
+		let bottomLimit = bodyBottom;
+
+		// 上边界：左上角沉浸拉绳的真实底边。它会被页首/安全区整体下压，
+		// 因此不能写死 48px，也不能拿它的 top 当边界。
+		const immersionSwitch = this.immersionSwitchEl;
+		if (immersionSwitch) {
+			const cs = window.getComputedStyle(immersionSwitch);
+			const rect = immersionSwitch.getBoundingClientRect();
+			if (cs.display !== "none" && cs.visibility !== "hidden" && rect.width > 0 && rect.height > 0) {
+				topLimit = Math.max(topLimit, rect.bottom);
+			}
+		}
+
+		// 点按唤出时，页首正在做 0.3s 滑回动画。工具栏只做“向右滑出”，
+		// 纵向直接使用最近一次页首可见时的最终边界，避免先向右、再跟着页首下移。
+		const revealActive = !!root.hasClass("chrome-revealed") || !!root.hasClass("full-immersion-revealed");
+		if (revealActive && this.headerHiddenState === false) {
+			if (this.lastVisibleHeaderBottom == null && this.lastHolePx > 0) {
+				this.lastVisibleHeaderBottom = topLimit + this.lastHolePx;
+			}
+			if (this.lastVisibleHeaderBottom != null) {
+				topLimit = Math.max(topLimit, this.lastVisibleHeaderBottom);
+			}
+		}
+
+		// 下边界：播客条会随原生底栏一起上升，必须读它当前的真实顶边；
+		// 没有播客条时仍要让开原生底栏本身，避免轨道钻到底栏下面。
+		const nativeBottomOverlap = bottomBarOverlap(body);
+		if (nativeBottomOverlap > 0) bottomLimit = Math.min(bottomLimit, bodyBottom - nativeBottomOverlap);
+		const podcastBar = this.podcastBarEl;
+		if (podcastBar) {
+			const cs = window.getComputedStyle(podcastBar);
+			const rect = podcastBar.getBoundingClientRect();
+			if (cs.display !== "none" && cs.visibility !== "hidden" && rect.width > 0 && rect.height > 0) {
+				bottomLimit = Math.min(bottomLimit, rect.top);
+			}
+		}
+
+		// 先夹回 body；上下边界交叉时宁可收成 0 高，也不能反向溢出。
+		topLimit = Math.max(bodyTop, Math.min(topLimit, bodyBottom));
+		bottomLimit = Math.max(topLimit, Math.min(bottomLimit, bodyBottom));
+
+		// 取整时向区间内侧取：顶部上取整、底部下取整，避免亚像素把 1px 叠回 UI 上。
+		const top = Math.ceil(topLimit - bodyTop);
+		const bottom = Math.floor(bottomLimit - bodyTop);
+		const available = Math.max(0, bottom - top);
+		// 连一枚按钮都放不下时不再画半截边框/内容：这比“压住其它 UI”更安全。
+		root.classList.toggle("is-floating-cramped", available < 24);
+		const centerShift = (top + bottom) / 2 - bodyRect.height / 2;
+		const shift = Number.isFinite(centerShift) ? centerShift.toFixed(1) : "0";
+
+		// 只在值变化时写，避免 ResizeObserver 回调里产生无意义样式失效。
+		const setVar = (name: string, value: string): void => {
+			if (root.style.getPropertyValue(name) !== value) root.style.setProperty(name, value);
+		};
+		setVar("--ur-actions-max-height", `${available}px`);
+		setVar("--ur-actions-center-shift", `${shift}px`);
+		setVar("--ur-nav-max-height", `${available}px`);
+		setVar("--ur-nav-center-shift", `${shift}px`);
+		setVar("--ur-nav-panel-max", `${available}px`);
+
+		// 页首动画结束后刷新缓存：下一次“隐藏 → 唤出”会直接使用这份最终几何。
+		if (this.headerHiddenState === false && this.holeP === 0
+			&& !this.headerIsAnimating(this.viewHeaderEl())) {
+			this.lastVisibleHeaderBottom = topLimit;
+		}
+	}
+
+	/** 记录页首可见时的最终下边界，供下一次唤出时直接采用。 */
+	private captureVisibleHeaderBottom(): void {
+		const el = this.immersionSwitchEl;
+		if (!el) return;
+		try {
+			const cs = window.getComputedStyle(el);
+			const rect = el.getBoundingClientRect();
+			if (cs.display !== "none" && cs.visibility !== "hidden" && rect.width > 0 && rect.height > 0) {
+				this.lastVisibleHeaderBottom = rect.bottom;
+			}
+		} catch { /* ignore */ }
+	}
+
+	/** 页首是否还在跑 transform 过渡（不支持 getAnimations 时按未动画处理）。 */
+	private headerIsAnimating(header: HTMLElement | null): boolean {
+		if (!header) return false;
+		try {
+			return header.getAnimations().some(animation => animation.playState === "running");
+		} catch {
+			return false;
+		}
+	}
+
+	/** 合并同一帧内的多次边界变化；带 burstMs 时在过渡窗口内逐帧跟随。 */
+	private scheduleFloatingFit(burstMs = 0): void {
+		if (burstMs > 0) {
+			this.floatingFitBurstUntil = Math.max(
+				this.floatingFitBurstUntil,
+				performance.now() + burstMs,
+			);
+		}
+		if (this.floatingFitRaf != null) return;
+		const tick = (): void => {
+			this.floatingFitRaf = null;
+			this.syncActionsAvailableHeight();
+			if (performance.now() < this.floatingFitBurstUntil) {
+				this.floatingFitRaf = window.requestAnimationFrame(tick);
+			}
+		};
+		this.floatingFitRaf = window.requestAnimationFrame(tick);
+	}
+
+	/** 灯绳与章节进度条的交界：进度条实际显示时，竖线从进度条下沿起；
+	 *  设置关闭或全沉浸隐藏进度条时，竖线回到按钮顶边，避免悬空。 */
+	private syncImmersionSwitchJoin(): void {
+		const root = this.rootEl;
+		if (!root) return;
+		let top = 0;
+		try {
+			const bar = this.progressEl;
+			if (bar?.isConnected && !bar.hasClass("is-off")) {
+				const style = window.getComputedStyle(bar);
+				if (style.display !== "none") {
+					const height = Number.parseFloat(style.height);
+					top = Number.isFinite(height) && height > 0 ? height : 3;
+				}
+			}
+		} catch {
+			top = 0;
+		}
+		root.style.setProperty("--ur-immersion-switch-stem-top", `${top}px`);
+	}
+
 	private syncProgressTop(): void {
 		const bar = this.progressEl;
 		const root = this.rootEl;
@@ -4154,6 +5156,8 @@ export class UNreaderView extends ItemView {
 		let pad = safeTop;
 		// --ur-top-inset（不透明悬浮 UI，如搜索面板）的让位量。**与 pad 不同口径**，见下方注释
 		let uiInset = safeTop;
+		// 手机悬浮页首可见时，灯绳需要额外延长的距离（相对按钮 top）；页首滑走后归零。
+		let switchAvoid = 0;
 		// --ur-header-hole：页首被我们隐藏后，它在叶子顶部留下的那条**流内空隙**的高度，
 		// 单位是叶子坐标。仅供 styles.css 的 `.unreader-root::before` 把这条空隙补成
 		// 阅读区底色用（见那里的注释）。这是「把空隙搬进阅读器自己的子树」所需的那一个
@@ -4327,9 +5331,15 @@ export class UNreaderView extends ItemView {
 			uiInset = (headerBottom != null && !hiddenByUs)
 				? Math.max(headerBottom, safeTop)
 				: safeTop;
+			// 只认「悬浮页首当前确实还挂在屏幕上」：页首用 transform 滑走时 rect 下缘会
+			// 落到安全区以内，此时必须让灯绳回到原长，不能为一个已经离开屏幕的元素继续延长。
+			switchAvoid = floating && !hiddenByUs && headerBottom != null && headerBottom > safeTop
+				? Math.max(0, headerBottom - pad)
+				: 0;
 		} catch {
 			pad = safeTop;
 			uiInset = safeTop;
+			switchAvoid = 0;
 		}
 		bar?.style.setProperty("--ur-progress-top", `${Math.round(pad)}px`);
 		// **镜像到根容器**（--ur-top-inset）：搜索面板等「贴在内容区顶边之下」的不透明
@@ -4337,10 +5347,13 @@ export class UNreaderView extends ItemView {
 		//  独占（官方「全屏 / 悬浮导航」同样会把它收走），写死 CSS 公式必然在某些形态下
 		//  为不存在的页首继续留位。写在 .unreader-root 上由其后代继承（面板挂在 .unreader-body 内）。
 		root.style.setProperty("--ur-top-inset", `${Math.round(uiInset)}px`);
-		// 拉绳开关与进度条共用同一份「页首下沿 / 页首收起后的顶边」实测值。
-		// 写在 root 上是刻意的：开关与进度条都是 root 的直接子节点，且 CSS 过渡会让
-		// 它在页首滑走的 0.3s 内一起上移，不需要第二套监听或定时器。
+		// 拉绳开关的 top 仍跟进度条共用「页首下沿 / 页首收起后的顶边」实测值；
+		// 手机悬浮页首另写一份 avoid 距离，让竖线延长到页首下缘之后，横线不被浮层盖住。
+		// 两份都写在 root 上：开关与进度条都是 root 的直接子节点，CSS 过渡会与页首
+		// 自身的 0.3s 动画同拍；页首滑走后 avoid=0，绳子自动缩回原长。
 		root.style.setProperty("--ur-immersion-switch-top", `${Math.round(pad)}px`);
+		root.style.setProperty("--ur-immersion-switch-avoid", `${Math.round(switchAvoid)}px`);
+		this.syncImmersionSwitchJoin();
 		// **底部让位（--ur-bottom-inset）**：`.unreader-body` 底边被屏幕底那条原生栏压住
 		// 多少像素。标注侧边栏是**贴底铺满的不透明抽屉**，`bottom:0` 时列表最后几行正好
 		// 落进悬浮底栏（`.mobile-navbar`）底下 —— 既看不见也点不到（见 styles.css 的
@@ -4349,6 +5362,13 @@ export class UNreaderView extends ItemView {
 		// 元素摘出 DOM，见 installNavForensics），写死高度必然在某些形态下为一个不存在的
 		// 栏继续留位。判据与 `usableBottom` 共用一份实现（keyboardInset.nativeBarTop）。
 		root.style.setProperty("--ur-bottom-inset", `${bottomBarOverlap(this.bodyEl)}px`);
+
+		// ── 精准避让：计算工具栏（actions）的可用高度 ──
+		// 直接实测「上面的沉浸按钮底部」和「下面的播客条顶部」，
+		// 算出中间的精确可用高度，写成 CSS 变量让工具栏直接用。
+		// 这样从一开始就刚好贴合，不会重叠，也不用靠估算。
+		this.syncActionsAvailableHeight();
+
 		// 页首留下的那条流内空隙的高度，交给 styles.css 的
 		// `.workspace-leaf-content.unreader-header-hidden::before` 用**阅读区自己的底色**
 		// 补上（见那里的长注释：v1 刷叶子色 → v2 root::before → v3 叶子::before）。
@@ -4523,6 +5543,8 @@ export class UNreaderView extends ItemView {
 	/** 释放 is-hidden-nav（切换视图/关书/关沉浸模式时调用，无条件清理——
 	 *  该类一旦残留，markdown 的官方恢复逻辑不会摘掉它，底栏将永远消失） */
 	private releaseNativeNav(): void {
+		// 先还原官方 show/restoreNavigation，再摘 app 级类；否则释放后仍可能吞掉官方挂回。
+		NativeChromeGate.release(this);
 		this.nativeNavManaged = false;
 		// 滚动态是会话内瞬时态，释放时一并复位（下一次滚动重新建立）
 		this.nativeScrollHidden = false;
@@ -4573,6 +5595,15 @@ export class UNreaderView extends ItemView {
 	/** 最近一次原生桥调用是否真正可用，供进度条安全区降级判断。 */
 	private statusBarBridgeUsable = true;
 
+	/** 状态栏纠察：当前本视图确实把状态栏藏着时，无动画再压回去一次。
+	 *  触发点有两处 —— 自愈守卫发现官方 restoreNavigation（摘类的同一步官方会
+	 *  StatusBar.show）；全沉浸中用户滑动（官方悬浮导航可能趁机放出状态栏）。
+	 *  只在我们真的持有隐藏态时动作，退出沉浸后不会误藏。 */
+	private reassertStatusBarHidden(): void {
+		if (!this.statusBarHiddenState) return;
+		this.setSystemStatusBarVisible(false);
+	}
+
 	/** 隐藏/恢复系统状态栏（时间、电量等 OS 级 UI）——仅移动端，尽力而为。
 	 *  OS 状态栏不在 WebView 内，只能经 Obsidian App（Capacitor）暴露的原生桥：
 	 *  window.Capacitor.Plugins.StatusBar。Obsidian 官方未打包该插件时桥缺失，
@@ -4621,7 +5652,9 @@ export class UNreaderView extends ItemView {
 		this.fullImmersionRevealed = false;
 		this.sideNav?.closePanel();
 		if (this.appearancePanel?.isOpen()) this.appearancePanel?.close();
+		this.annotationsPanel?.containerEl?.addClass("is-immersion-hidden");
 		if (this.annotationsPanel?.isOpen()) this.annotationsPanel?.hide();
+		this.alignActionsRail();
 		if (this.searchOpen) this.toggleSearch(false);
 		this.selectionToolbar?.hide();
 		if (this.footnoteBackdrop) this.closeFootnotePopup();
@@ -4677,6 +5710,7 @@ export class UNreaderView extends ItemView {
 		// 全沉浸期间冻结的滚动态不要带出会话：退出后先按常态全显示，
 		// 下一次滚动重新按「接管原生界面」收放。
 		this.nativeScrollHidden = false;
+		this.annotationsPanel?.containerEl?.removeClass("is-immersion-hidden");
 		this.rootEl?.removeClass("is-full-immersion");
 		this.rootEl?.removeClass("full-immersion-revealed");
 		this.rootEl?.removeClass("full-immersion-show-toc");
@@ -4793,6 +5827,10 @@ export class UNreaderView extends ItemView {
 		this.railAnnoBtn?.toggleClass("is-active", panelOpen && !shelfMode && !feedsMode);
 		this.railAppearanceBtn?.toggleClass("is-active", !!this.appearancePanel?.isOpen());
 		this.railSearchBtn?.toggleClass("is-active", this.searchOpen);
+		const immersionLabel = this.fullImmersion ? "退出全沉浸" : "进入全沉浸";
+		this.railImmersionBtn?.toggleClass("is-active", this.fullImmersion);
+		this.railImmersionBtn?.setAttribute("aria-label", immersionLabel);
+		this.railImmersionBtn?.setAttribute("title", immersionLabel);
 		// 星标：已收藏 = 实心星 + 高亮底（`.is-starred` 只加图标填充，颜色沿用 `.is-active`）；
 		// 无障碍名也跟着状态走 —— 读屏与悬浮提示读的是「点下去会发生什么」。
 		const starred = this.currentFeedEntry?.state.starredAt != null;
@@ -4854,7 +5892,28 @@ export class UNreaderView extends ItemView {
 	 *  工具栏已完整展示（展开/钉住）→ 全部隐藏。
 	 *  非沉浸模式：复用同一条点按通道，但只切左缘功能轨「完整滑出 ↔ 收回半隐藏」，
 	 *  不动其它 chrome（它们本来就是常显的）——即「快速开/关工具栏」。 */
-	private handleTapZone(_ratio: number): void {
+	private handleTapZone(_ratio: number, stamp?: number): void {
+		// ── 同一次手势只认一次（投递去重）──────────────────────────────────────
+		// 「点按唤出」是**纯翻转**状态机（隐藏→唤出／已展→收起），所以被投递两次就
+		// 翻转两次 = 净无变化，或「唤出又立刻收起」。移动端上这两拍会分别推给原生
+		// 底栏/状态栏桥，肉眼就是「底栏弹出来又缩回去」（用户 2026-09-23 报：沉浸模式
+		// 点屏幕中间，底部工具栏连闪两次）。
+		//
+		// 两道闸门：
+		//   ① **同一原生事件**：同一个 click 被多条链（frame 内 wireTapZone / 宿主 body
+		//      委托）分别命中时 event.timeStamp **完全相同** → 丢弃后到的那次；
+		//   ② **同一手势兜底**：不同事件但属同一次点按（如 pointerup 与 click 各自投递）
+		//      时，用极短窗口 TAP_DEDUP_MS 合并。
+		// 只做「丢弃重复」这一件事，不改变任何翻转语义。
+		const now = performance.now();
+		if (stamp != null && stamp === this.lastTapStamp) return;
+		// ⚠️ 兜底窗口**只对带时间戳的真实用户事件生效**：内部/程序化调用（回归夹具
+		// 直接调本方法、未来可能的内部复用）不带 stamp，绝不能被吞掉 —— 否则会把
+		// 「点一下唤出、再点一下收起」这类有意连点的语义弄坏。
+		if (stamp != null && this.lastTapStamp >= 0 && now - this.lastTapAt < TAP_DEDUP_MS) return;
+		this.lastTapStamp = stamp ?? -1;
+		this.lastTapAt = now;
+
 		// 全沉浸的滚动状态机始终冻结；点按只在设置允许时临时唤出常态界面。
 		if (this.fullImmersion) {
 			if (this.hasFloatingPanelOpen()) {
@@ -5081,6 +6140,11 @@ export class UNreaderView extends ItemView {
 	/* ---------------- doc events / input ---------------- */
 
 	private wireDocEvents(doc: Document, index: number): void {
+		// 同一章节文档只接一次：连续模式由 wireFrame 接，分页模式由 foliate load 接；
+		// 两条路径都可能被上层重复触发，重复挂监听会让键盘/点按链路各执行两次。
+		const wiredDoc = doc as Document & { __unreaderDocEventsWired?: boolean };
+		if (wiredDoc.__unreaderDocEventsWired) return;
+		wiredDoc.__unreaderDocEventsWired = true;
 		// 脚注 Cmd/Ctrl 状态同步到 engine（iframe 内按键）
 		doc.addEventListener("keydown", e => {
 			// 模态框（命令面板/快速切换/设置）开着时整条让路：此时键盘不该在书页里
@@ -5111,7 +6175,7 @@ export class UNreaderView extends ItemView {
 		});
 		doc.addEventListener("click", e => {
 			if (this.isFeedSource() || this.isHtmlSource()) {
-				const target = e.target instanceof Element ? e.target.closest<HTMLAnchorElement>("a[href]") : null;
+				const target = eventElement(e)?.closest<HTMLAnchorElement>("a[href]") ?? null;
 				const href = target?.href ?? "";
 				if (/^https?:/i.test(href)) {
 					// **只吞掉这次点击，不在这里打开**：打开动作已收口到引擎的
@@ -5350,6 +6414,13 @@ export class UNreaderView extends ItemView {
 	 * 把「可用高度」直接写进 bounds（而不是另开一个 bottomInset 参数）：
 	 * placeFloating 的贴底/钳制都以 bounds 为界，一份口径只有一个来源，不会两处各减一次。
 	 */
+	/** 底部播客播放条占掉的高度；隐藏/未打开播客时为 0。 */
+	private podcastBarHeight(): number {
+		if (!this.rootEl?.hasClass("has-podcast")) return 0;
+		const height = this.podcastBarEl?.offsetHeight ?? 0;
+		return Number.isFinite(height) && height > 0 ? height : 0;
+	}
+
 	private stageBoundsNow(): Bounds {
 		const stageRect = this.contentHost.getBoundingClientRect();
 		const bodyRect = this.bodyEl.getBoundingClientRect();
@@ -5357,7 +6428,7 @@ export class UNreaderView extends ItemView {
 			left: stageRect.left - bodyRect.left,
 			top: stageRect.top - bodyRect.top,
 			width: stageRect.width,
-			height: this.clampHeightToUsable(stageRect.height, bodyRect.bottom),
+			height: Math.max(0, this.clampHeightToUsable(stageRect.height, bodyRect.bottom) - this.podcastBarHeight()),
 		};
 	}
 
@@ -5366,7 +6437,7 @@ export class UNreaderView extends ItemView {
 		const rect = this.bodyEl.getBoundingClientRect();
 		return {
 			width: this.bodyEl.clientWidth,
-			height: this.clampHeightToUsable(this.bodyEl.clientHeight, rect.bottom),
+			height: Math.max(0, this.clampHeightToUsable(this.bodyEl.clientHeight, rect.bottom) - this.podcastBarHeight()),
 		};
 	}
 
@@ -5786,4 +6857,22 @@ export class UNreaderView extends ItemView {
  * 连续模式横向滑动由 Obsidian 原生侧栏手势（从屏幕边缘划入）接管，
  * 不再在阅读器视图层做任何 capture 拦截。
  */
+}
+
+/**
+ * 从事件里取出「元素」目标，跨 iframe 安全。
+ *
+ * ⚠️ **不能用 `e.target instanceof Element`**：章节正文跑在独立的 iframe 里，
+ * iframe 有自己的 JS realm，它的 `Element` 构造函数与主窗口的不是同一个对象 ——
+ * `iframe里的元素 instanceof 主窗口的Element` 恒为 `false`。结果是所有
+ * 「这次点的是不是链接」的判断静默失效：播客时间戳点击不被拦截、外链拦截失效，
+ * 事件继续冒泡去触发界面显隐切换（用户报的「点时间戳只会显示/隐藏所有元素」）。
+ *
+ * 判据改用 `nodeType === 1`（元素节点），这是跨 realm 恒等的数字常量。
+ */
+function eventElement(e: Event): Element | null {
+	const target = e.target as Node | null;
+	if (!target) return null;
+	if (target.nodeType === 1) return target as Element;
+	return (target as Node).parentElement ?? null;
 }

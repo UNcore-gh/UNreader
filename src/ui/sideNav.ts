@@ -180,11 +180,11 @@ export class SideNav {
 			if (this.open && this.panelAnchor === "actions") this.closePanel();
 		});
 
-		this.backEl = createDiv();
-		this.backEl.className = "unreader-back-btn";
-		this.backEl.setAttr("aria-label", "返回上一位置");
+		// 回到之前阅读迁入左侧工具栏，避免与底部播客条争夺右下角空间。
+		this.backEl = this.actionsPanel.createDiv();
+		this.backEl.className = "unreader-nav-action unreader-back-btn";
+		this.backEl.setAttr("aria-label", "回到之前阅读");
 		setIcon(this.backEl, "undo-2");
-		this.backEl.addClass("is-hidden");
 	}
 
 	/** 在功能按钮排中添加一枚图标按钮。 */
@@ -368,8 +368,10 @@ export class SideNav {
 	}
 
 	setBackVisible(visible: boolean): void {
-		this.backEl.toggleClass("is-visible", visible);
-		this.backEl.toggleClass("is-hidden", !visible);
+		this.backEl.toggleClass("is-active", visible);
+		const label = visible ? "回到之前阅读" : "回到之前阅读（暂无可跳转位置）";
+		this.backEl.setAttribute("aria-label", label);
+		this.backEl.setAttribute("title", label);
 	}
 
 	/** 由引擎提供展平条目（目录树 + 书源目录缺失章节的派生标题），按阅读顺序 */

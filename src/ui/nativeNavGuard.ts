@@ -88,6 +88,10 @@ export interface NativeNavGuardOptions {
 	readonly wantsHidden: () => boolean;
 	/** 权威重断言：按目标态写 `is-hidden-nav`（读者视图传 `syncNativeNav`）。 */
 	readonly sync: () => void;
+	/** 检测到 Obsidian 官方偷偷 `restoreNavigation()` 时的附加纠察：
+	 *  官方恢复导航类的同一步会 `StatusBar.show()` 把系统状态栏放出来，
+	 *  读者视图用它把状态栏无动画重新压回去（见 readerView.reassertStatusBarHidden）。 */
+	readonly onExternalRestore?: () => void;
 	/** 自愈前的等待（ms），默认 90 —— 让同一次交互里的 tap/click 链先跑完。 */
 	readonly delay?: number;
 }
@@ -132,6 +136,9 @@ export class NativeNavGuard {
 	/** body 的类变了：只有「该藏而没藏」才排队，且同批变化合并为一次。 */
 	private onBodyClassChange(): void {
 		if (!this.wanted()) return;
+		// 能走到这里说明「该藏却被外部摘掉了」——官方 restoreNavigation 在摘类的
+		// 同一步还把系统状态栏 show 了出来，顺手通知读者视图做状态栏纠察。
+		try { this.opts.onExternalRestore?.(); } catch { /* ignore */ }
 		const body = document.body;
 		// **插件视觉闸门还在、只缺官方类**：立即在同一微任务里补回，绝不跨帧。
 		// MutationObserver 回调发生在浏览器绘制之前，所以官方类不存在的窗口长度是 0 ——

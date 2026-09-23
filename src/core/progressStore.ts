@@ -67,6 +67,8 @@ export class ProgressStore {
 	private cache = new Map<string, BookPosition>()
 	/** 每本书独立的写盘 timer（去抖写 + 读失败重试共用） */
 	private writeTimers = new Map<string, number>()
+	/** 每本书串行化写盘：避免 saveNow / 去抖 / 重试并发时后发先至。 */
+	private writeChains = new Map<string, Promise<void>>()
 	/** 「已有文件但读不出来」连续跳过的次数（写成功后清零），见 writeNow */
 	private writeRetries = new Map<string, number>()
 
@@ -156,7 +158,7 @@ export class ProgressStore {
 			const existing = this.cache.get(bookPath)
 			if (existing && existing.updatedAt >= (pos.updatedAt ?? 0)) continue
 			this.mergeIn(bookPath, { anchor: legacy, fraction: pos.fraction ?? 0, updatedAt: pos.updatedAt ?? 0 })
-			void this.writeNow(bookPath)
+			void this.enqueueWrite(bookPath)
 			migrated++
 		}
 		return migrated
@@ -170,13 +172,18 @@ export class ProgressStore {
 	}
 
 	get(bookPath: string): BookPosition | undefined {
+		// 热缓存必须参与每一次读取，而不是只在内存缓存为空时兜底：
+		// 同一应用窗口里的闪退恢复、另一窗口刚写入、以及热缓存比启动时读到的
+		// 内存值更新，都要让最新那条胜出。
 		const cached = this.cache.get(bookPath)
-		if (cached) return cached
-		// 内存缓存没有 ≈ 启动时那个文件压根没读到（见类注释的三种窗口）。
-		// 热缓存是同一台设备上最后已知的位置，比「回到书首」正确得多。
 		const hot = this.hotRead(bookPath)
-		if (hot) this.mergeIn(bookPath, hot)
-		return hot ?? undefined
+		const best = !cached
+			? hot
+			: !hot || cached.updatedAt >= hot.updatedAt
+				? cached
+				: hot
+		if (best) this.mergeIn(bookPath, best)
+		return best ?? undefined
 	}
 
 	/** 书籍路径变化时迁移进度身份键（资料库文件夹迁移使用）。
@@ -323,6 +330,17 @@ export class ProgressStore {
 		}
 	}
 
+	/** 只写本机热缓存，不安排库内文件写入。
+	 *  阅读视图每次可信 relocate 调用它：即使随后闪退、去抖文件写完全没发生，
+	 *  下一次启动也能从 localStorage 取回最后位置。 */
+	checkpoint(bookPath: string, pos: BookPosition): void {
+		const anchor = legacyAnchor(pos)
+		if (!anchor) return
+		const normalized: BookPosition = { anchor, fraction: pos.fraction ?? 0, updatedAt: pos.updatedAt ?? 0 }
+		this.mergeIn(bookPath, normalized)
+		this.hotWriteCache(bookPath)
+	}
+
 	/** 写入进度（去抖 1s；调用方同步返回，不阻塞翻页/滚动）。
 	 *  热缓存是**同步**写的 —— 应用在这一拍之后被杀也不丢位置。 */
 	save(bookPath: string, pos: BookPosition): void {
@@ -347,7 +365,7 @@ export class ProgressStore {
 		this.mergeIn(bookPath, normalized)
 		this.hotWriteCache(bookPath)
 		this.clearWriteTimer(bookPath)
-		void this.writeNow(bookPath)
+		void this.enqueueWrite(bookPath)
 	}
 
 	/** 把内存缓存里的当前值同步进热缓存（见 save 里的说明） */
@@ -376,9 +394,24 @@ export class ProgressStore {
 	}
 
 	async flush(bookPath?: string): Promise<void> {
-		const targets = bookPath ? [bookPath] : [...this.writeTimers.keys()]
+		const targets = bookPath
+			? [bookPath]
+			: [...new Set([...this.writeTimers.keys(), ...this.writeChains.keys()])]
 		for (const p of targets) this.clearWriteTimer(p)
-		await Promise.all(targets.map(p => this.writeNow(p)))
+		await Promise.all(targets.map(p => this.enqueueWrite(p)))
+	}
+
+	/** 把同一本书的写入排成串：每次真正执行时都从 cache 现取最新值，
+	 *  所以并发触发不会让旧 payload 覆盖新 payload。 */
+	private enqueueWrite(bookPath: string): Promise<void> {
+		const previous = this.writeChains.get(bookPath) ?? Promise.resolve()
+		const next = previous.catch(() => undefined).then(() => this.writeNow(bookPath))
+		this.writeChains.set(bookPath, next)
+		void next.then(
+			() => { if (this.writeChains.get(bookPath) === next) this.writeChains.delete(bookPath) },
+			() => { if (this.writeChains.get(bookPath) === next) this.writeChains.delete(bookPath) },
+		)
+		return next
 	}
 
 	private async writeNow(bookPath: string): Promise<void> {

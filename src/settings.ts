@@ -295,6 +295,18 @@ export class UNreaderSettingTab extends PluginSettingTab {
 			},
 		);
 		row(
+			"自动抓取网页全文",
+			"订阅源只给标题或摘要时，打开文章会尝试读取原网页正文；网页抓取失败仍保留摘要。",
+			setting => {
+				setting.addToggle(toggle => toggle
+					.setValue(this.plugin.settings.feeds.autoFulltext)
+					.onChange(value => {
+						this.plugin.settings.feeds.autoFulltext = value;
+						void this.plugin.persistData();
+					}));
+			},
+		);
+		row(
 			"加载远程图片",
 			"关闭后文章正文中的远程图片会被移除，适合移动网络或隐私敏感场景。",
 			setting => {

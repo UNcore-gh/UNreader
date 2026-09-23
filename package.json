@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "0.3.7",
+  "version": "0.3.8",
   "description": "UNreader - A beautiful local-first reader. EPUB first, plus MOBI/AZW3, TXT, HTML and RSS feeds.",
   "main": "main.js",
   "type": "module",
@@ -17,6 +17,7 @@
     "test:engine": "esbuild test/harness.ts --bundle --outfile=test/bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning",
     "test:reload": "esbuild test/reload-entry.ts --bundle --outfile=test/reload-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning",
     "test:mobi": "esbuild test/harness-mobi.ts --bundle --outfile=test/mobi-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning",
+    "test:footnote": "esbuild test/footnote-probe.ts --bundle --outfile=test/footnote-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-startup.mjs --external:./pdf.js --log-level=warning && node test/run-footnote.mjs",
     "test:end": "esbuild test/end-probe.ts --bundle --outfile=test/end-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning",
     "test:txt": "esbuild test/txt-probe.ts --bundle --outfile=test/txt-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning && node test/run-txt.mjs",
     "test:html": "esbuild test/html-probe.ts --bundle --outfile=test/html-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-html.mjs",
@@ -47,6 +48,7 @@
     "test:rail-active": "esbuild test/rail-active-probe.ts --bundle --outfile=test/rail-active-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-rail-active.mjs",
     "test:openperf": "esbuild test/openperf-entry.ts --bundle --outfile=test/openperf-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --external:./pdf.js --log-level=warning && node test/run-openperf.mjs",
     "test:font": "esbuild test/font-panel-probe.ts --bundle --outfile=test/font-panel-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-font-panel.mjs",
+    "test:font-scale": "esbuild test/font-scale-probe.ts --bundle --outfile=test/font-scale-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-font-scale.mjs",
     "test:font-io": "node test/run-font-io.mjs",
     "test:library-heal": "node test/run-library-heal.mjs",
     "test:library-migration": "node test/run-library-migration.mjs",

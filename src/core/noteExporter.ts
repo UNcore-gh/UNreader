@@ -19,6 +19,15 @@ export interface ArticleNoteInput {
 	feedTitle?: string
 	publishedAt?: number
 	contentHtml: string
+	/** 播客音频；提供时会先落附件，再以 Obsidian 音频嵌入插入笔记开头。 */
+	audio?: PodcastAudioInput
+}
+
+export interface PodcastAudioInput {
+	/** 播客 enclosure 的原始地址；用于命名附件和 frontmatter 追溯。 */
+	sourceUrl?: string
+	/** 附件命名首选标题。 */
+	preferredName?: string
 }
 
 export interface ArticleNoteResult {
@@ -26,6 +35,8 @@ export interface ArticleNoteResult {
 	created: boolean
 	imageCount: number
 	failedImages: number
+	audioPath?: string
+	failedAudio?: boolean
 }
 
 /** 用来识别「这篇笔记是本功能生成的」：只有它才允许被覆盖。 */
@@ -44,6 +55,21 @@ const EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
 };
 
 const IMAGE_EXTENSIONS = new Set(["jpg", "jpeg", "png", "gif", "webp", "avif", "svg", "bmp"]);
+
+const AUDIO_EXTENSIONS = new Set(["mp3", "m4a", "m4b", "aac", "ogg", "oga", "opus", "wav", "flac", "weba", "webm"]);
+const AUDIO_EXTENSION_BY_CONTENT_TYPE: Record<string, string> = {
+	"audio/mpeg": "mp3",
+	"audio/mp3": "mp3",
+	"audio/mp4": "m4a",
+	"audio/x-m4a": "m4a",
+	"audio/aac": "aac",
+	"audio/ogg": "ogg",
+	"audio/opus": "opus",
+	"audio/wav": "wav",
+	"audio/x-wav": "wav",
+	"audio/flac": "flac",
+	"audio/webm": "weba",
+};
 
 function yamlString(value: string): string {
 	return JSON.stringify(value.replace(/\r?\n/g, " ").trim());
@@ -74,6 +100,31 @@ function attachmentNameFor(src: string, contentType = ""): string {
 	if (IMAGE_EXTENSIONS.has(extension)) return `${stem}.${extension}`;
 	const fromType = EXTENSION_BY_CONTENT_TYPE[contentType.split(";")[0]?.trim().toLowerCase() ?? ""];
 	return fromType ? `${stem}.${fromType}` : "";
+}
+
+function audioAttachmentName(sourceUrl: string, contentType: string, preferredName = ""): string {
+	let urlStem = "";
+	let extension = "";
+	try {
+		const url = new URL(sourceUrl);
+		const base = decodeURIComponent(url.pathname.split("/").filter(Boolean).pop() ?? "");
+		const dot = base.lastIndexOf(".");
+		if (dot > 0) {
+			urlStem = base.slice(0, dot);
+			extension = base.slice(dot + 1).toLowerCase();
+		} else {
+			urlStem = base;
+		}
+	} catch { /* 无 URL 时用首选标题 */ }
+
+	if (!AUDIO_EXTENSIONS.has(extension)) {
+		extension = AUDIO_EXTENSION_BY_CONTENT_TYPE[contentType.split(";")[0]?.trim().toLowerCase() ?? ""] ?? "";
+	}
+	if (!extension) return "";
+
+	const stem = (urlStem || preferredName || "podcast").trim();
+	const cleaned = stem.replace(/[\\/:*?"<>|#^\u005B\u005D]/g, "-").replace(/\s+/g, "-").replace(/^-+|-+$/g, "");
+	return `${(cleaned || "podcast").slice(0, 120)}.${extension}`;
 }
 
 function directoryOf(path: string): string {
@@ -109,6 +160,111 @@ async function saveRemoteImage(app: App, src: string, notePath: string): Promise
 		await app.vault.createBinary(target, response.arrayBuffer);
 		return target;
 	} catch {
+		return null;
+	}
+}
+
+async function savePodcastAudio(
+	app: App,
+	audio: PodcastAudioInput,
+	notePath: string,
+): Promise<{ path: string } | null> {
+	// 移动端下载长播客时，一次性把整段音频读进 ArrayBuffer 容易触发 OOM（闪退）。
+	// 改用 HTTP Range 分段下载：每次只拉 512KB，追加写入文件，写完一段就释放一段，
+	// 内存占用保持稳定，长音频也不会崩。
+	if (!audio.sourceUrl) return null;
+
+	// 第一步：先发个 HEAD 请求，拿到文件大小和 content-type，
+	// 同时确认服务器支持 Range（大部分都支持，不支持的话走一次性下载的兜底）。
+	let totalBytes = 0;
+	let contentType = "";
+	let supportsRange = false;
+	try {
+		const headResp = await requestUrl({
+			url: audio.sourceUrl,
+			method: "HEAD",
+			throw: false,
+		});
+		if (headResp.status !== 200) return null;
+		contentType = headResp.headers?.["content-type"] ?? headResp.headers?.["Content-Type"] ?? "";
+		const len = headResp.headers?.["content-length"] ?? headResp.headers?.["Content-Length"];
+		if (len) totalBytes = Number(len);
+		const acceptRanges = headResp.headers?.["accept-ranges"] ?? headResp.headers?.["Accept-Ranges"] ?? "";
+		supportsRange = /bytes/i.test(acceptRanges) && totalBytes > 0;
+	} catch {
+		return null;
+	}
+
+	const fileName = audioAttachmentName(audio.sourceUrl ?? "", contentType, audio.preferredName);
+	if (!fileName) return null;
+	const target = await attachmentTarget(app, fileName, notePath);
+	if (!target) return null;
+	if (app.vault.getAbstractFileByPath(target)) return { path: target };
+
+	// 文件特别小（< 2MB）或者服务器不支持 Range：一次性下载，简单直接。
+	const CHUNK_SIZE = 512 * 1024; // 512KB
+	if (!supportsRange || totalBytes < 2 * 1024 * 1024) {
+		try {
+			const response = await requestUrl({ url: audio.sourceUrl, throw: false });
+			if (response.status !== 200 || !response.arrayBuffer || response.arrayBuffer.byteLength === 0) return null;
+			await app.vault.createBinary(target, response.arrayBuffer);
+			return { path: target };
+		} catch {
+			return null;
+		}
+	}
+
+	// 分段下载：先建空文件，然后一段一段 append。
+	try {
+		// 先写第一段占位（Obsidian 的 vault API 没有直接的 appendBinary，
+		// 我们用 createBinary 先建，再用 processFile 每次追加一段）。
+		let offset = 0;
+		let firstChunk = true;
+		while (offset < totalBytes) {
+			const end = Math.min(offset + CHUNK_SIZE - 1, totalBytes - 1);
+			const chunkResp = await requestUrl({
+				url: audio.sourceUrl,
+				throw: false,
+				headers: { Range: `bytes=${offset}-${end}` },
+			});
+			// 206 = Partial Content，是 Range 的正常返回
+			if (chunkResp.status !== 206 && chunkResp.status !== 200) return null;
+			const buf = chunkResp.arrayBuffer;
+			if (!buf || buf.byteLength === 0) return null;
+
+			if (firstChunk) {
+				await app.vault.createBinary(target, buf);
+				firstChunk = false;
+			} else {
+				// 追加写入：先拿到文件对象，再 appendBinary
+				const file = app.vault.getAbstractFileByPath(target);
+				if (file && file instanceof TFile) {
+					// Obsidian 有 appendBinary 的话直接用，没有就走兜底
+					const vaultAny = app.vault as any;
+					if (typeof vaultAny.appendBinary === "function") {
+						await vaultAny.appendBinary(file, buf);
+					} else {
+						// 兜底：读出来拼上再写回去（每段 512KB，内存压力可控）
+						const existing = await app.vault.readBinary(file);
+						const combined = new Uint8Array(existing.byteLength + buf.byteLength);
+						combined.set(new Uint8Array(existing), 0);
+						combined.set(new Uint8Array(buf), existing.byteLength);
+						await app.vault.modifyBinary(file, combined.buffer);
+					}
+				} else {
+					// 文件不见了，异常退出
+					return null;
+				}
+			}
+			offset += buf.byteLength;
+		}
+		return { path: target };
+	} catch {
+		// 下载中途出错了，把已经写了一半的文件删掉，别留个坏文件在 vault 里
+		const existing = app.vault.getAbstractFileByPath(target);
+		if (existing) {
+			try { await app.vault.delete(existing); } catch { /* ignore */ }
+		}
 		return null;
 	}
 }
@@ -154,6 +310,13 @@ export async function saveArticleNote(app: App, input: ArticleNoteInput): Promis
 
 	let imageCount = 0;
 	let failedImages = 0;
+	let audioPath: string | undefined;
+	let failedAudio = false;
+	if (input.audio) {
+		const savedAudio = await savePodcastAudio(app, input.audio, path);
+		if (savedAudio) audioPath = savedAudio.path;
+		else failedAudio = true;
+	}
 	const resolved = new Map<string, string>();
 	for (const src of collectImageSources(input.contentHtml)) {
 		const saved = await saveRemoteImage(app, src, path);
@@ -179,9 +342,10 @@ export async function saveArticleNote(app: App, input: ArticleNoteInput): Promis
 		`saved: ${formatTimestamp(Date.now())}`,
 		"---",
 	].filter(Boolean).join("\n");
-	const payload = `${frontmatter}\n\n${input.url ? `> 原文：${input.url}\n\n` : ""}${body}\n`;
+	const audioEmbed = audioPath ? `![[${audioPath}]]\n\n` : "";
+	const payload = `${frontmatter}\n\n${input.url ? `> 原文：${input.url}\n\n` : ""}${audioEmbed}${body}\n`;
 
 	if (exists) await app.vault.modify(exists, payload);
 	else await app.vault.create(path, payload);
-	return { path, created, imageCount, failedImages };
+	return { path, created, imageCount, failedImages, audioPath, failedAudio };
 }
