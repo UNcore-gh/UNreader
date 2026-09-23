@@ -5020,8 +5020,13 @@ body.is-tablet .unreader-feed-card .unreader-feed-inline-action .svg-icon {
 .unreader-podcast-bar {
 	display: none;
 	position: absolute;
-	left: max(calc(8 * var(--ur-u)), env(safe-area-inset-left, 0px));
-	right: max(calc(8 * var(--ur-u)), env(safe-area-inset-right, 0px));
+	/* 与正文列同宽：JS 量 .unreader-continuous 的真实内容宽度写到 --ur-podcast-width。
+	   窄屏再用 max-width 收进安全区，避免小屏横向溢出。 */
+	left: 50%;
+	right: auto;
+	transform: translateX(-50%);
+	width: var(--ur-podcast-width, min(var(--ur-read-max, 700px), calc(100% - calc(16 * var(--ur-u)))));
+	max-width: calc(100% - max(calc(16 * var(--ur-u)), env(safe-area-inset-left, 0px) + env(safe-area-inset-right, 0px)));
 	bottom: calc(max(var(--ur-bottom-inset, 0px), env(safe-area-inset-bottom, 0px)) + calc(8 * var(--ur-u)));
 	z-index: 70;
 	flex-direction: column;

@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "0.3.8",
+  "version": "0.3.9",
   "description": "UNreader - A beautiful local-first reader. EPUB first, plus MOBI/AZW3, TXT, HTML and RSS feeds.",
   "main": "main.js",
   "type": "module",

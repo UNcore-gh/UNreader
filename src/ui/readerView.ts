@@ -5001,6 +5001,7 @@ export class UNreaderView extends ItemView {
 	 * 夹住，再贴着上下边界滚动，绝不会继续越过边界。
 	 */
 	private syncActionsAvailableHeight(): void {
+		this.syncPodcastBarWidth();
 		const root = this.rootEl;
 		const body = this.bodyEl;
 		if (!root || !body) return;
@@ -5099,6 +5100,22 @@ export class UNreaderView extends ItemView {
 		} catch {
 			return false;
 		}
+	}
+
+	/** 播客条与正文列宽对齐：量连续阅读容器扣掉左右阅读边距后的真实内容宽度。
+	 *  这里不能用固定 760px —— 正文实际宽度还受 --ur-read-max、用户边距、
+	 *  侧栏/窗口变化影响，只有量 DOM 才能始终和正文列一致。 */
+	private syncPodcastBarWidth(): void {
+		const root = this.rootEl;
+		if (!root) return;
+		const cont = this.contentHost?.querySelector<HTMLElement>(".unreader-continuous")
+			?? this.bodyEl?.querySelector<HTMLElement>(".unreader-continuous");
+		if (!cont) return;
+		try {
+			const cs = window.getComputedStyle(cont);
+			const width = cont.clientWidth - (Number.parseFloat(cs.paddingLeft) || 0) - (Number.parseFloat(cs.paddingRight) || 0);
+			if (width > 0) root.style.setProperty("--ur-podcast-width", `${Math.round(width)}px`);
+		} catch { /* 布局尚未就绪时保留上一帧宽度 */ }
 	}
 
 	/** 合并同一帧内的多次边界变化；带 burstMs 时在过渡窗口内逐帧跟随。 */
