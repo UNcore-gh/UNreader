@@ -1,7 +1,7 @@
 {
 	"id": "unreader",
 	"name": "UNreader",
-	"version": "0.3.9",
+	"version": "0.3.10",
 	"minAppVersion": "1.7.2",
 	"description": "A beautiful, fully offline e-book reader. EPUB first, plus MOBI/AZW3, TXT and HTML.",
 	"author": "UNcore",

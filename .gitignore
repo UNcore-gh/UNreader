@@ -18,3 +18,17 @@ data.json
 # Logs
 *.log
 npm-debug.log*
+
+# Public repo is binaries-only. Development source lives in UNreader-src.
+/src/
+/vendor/
+/AGENTS.md
+/CLAUDE.md
+/test/
+/.perf/
+/package.json
+/package-lock.json
+/esbuild.config.mjs
+/tsconfig.json
+/eslint.config.mts
+/LICENSE-SOURCE.md

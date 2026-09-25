@@ -24,17 +24,6 @@ A beautiful, local-first e-book reader — **EPUB first**, plus MOBI/AZW3, TXT, 
 
 **Not supported:** PDF, Markdown and FB2 are not treated as books. Obsidian's core viewer owns the `.pdf` extension and renders PDFs better than a plugin can, while other file types continue to open normally from the vault.
 
-## Source code
-
-The full TypeScript source ships in this repository (`src/`, `vendor/`, `esbuild.config.mjs`, `tsconfig.json`) so the plugin can be reviewed and rebuilt:
-
-```bash
-npm install
-npm run build   # tsc -noEmit -skipLibCheck + esbuild production bundle → main.js + styles.css
-```
-
-Development happens in the private repository `UNcore-gh/UNreader-src`; the source copies here are release snapshots. See [LICENSE-SOURCE.md](LICENSE-SOURCE.md) for the source-code licence.
-
 ## Installation
 
 ### Via BRAT (recommended for now)
@@ -85,8 +74,7 @@ No accounts. No cloud.
 
 ## License
 
-- **Compiled plugin** (`main.js`, `styles.css`, `manifest.json`) — [MIT](LICENSE): install, use and redistribute the built plugin freely.
-- **Source code** in this repository (`src/`, `vendor/`, build config) — [UNcore Source Available License](LICENSE-SOURCE.md): read, audit and learn from it; commercial use requires authorization.
+The compiled plugin (`main.js`, `styles.css`, `manifest.json`) is released under the [MIT License](LICENSE). Development source is maintained separately in the private UNcore-gh/UNreader-src repository.
 
 ---
 
@@ -115,17 +103,6 @@ No accounts. No cloud.
 | **📱 移动端适配** | 正文区横滑呼出侧栏，触屏友好的章节轨，软键盘感知布局 |
 
 **不收录 PDF / Markdown / FB2**：Obsidian 核心查看器占用了 `.pdf` 扩展名，且官方渲染比插件自造更成熟；其他类型仍可在库中正常打开，只是不作为书籍收录。
-
-## 源码
-
-完整的 TypeScript 源码随本仓库一起发布（`src/`、`vendor/`、`esbuild.config.mjs`、`tsconfig.json`），便于审核与自行构建：
-
-```bash
-npm install
-npm run build   # tsc 类型检查 + esbuild 生产打包 → main.js + styles.css
-```
-
-日常开发在私有仓库 `UNcore-gh/UNreader-src` 中进行，这里的源码是发布快照。源码许可见 [LICENSE-SOURCE.md](LICENSE-SOURCE.md)。
 
 ## 安装
 
@@ -167,5 +144,4 @@ UNreader **完全离线**：
 
 ## 许可
 
-- **编译产物**（`main.js`、`styles.css`、`manifest.json`）— [MIT](LICENSE)：可自由安装、使用、再分发。
-- **源码**（本仓库的 `src/`、`vendor/` 与构建配置）— [UNcore Source Available 协议](LICENSE-SOURCE.md)：可阅读、审计、学习；商用需授权。
+编译产物（`main.js`、`styles.css`、`manifest.json`）采用 [MIT 许可](LICENSE)。开发源码单独维护在私有仓库 `UNcore-gh/UNreader-src` 中。
