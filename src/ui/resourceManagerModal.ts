@@ -2,6 +2,7 @@ import { App } from "obsidian";
 import { UnreaderModal } from "./modalSkin";
 import type { SharedResource, SharedResourceKind } from "../core/resourceStore";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
+import { t, tf } from "../core/i18n";
 
 export interface ManagedResource extends SharedResource {
 	usedBy: number;
@@ -24,11 +25,11 @@ export class ResourceManagerModal extends UnreaderModal {
 
 	onOpen(): void {
 		markModalKeyboardSafe(this.containerEl);
-		this.titleEl.setText(this.kind === "font" ? "字体资源管理" : "图片资源管理");
+		this.titleEl.setText(this.kind === "font" ? t("resManagerFontTitle") : t("resManagerImageTitle"));
 		this.contentEl.empty();
 		this.contentEl.createDiv({
 			cls: "unreader-tag-desc",
-			text: "资源存放在库内并随库同步。保留使用 = 所有设备和预设都可使用；移除 = 在所有设备上停用，文件与引用仍保留，重新保留即可恢复；删除文件 = 清理资源本体并清除所有引用。",
+			text: t("resManagerDesc"),
 		});
 		this.renderList();
 	}
@@ -42,7 +43,10 @@ export class ResourceManagerModal extends UnreaderModal {
 		this.contentEl.querySelector(".unreader-resource-list")?.remove();
 		const list = this.contentEl.createDiv({ cls: "unreader-resource-list" });
 		if (!this.resources.length) {
-			list.createDiv({ cls: "unreader-bg-empty", text: this.kind === "font" ? "暂无字体资源" : "暂无图片资源" });
+			list.createDiv({
+				cls: "unreader-bg-empty",
+				text: this.kind === "font" ? t("resManagerEmptyFonts") : t("resManagerEmptyImages"),
+			});
 			return;
 		}
 		for (const resource of this.resources) {
@@ -53,13 +57,13 @@ export class ResourceManagerModal extends UnreaderModal {
 			info.createDiv({ cls: "unreader-resource-name", text: resource.name });
 			info.createDiv({
 				cls: "unreader-resource-meta",
-				text: `${resource.path}${resource.usedBy ? ` · ${resource.usedBy} 处使用` : ""}`,
+				text: `${resource.path}${resource.usedBy ? tf("resManagerReferenceCount", { count: resource.usedBy }) : ""}`,
 			});
 
 			const toggleLabel = row.createEl("label", { cls: "unreader-resource-toggle" });
 			const toggle = toggleLabel.createEl("input", { type: "checkbox" });
 			toggle.checked = resource.enabled;
-			toggleLabel.createSpan({ text: resource.enabled ? "保留使用" : "已移除" });
+			toggleLabel.createSpan({ text: resource.enabled ? t("resManagerKeep") : t("resManagerRemoved") });
 			toggle.addEventListener("change", () => {
 				void (async (): Promise<void> => {
 					toggle.disabled = true;
@@ -71,8 +75,8 @@ export class ResourceManagerModal extends UnreaderModal {
 
 			const del = row.createEl("button", {
 				cls: "unreader-appearance-preset-btn",
-				text: "删除文件",
-				attr: { title: "删除库内资源文件" },
+				text: t("resManagerDelete"),
+				attr: { title: t("resManagerDeleteTitle") },
 			});
 			del.addEventListener("click", () => {
 				void (async (): Promise<void> => {

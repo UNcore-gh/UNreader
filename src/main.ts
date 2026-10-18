@@ -1,6 +1,6 @@
-import { Plugin, TFile, Notice, FuzzySuggestModal, MarkdownView, WorkspaceLeaf, Platform, normalizePath } from "obsidian";
+import { Plugin, TFile, Notice, FuzzySuggestModal, MarkdownView, WorkspaceLeaf, Platform, normalizePath, MarkdownRenderer, Component } from "obsidian";
 import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance, platformAppearanceDefaults, HIGHLIGHT_COLORS } from "./types";
-import type { AiToolOverride, MarkdownNoteListItem, MarkdownNoteRecentEntry, NoteMetaSummary } from "./types";
+import type { AiToolOverride, FeedEntryKind, MarkdownNoteListItem, MarkdownNoteRecentEntry, NoteMetaSummary } from "./types";
 import { UNreaderSettingTab } from "./settings";
 import { getBookFiles, getRemovedBookshelfEntries, SUPPORTED_BOOK_FORMATS, READER_BOOK_EXT_ORDER, isReaderBookFile } from "./core/bookService";
 import { isBookExtEnabled, isMdFormatEnabled, isRssFormatEnabled, normalizeDisabledFormats } from "./core/readableFormats";
@@ -39,6 +39,14 @@ import { BookshelfCategoryManagerModal } from "./ui/bookshelfModals";
 import type { BookshelfCategory } from "./types";
 import { FeedMediaStore } from "./core/feedMediaStore";
 import { countWords } from "./core/wordCount";
+import { annotationFileFor, annotationFileForFeed, loadAnnotations, sanitizeBookmarkLabel, writeAnnotations, type AnnotationFileData, type StoredBookmark, type StoredHighlight } from "./core/annotationStore";
+import { collectHighlights } from "./core/mdSelectionMap";
+import { applyEditPlan, applyVaultEditPlan } from "./core/mdHighlightWrite";
+import { normalizeNativeSidebarMode, resolveNativeSidebarCardIntent, resolveNativeSidebarPickerMode, selectNativeSidebarKeeperIndex, selectPreferredReaderIndex, shouldMigrateNativeSidebarGroup } from "./core/nativeSidebarState";
+import { releaseNoteForVersion, releaseNoteVersionsNewestFirst, shouldPromptReleaseNotes } from "./core/releaseNotes";
+import { VIEW_TYPE_UNREADER_SIDEBAR, UNreaderSidebarView } from "./ui/nativeSidebarView";
+import type { NativeSidebarContext, SidePanelMode } from "./ui/sidePanels";
+import { ReleaseNotesModal } from "./ui/releaseNotesModal";
 
 /** UNagent 写完库内文件后的显式刷新通道（见 UNagent 的 utils/pluginNotify.ts）。
  *
@@ -58,6 +66,17 @@ const NOTE_META_EXTRA_LIMIT = 6;
 /** frontmatter 里属于「封面」语义的键：`core/noteThumb` 已把它们用作缩略图来源，
  *  再在看板里列一遍是重复信息。 */
 const COVER_META_KEYS = new Set(["cover", "thumbnail", "image", "banner", "position"]);
+
+interface NativeAnnotationBrowseInfo {
+	key: string
+	kind: NativeSidebarContext["kind"]
+	title: string
+	pickerMode: NativeSidebarContext["pickerMode"]
+	filePath: string
+	annotationPath: string
+	bookLink: string
+	feedRef?: { feedId: string; entryId: string; kind?: FeedEntryKind }
+}
 
 /** frontmatter 值 → 展示串：数组接成「、」，对象/嵌套结构不展开（看板不是 YAML 查看器）。 */
 function normalizeMetaValue(value: unknown): string {
@@ -187,6 +206,9 @@ export default class UNreaderPlugin extends Plugin {
 	 *  `onunload` 的 `clearCustomFonts()` **之后**建出 blob URL，既漏内存，
 	 *  又把刚清空的字体注册表重新灌满。 */
 	private unloaded = false;
+	private hasExistingPluginData = false;
+	private releaseNotesPromptTimer: number | null = null;
+	private activeReleaseNotesModal: ReleaseNotesModal | null = null;
 	/** 划词工具条取证**自动落盘的冷却表**：文件名 → 上次写盘时间戳。
 	 *
 	 *  为什么要按名字分别冷却（2026-10-12）：取证有**两条彼此独立**的通道 ——
@@ -198,6 +220,18 @@ export default class UNreaderPlugin extends Plugin {
 	// Obsidian 的 getActiveViewOfType 可能解析不到活动视图（表现为命令面板
 	// 首次回车不执行、点过书页后又失效），用自跟踪视图做兜底
 	private lastReader: UNreaderView | null = null;
+	private nativeSidebarContext: NativeSidebarContext | null = null;
+	private nativeSidebarAnnotationTarget: NativeSidebarContext | null = null;
+	private nativeSidebarAnnotationSequence = 0;
+	private nativeAnnotationJumpSequence = 0;
+	private nativeAnnotationMutationQueues = new Map<string, Promise<void>>();
+	private nativeSidebarContextOwner: object | null = null;
+	private nativeSidebarLeafPromise: Promise<WorkspaceLeaf | null> | null = null;
+	private sidebarCardNavigationIntent = 0;
+	private pendingSidebarCardKey: string | null = null;
+	private pendingSidebarAnnotationIntent: { key: string; navigationIntent: number } | null = null;
+	private sidebarCardOpenPromises = new Map<string, Promise<boolean>>();
+	private sidebarCardOpenQueue: Promise<boolean> | null = null;
 	/** markdown 阅读视图叠加层（进度条 / 章节目录条 / 沉浸会话）。
 	 *  插件不接管 .md —— 只寄生在官方阅读模式视图上，见 ui/mdOverlay.ts 文件头。 */
 	mdOverlay: MdOverlayManager | null = null;
@@ -608,6 +642,7 @@ export default class UNreaderPlugin extends Plugin {
 		// 2026-09-19 起再往后挪一档：**等主线程真正闲下来**才读盘建 blob，理由见
 		// `prewarmCustomFonts` 的注释。
 		this.app.workspace.onLayoutReady(() => {
+			this.migrateExistingNativeSidebarLeaf();
 			void this.prewarmCustomFonts().catch(e => console.warn("[UNreader] refresh custom fonts failed", e));
 		});
 
@@ -678,22 +713,33 @@ export default class UNreaderPlugin extends Plugin {
 			}
 		}
 		this.registerView(VIEW_TYPE_UNREADER, leaf => new UNreaderView(leaf, this));
+		this.registerView(VIEW_TYPE_UNREADER_SIDEBAR, leaf => new UNreaderSidebarView(leaf, this));
 		this.addSettingTab(new UNreaderSettingTab(this.app, this));
 
 		// 跟踪最近活动的阅读视图（命令解析兜底的数据源之一）
 		this.registerEvent(this.app.workspace.on("active-leaf-change", leaf => {
 			if (!leaf) return;
+			if (leaf.view instanceof UNreaderSidebarView) return;
 			try {
 				if (leaf.view?.getViewType() === VIEW_TYPE_UNREADER) {
 					this.lastReader = leaf.view as UNreaderView;
 				}
 			} catch { /* ignore */ }
+			if (leaf.view instanceof UNreaderView) this.updateNativeSidebarContext(leaf.view.getNativeSidebarContext(), leaf);
+			else if (leaf.view instanceof MarkdownView) this.updateNativeSidebarContext(this.mdOverlay?.getNativeSidebarContext(leaf) ?? null, leaf);
+			else this.updateNativeSidebarContext(null, leaf);
+			this.syncNativeSidebarToolbarButtons();
 			// 笔记阅读计时：Markdown 笔记走的是**官方**阅读模式（不是我们的视图），
 			// 所以「正在读哪篇笔记」只能从活动叶子推。
 			this.syncNoteReadingTimer();
 		}));
+		this.registerEvent(this.app.workspace.on("layout-change", () => {
+			this.migrateExistingNativeSidebarLeaf();
+			this.syncNativeSidebarToolbarButtons();
+		}));
 
 this.registerCommands();
+		this.scheduleReleaseNotesReminder();
 
 		// 划词工具条「被官方快速编辑栏遮挡」的**自动落盘出口**（见 selectionDiag）。
 		//
@@ -739,6 +785,11 @@ this.registerCommands();
 			},
 		});
 		this.addCommand({
+			id: "view-release-notes",
+			name: t("cmdReleaseNotes"),
+			callback: () => this.openReleaseNotes(),
+		});
+		this.addCommand({
 			id: "open-book",
 			name: t("cmdOpenBook"),
 			callback: () => {
@@ -771,7 +822,7 @@ this.registerCommands();
 		this.addCommand({
 			id: "toggle-bookshelf",
 			name: t("cmdToggleBookshelf"),
-			callback: () => withReader(view => view.toggleBookshelf()),
+			callback: () => { void this.openSidePanel("bookshelf"); },
 		});
 		this.addCommand({
 			id: "toggle-feeds",
@@ -783,8 +834,16 @@ this.registerCommands();
 					new Notice(t("noticeRssFormatDisabled"));
 					return;
 				}
-				withReader(view => view.toggleFeeds());
+				void this.openSidePanel("feeds");
 			},
+		});
+		// 侧栏位置（用户 2026-10-17）：默认落左侧；这条命令左右切换，**没打开时直接去右侧**。
+		// 它与「打开书架 / 订阅」互补：那两条读偏好侧，切换命令翻转偏好 —— 所以切过一次之后
+		// 「打开」不会又把它搬回来（否则切换等于白切）。
+		this.addCommand({
+			id: "toggle-sidebar-side",
+			name: t("cmdToggleSidebarSide"),
+			callback: () => { void this.toggleNativeSidebarSide(); },
 		});
 		this.addCommand({
 			id: "refresh-feeds",
@@ -937,6 +996,8 @@ this.registerCommands();
 	async applyLanguage(pref: LangPref): Promise<void> {
 		this.settings.language = normalizeLangPref(pref);
 		setLang(resolveLang(this.settings.language));
+		this.getActiveReader()?.refreshAppearancePanel();
+		this.mdOverlay?.refreshLanguageAll();
 		await this.persistData();
 		this.reapplyCommands();
 	}
@@ -1018,10 +1079,15 @@ this.registerCommands();
 	/** 记录/清除存活阅读视图（由 readerView 在加载完成、获得焦点与关闭时调用） */
 	noteActiveReader(view: UNreaderView): void {
 		this.lastReader = view;
+		const active = this.app.workspace.activeLeaf;
+		if (active === view.leaf || active?.view instanceof UNreaderSidebarView) {
+			this.updateNativeSidebarContext(view.getNativeSidebarContext(), view.leaf);
+		}
 	}
 
 	forgetActiveReader(view: UNreaderView): void {
 		if (this.lastReader === view) this.lastReader = null;
+		if (this.nativeSidebarContextOwner === view || this.nativeSidebarContextOwner === view.leaf) this.updateNativeSidebarContext(null);
 	}
 
 	getActiveReader(): UNreaderView | null {
@@ -1496,20 +1562,20 @@ this.registerCommands();
 			onDelete: async resource => {
 				const used = this.resourceUsageCount(resource.id);
 				if (used > 0 && !await confirmAction(this.app, {
-					title: "删除资源",
-					body: `删除库内资源文件“${resource.name}”后，它会随库同步删除；${used} 处配置会清除对此资源的引用，之后需要重新选择文件才能恢复。确定删除？`,
-					cta: "删除",
+						title: t("resDeleteConfirmTitle"),
+						body: tf("resDeleteConfirmBody", { name: resource.name, count: used }),
+						cta: t("resManagerDelete"),
 					destructive: true,
 				})) return;
 				if (!await this.resourceStore.remove(resource.id)) {
-					new Notice("资源删除失败");
+						new Notice(t("resDeleteFailed"));
 					return;
 				}
 				const index = resources.findIndex(item => item.id === resource.id);
 				if (index >= 0) resources.splice(index, 1);
 				this.clearResourceReferences(resource.id, kind);
 				await refresh();
-				new Notice(`已删除资源“${resource.name}”`);
+					new Notice(tf("resDeleted", { name: resource.name }));
 			},
 		}).open();
 	}
@@ -1576,23 +1642,762 @@ this.registerCommands();
 		return this.getActiveReader()?.getSelectionForExternal() ?? null;
 	}
 
-	/** 打开/聚焦阅读器首页：默认**不**打开任何书或文章，落到空态（书架抽屉自动
-	 *  拉开，选书 / 订阅都在侧栏完成）。已挂着书/文章的阅读器叶子由 goHome 清回
-	 *  空态 —— 进度早已落盘，书架里一点就回来。
-	 *  ⚠️ 同类型叶子上不要用 setViewState「重建」：Obsidian 对同类型走的是
-	 *  setState 捷径（不重建视图），空 state 轻则原样保留、重则 setState 里读
-	 *  undefined.source 抛错被 void 吞掉 —— 命令「什么效果都没有」的根因。 */
+	/** 兼容入口：既有命令/快捷键继续可用，但只打开独立侧栏，不动正文阅读内容。 */
 	async openReader(): Promise<void> {
-		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)[0];
-		const leaf = existing ?? this.app.workspace.getLeaf(true);
-		if (leaf.view?.getViewType() !== VIEW_TYPE_UNREADER) {
-			await leaf.setViewState({ type: VIEW_TYPE_UNREADER });
-		} else {
-			(leaf.view as UNreaderView).goHome();
-		}
-		void this.app.workspace.revealLeaf(leaf);
+		await this.openSidePanel();
 	}
 
+	/** 原生侧栏里的列表/标注都复用一份内容身份，切换正文时不会串到上一份数据。 */
+	getNativeSidebarContext(): NativeSidebarContext | null { return this.nativeSidebarContext; }
+
+	clearNativeSidebarAnnotationTarget(): void {
+		this.nativeSidebarAnnotationSequence++;
+		this.setNativeSidebarAnnotationTarget(null);
+	}
+
+	private setNativeSidebarAnnotationTarget(target: NativeSidebarContext | null): void {
+		this.nativeSidebarAnnotationTarget = target;
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.setAnnotationTarget(target);
+	}
+
+	private findLiveNativeAnnotationContext(key: string): NativeSidebarContext | null {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (!(leaf.view instanceof UNreaderView)) continue;
+			const context = leaf.view.getNativeSidebarContext();
+			if (context?.key === key) return context;
+		}
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			if (!(leaf.view instanceof MarkdownView)) continue;
+			const context = this.mdOverlay?.getNativeSidebarContext(leaf) ?? null;
+			if (context?.key === key) return context;
+		}
+		return null;
+	}
+
+	private nativeAnnotationBrowseInfo(key: string): NativeAnnotationBrowseInfo | null {
+		if (key.startsWith("book:")) {
+			const filePath = key.slice("book:".length);
+			const file = this.app.vault.getFileByPath(filePath);
+			if (!(file instanceof TFile) || !isReaderBookFile(file) || !isBookExtEnabled(file.extension, this.settings.disabledFormats)) return null;
+			return { key, kind: "book", title: file.basename, pickerMode: "bookshelf", filePath: file.path, annotationPath: annotationFileFor(file), bookLink: file.path };
+		}
+		if (key.startsWith("markdown:")) {
+			const filePath = key.slice("markdown:".length);
+			const file = resolveNoteFile(this.app, filePath);
+			if (!(file instanceof TFile) || !isMarkdownNoteFile(this.app, file)) return null;
+			return { key, kind: "markdown", title: file.basename, pickerMode: "notes", filePath: file.path, annotationPath: file.path, bookLink: file.path };
+		}
+		if (key.startsWith("feed:")) {
+			if (!isRssFormatEnabled(this.settings.disabledFormats)) return null;
+			const rest = key.slice("feed:".length);
+			const feed = this.feedStore.listFeeds().sort((a, b) => b.id.length - a.id.length)
+				.find(candidate => rest.startsWith(`${candidate.id}:`));
+			if (!feed) return null;
+			const entryId = rest.slice(feed.id.length + 1);
+			const entry = entryId ? this.feedStore.getEntry(feed.id, entryId) : null;
+			if (!entry) return null;
+			return {
+				key, kind: "feed", title: entry.title || feed.title, pickerMode: "feeds",
+				filePath: "", annotationPath: annotationFileForFeed(feed.id, entry.id, entry.title),
+				bookLink: entry.url || entry.title, feedRef: { feedId: feed.id, entryId: entry.id, kind: entry.kind },
+			};
+		}
+		return null;
+	}
+
+	private markdownAnnotationData(source: string): AnnotationFileData {
+		return {
+			highlights: collectHighlights(source).map((span, index) => ({
+				id: index + 1, color: span.color, anchor: `md:${span.contentStart}:${span.contentEnd}`, text: span.plain,
+			})),
+			bookmarks: [],
+		};
+	}
+
+	private async loadNativeAnnotationData(info: NativeAnnotationBrowseInfo): Promise<AnnotationFileData> {
+		if (info.kind !== "markdown") return loadAnnotations(this.app.vault, info.annotationPath, info.bookLink);
+		const file = resolveNoteFile(this.app, info.filePath);
+		if (!(file instanceof TFile) || !isMarkdownNoteFile(this.app, file)) throw new Error("笔记已移动或删除");
+		const view = this.app.workspace.getLeavesOfType("markdown").map(leaf => leaf.view)
+			.find((candidate): candidate is MarkdownView => candidate instanceof MarkdownView && candidate.file?.path === info.filePath);
+		if (view?.getMode?.() === "source" && view.editor?.getValue) return this.markdownAnnotationData(view.editor.getValue());
+		return this.markdownAnnotationData(await this.app.vault.read(file));
+	}
+
+	private findLiveMarkdownView(path: string): MarkdownView | null {
+		for (const leaf of this.app.workspace.getLeavesOfType("markdown")) {
+			if (leaf.view instanceof MarkdownView && leaf.view.file?.path === path) return leaf.view;
+		}
+		return null;
+	}
+
+	private cloneAnnotationData(data: AnnotationFileData): AnnotationFileData {
+		return { highlights: data.highlights.map(item => ({ ...item })), bookmarks: data.bookmarks.map(item => ({ ...item })) };
+	}
+
+	private async loadNativeAnnotationBrowseTarget(info: NativeAnnotationBrowseInfo): Promise<NativeSidebarContext> {
+		await this.whenDataReady();
+		const live = this.findLiveNativeAnnotationContext(info.key);
+		if (live) return live;
+		let data = await this.loadNativeAnnotationData(info);
+		const annotation = {
+			key: info.key,
+			data: () => this.cloneAnnotationData(data),
+			onJump: (anchor: string, hint?: string) => { void this.jumpFromNativeAnnotationTarget(info.key, anchor, hint); },
+			onPreview: (item: StoredHighlight, anchorEl: HTMLElement) => this.findLiveNativeAnnotationContext(info.key)?.annotation.onPreview(item, anchorEl),
+			onComment: (id: number, comment: string) => {
+				if (info.kind === "markdown") return;
+				const expected = data.highlights.find(item => item.id === id);
+				if (!expected) return;
+				this.queueStoredAnnotationMutation(info, fresh => {
+					const current = fresh.highlights.find(item => item.id === id && item.anchor === expected.anchor && item.text === expected.text);
+					if (!current) return false;
+					current.comment = comment.trim() || undefined;
+					return true;
+				}, next => { data = next; });
+			},
+			onCopyReference: (item: StoredHighlight) => { void this.copyNativeAnnotationReference(item.text, info.title, info.annotationPath); },
+			onDeleteHighlight: (id: number) => {
+				const expected = data.highlights.find(item => item.id === id);
+				if (!expected) return;
+				if (info.kind === "markdown") {
+					void this.deleteMarkdownAnnotation(info, expected, next => { data = next; });
+					return;
+				}
+				this.queueStoredAnnotationMutation(info, fresh => {
+					const index = fresh.highlights.findIndex(item => item.id === id && item.anchor === expected.anchor && item.text === expected.text);
+					if (index < 0) return false;
+					fresh.highlights.splice(index, 1);
+					return true;
+				}, next => { data = next; });
+			},
+			onDeleteBookmark: (id: number) => {
+				if (info.kind === "markdown") return;
+				const expected = data.bookmarks.find(item => item.id === id);
+				if (!expected) return;
+				this.queueStoredAnnotationMutation(info, fresh => {
+					const index = fresh.bookmarks.findIndex(item => item.id === id && item.anchor === expected.anchor && item.label === expected.label);
+					if (index < 0) return false;
+					fresh.bookmarks.splice(index, 1);
+					return true;
+				}, next => { data = next; });
+			},
+			onRenameBookmark: (id: number, label: string) => {
+				if (info.kind === "markdown") return;
+				const expected = data.bookmarks.find(item => item.id === id);
+				const nextLabel = sanitizeBookmarkLabel(label);
+				if (!expected || !nextLabel || nextLabel === expected.label) return;
+				this.queueStoredAnnotationMutation(info, fresh => {
+					const current = fresh.bookmarks.find(item => item.id === id && item.anchor === expected.anchor && item.label === expected.label);
+					if (!current) return false;
+					current.label = nextLabel;
+					return true;
+				}, next => { data = next; });
+			},
+			getPageForAnchor: (anchor: string) => this.findLiveNativeAnnotationContext(info.key)?.annotation.getPageForAnchor(anchor) ?? null,
+			commentEnabled: () => info.kind !== "markdown",
+		};
+		return {
+			key: info.key,
+			kind: info.kind,
+			title: info.title,
+			pickerMode: info.pickerMode,
+			...(info.kind === "book" ? { bookPath: info.filePath } : {}),
+			...(info.kind === "feed" ? { feedRef: info.feedRef } : {}),
+			...(info.kind === "markdown" ? { markdownPath: info.filePath } : {}),
+			annotation,
+		};
+	}
+
+	private queueStoredAnnotationMutation(
+		info: NativeAnnotationBrowseInfo,
+		mutate: (fresh: AnnotationFileData) => boolean,
+		onSaved: (fresh: AnnotationFileData) => void,
+	): void {
+		const previous = this.nativeAnnotationMutationQueues.get(info.key) ?? Promise.resolve();
+		const pending = previous.catch(() => undefined).then(async () => {
+			const fresh = await loadAnnotations(this.app.vault, info.annotationPath, info.bookLink);
+			if (!mutate(fresh)) {
+				new Notice("这条标注已变化，请刷新后再操作");
+				await this.refreshNativeSidebarAnnotationTarget(info.key);
+				return;
+			}
+			await writeAnnotations(this.app.vault, info.annotationPath, info.bookLink, fresh);
+			if (info.kind === "feed" && info.feedRef) {
+				await this.feedStore.updateEntryState(info.feedRef.feedId, info.feedRef.entryId, {
+					hasAnnotations: fresh.highlights.length > 0 || fresh.bookmarks.length > 0,
+				});
+			}
+			onSaved(this.cloneAnnotationData(fresh));
+			await this.refreshOpenAnnotationDocuments(info);
+			await this.refreshNativeSidebarAnnotationTarget(info.key);
+		}).catch(error => {
+			console.error("[UNreader] 无法修改标注", error);
+			new Notice("标注保存失败");
+		});
+		this.nativeAnnotationMutationQueues.set(info.key, pending);
+		void pending.finally(() => { if (this.nativeAnnotationMutationQueues.get(info.key) === pending) this.nativeAnnotationMutationQueues.delete(info.key); });
+	}
+
+	private async deleteMarkdownAnnotation(
+		info: NativeAnnotationBrowseInfo,
+		expected: StoredHighlight,
+		onSaved: (data: AnnotationFileData) => void,
+	): Promise<void> {
+		const file = resolveNoteFile(this.app, info.filePath);
+		if (!(file instanceof TFile) || !isMarkdownNoteFile(this.app, file)) { new Notice("笔记已移动或删除"); return; }
+		try {
+			const view = this.app.workspace.getLeavesOfType("markdown").map(leaf => leaf.view)
+				.find((candidate): candidate is MarkdownView => candidate instanceof MarkdownView && candidate.file?.path === info.filePath);
+			const sourceMode = view?.getMode?.() === "source";
+			const source = sourceMode && view?.editor?.getValue ? view.editor.getValue() : await this.app.vault.read(file);
+			const span = collectHighlights(source).find((item, index) => item.plain === expected.text
+				&& `md:${item.contentStart}:${item.contentEnd}` === expected.anchor);
+			if (!span) { new Notice("这条高亮已变化，请刷新后再操作"); await this.refreshNativeSidebarAnnotationTarget(info.key); return; }
+			const plan = { from: span.openStart, to: span.closeEnd, replacement: source.slice(span.contentStart, span.contentEnd) };
+			const expectedSource = source.slice(plan.from, plan.to);
+			const result = sourceMode && view
+				? await applyEditPlan(this.app, view, plan, expectedSource, "auto", info.filePath)
+				: await applyVaultEditPlan(this.app, info.filePath, plan, expectedSource);
+			if (!result.ok) { new Notice("笔记已变化，高亮未删除；请刷新后重试"); return; }
+			const nextSource = sourceMode && view?.editor?.getValue ? view.editor.getValue() : source.slice(0, plan.from) + plan.replacement + source.slice(plan.to);
+			onSaved(this.markdownAnnotationData(nextSource));
+			if (!sourceMode) await this.mdOverlay?.refreshNativeSidebarContext(info.key);
+			await this.refreshNativeSidebarAnnotationTarget(info.key);
+		} catch (error) {
+			console.error("[UNreader] 无法删除 Markdown 高亮", error);
+			new Notice("删除高亮失败");
+		}
+	}
+
+	private async refreshOpenAnnotationDocuments(info: NativeAnnotationBrowseInfo): Promise<void> {
+		if (info.kind === "markdown") {
+			await this.mdOverlay?.refreshNativeSidebarContext(info.key);
+			return;
+		}
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (leaf.view instanceof UNreaderView) await leaf.view.refreshAnnotationsFromExternalWrite([info.annotationPath]);
+		}
+	}
+
+	private async copyNativeAnnotationReference(text: string, title: string, notePath: string): Promise<void> {
+		const clean = text.replace(/\s+/g, " ").trim();
+		const exists = !!this.app.vault.getFileByPath(notePath);
+		const content = [`> ${clean}`, "", `来源：《${title}》`, ...(exists ? [`溯源：${notePath}`] : [])].join("\n");
+		try { await navigator.clipboard.writeText(content); new Notice("已复制引用"); }
+		catch { new Notice("复制失败"); }
+	}
+
+	private async refreshNativeSidebarAnnotationTarget(key: string): Promise<void> {
+		if (this.nativeSidebarAnnotationTarget?.key !== key) return;
+		const sequence = this.nativeSidebarAnnotationSequence;
+		const info = this.nativeAnnotationBrowseInfo(key);
+		if (!info) return;
+		try {
+			const target = await this.loadNativeAnnotationBrowseTarget(info);
+			if (sequence === this.nativeSidebarAnnotationSequence && this.nativeSidebarAnnotationTarget?.key === key) this.setNativeSidebarAnnotationTarget(target);
+		} catch (error) {
+			console.error("[UNreader] 无法刷新侧栏标注", error);
+		}
+	}
+
+	private async jumpFromNativeAnnotationTarget(key: string, anchor: string, hint?: string): Promise<void> {
+		const jumpSequence = ++this.nativeAnnotationJumpSequence;
+		const targetSequence = this.nativeSidebarAnnotationSequence;
+		const isCurrent = (): boolean => jumpSequence === this.nativeAnnotationJumpSequence
+			&& targetSequence === this.nativeSidebarAnnotationSequence
+			&& this.nativeSidebarAnnotationTarget?.key === key;
+		if (!isCurrent()) return;
+		try {
+			if (key.startsWith("book:") || key.startsWith("feed:")) {
+				let reader = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER).map(leaf => leaf.view)
+					.find((view): view is UNreaderView => view instanceof UNreaderView && view.isNativeSidebarSourceLoaded(key));
+				if (!reader) {
+					let leaf: WorkspaceLeaf | null = null;
+					if (key.startsWith("book:")) {
+						const file = this.app.vault.getFileByPath(key.slice("book:".length));
+						if (file instanceof TFile) leaf = await this.openBook(file);
+					} else {
+						const info = this.nativeAnnotationBrowseInfo(key);
+						if (info?.feedRef) leaf = await this.openFeedEntry(info.feedRef.feedId, info.feedRef.entryId);
+					}
+					if (!isCurrent()) return;
+					if (!leaf || !(leaf.view instanceof UNreaderView) || !(await leaf.view.waitForNativeSidebarSource(key))) throw new Error("正文打开失败");
+					if (!isCurrent()) return;
+					reader = leaf.view;
+				}
+				if (!isCurrent()) return;
+				if (!(await reader.jumpToNativeSidebarAnnotation(key, anchor, hint))) throw new Error("标注位置不可用");
+				if (!isCurrent()) return;
+				await this.focusNativeSidebarContent(reader.leaf);
+				return;
+			}
+			const path = key.slice("markdown:".length);
+			let leaf = this.app.workspace.getLeavesOfType("markdown").find(candidate => candidate.view instanceof MarkdownView && candidate.view.file?.path === path) ?? null;
+			if (!leaf) leaf = await this.openMarkdownNote(path);
+			if (!isCurrent()) return;
+			if (!leaf || !(leaf.view instanceof MarkdownView)) throw new Error("笔记打开失败");
+			const context = await this.mdOverlay?.refreshNativeSidebarContext(key)
+				?? this.mdOverlay?.getNativeSidebarContext(leaf)
+				?? null;
+			if (!isCurrent()) return;
+			if (!context || context.key !== key) throw new Error("笔记标注尚未准备好");
+			context.annotation.onJump(anchor, hint);
+			await this.focusNativeSidebarContent(leaf);
+		} catch (error) {
+			if (!isCurrent()) return;
+			console.warn("[UNreader] 定位标注失败", key, error);
+			new Notice("无法打开正文或定位这条标注；标注列表仍保留在侧栏");
+		}
+	}
+
+	updateNativeSidebarContext(context: NativeSidebarContext | null, owner?: object): void {
+		if (owner && this.nativeSidebarContextOwner && this.nativeSidebarContextOwner !== owner
+			&& this.app.workspace.activeLeaf !== owner) return;
+		this.nativeSidebarContext = context;
+		this.nativeSidebarContextOwner = owner ?? (context ? this.app.workspace.activeLeaf ?? null : null);
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.setContext(context);
+	}
+
+	forgetNativeSidebarContext(owner: object): void {
+		const leaf = owner instanceof UNreaderView ? owner.leaf : owner;
+		if (this.nativeSidebarContextOwner === owner || this.nativeSidebarContextOwner === leaf) this.updateNativeSidebarContext(null);
+	}
+
+	private activeNativeSidebarContext(): NativeSidebarContext | null {
+		const leaf = this.app.workspace.activeLeaf;
+		if (!leaf) return this.nativeSidebarContext;
+		if (leaf.view instanceof UNreaderSidebarView) return this.nativeSidebarContext ?? this.getActiveReader()?.getNativeSidebarContext() ?? null;
+		if (leaf.view instanceof UNreaderView) return leaf.view.getNativeSidebarContext();
+		if (leaf.view instanceof MarkdownView) return this.mdOverlay?.getNativeSidebarContext(leaf) ?? null;
+		return null;
+	}
+
+	/** 取（必要时创建 / 跨侧迁移）原生侧栏标签，并保证它落在 `side` 这一侧。
+	 *  `side` 缺省 = 用户偏好侧（`settings.nativeSidebarSide`，默认 `left`）。 */
+	private async ensureNativeSidebarLeaf(side?: "left" | "right"): Promise<WorkspaceLeaf | null> {
+		const targetSide: "left" | "right" = side ?? this.settings.nativeSidebarSide ?? "left";
+		if (this.nativeSidebarLeafPromise) return this.nativeSidebarLeafPromise;
+		const operation = (async (): Promise<WorkspaceLeaf | null> => {
+			this.migrateExistingNativeSidebarLeaf();
+			let leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR);
+			let leaf = leaves[0] ?? null;
+			if (leaves.length > 1) {
+				const activeIndex = leaves.findIndex(candidate => (candidate as unknown as { tabHeaderEl?: HTMLElement }).tabHeaderEl?.classList.contains("is-active"));
+				const keeperIndex = selectNativeSidebarKeeperIndex({
+					leafCount: leaves.length,
+					sameGroupIndices: [],
+					activeIndex,
+					migrationDone: true,
+				});
+				leaf = keeperIndex == null ? leaf : leaves[keeperIndex] ?? leaf;
+				for (const duplicate of leaves) if (duplicate !== leaf) duplicate.detach();
+				leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR);
+			}
+			// 已有标签但不在目标侧 ⇒ 跨侧迁移；没有标签 ⇒ 在目标侧新建。两条同一个出口。
+			if (!leaf) return this.createNativeSidebarLeaf(targetSide, null);
+			if (this.nativeSidebarSideOf(leaf) !== targetSide) return this.createNativeSidebarLeaf(targetSide, leaf);
+			return leaf;
+		})();
+		this.nativeSidebarLeafPromise = operation;
+		try { return await operation; }
+		catch (error) {
+			console.error(`[UNreader] 无法在${targetSide === "right" ? "右" : "左"}侧标签组创建原生侧栏`, error);
+			new Notice(`无法在${targetSide === "right" ? "右" : "左"}侧边栏打开 UNreader；请检查该侧边栏是否可用`);
+			return null;
+		} finally {
+			if (this.nativeSidebarLeafPromise === operation) this.nativeSidebarLeafPromise = null;
+		}
+	}
+
+	/** 在目标侧建 sidebar 标签；`previous` 非空时先把旧标签拆掉（= 跨侧迁移）。
+	 *
+	 *  为什么是「拆了重建」而不是搬过去：Obsidian **没有**公开的「把标签从左栏移到右栏」
+	 *  方法（`moveLeafToPopout` 只去弹窗），而 `ensureSideLeaf` 在已有同类型标签时**直接忽略
+	 *  side 参数**、复用现有那个（asar 里 `ensureSideLeaf` 的实现就是 `c[0]` 存在便用 `c[0]`）——
+	 *  所以光传 `"right"` 永远不会换边。换边只能：记下当前页签与上下文 → detach →
+	 *  目标侧重建 → 还原。 */
+	private async createNativeSidebarLeaf(side: "left" | "right", previous: WorkspaceLeaf | null): Promise<WorkspaceLeaf> {
+		// 迁移会销毁旧视图实例，所以「用户正在看哪一页 / 看的是哪篇的标注」必须先取出来。
+		const oldView = previous?.view instanceof UNreaderSidebarView ? previous.view : null;
+		const mode = oldView?.getPanelMode() ?? this.settings.lastSidebarMode ?? "bookshelf";
+		const annotationTarget = this.nativeSidebarAnnotationTarget;
+		const context = this.nativeSidebarContext;
+		previous?.detach();
+		// detach 是同步移除，但布局更新可能压到下一帧；此刻 ensureSideLeaf 若仍枚举到旧标签，
+		// 就会复用一个**已经 dispose 的视图**（真机表现为「侧栏打开是一片空白」）。让一帧再建。
+		await new Promise<void>(resolve => { window.setTimeout(resolve, 0); });
+		// split:false 把它塞进该侧已有标签组；不创建上下分区，也不退回主区域。
+		const leaf = await this.app.workspace.ensureSideLeaf(VIEW_TYPE_UNREADER_SIDEBAR, side, {
+			active: false,
+			split: false,
+			reveal: false,
+		});
+		if (leaf.view?.getViewType() !== VIEW_TYPE_UNREADER_SIDEBAR) {
+			await leaf.setViewState({ type: VIEW_TYPE_UNREADER_SIDEBAR, active: false });
+		}
+		// 后台标签是 deferred：不显式加载的话 `leaf.view` 还不是我们的 View，
+		// 下面那步「还原页签」会被 `instanceof` 挡掉，用户切过去看到的是默认页。
+		if (leaf.isDeferred) await leaf.loadIfDeferred();
+		if (leaf.view instanceof UNreaderSidebarView) {
+			// 顺序要紧：先喂上下文，再 showMode —— `setContext` 会按**当前** mode 决定刷新哪一页。
+			leaf.view.setContext(context);
+			leaf.view.setAnnotationTarget(annotationTarget);
+			// persistMode=false：迁移是位置操作，不该顺手改「上次停在哪一页」这个设置。
+			leaf.view.showMode(mode, false);
+		}
+		this.settings.nativeSidebarPlacementMigrated = true;
+		void this.persistData();
+		return leaf;
+	}
+
+	/** 某个侧栏标签现在在哪一侧（null = 不在左右侧栏里，例如被拖成了浮窗）。 */
+	private nativeSidebarSideOf(leaf: WorkspaceLeaf): "left" | "right" | null {
+		const { leftSplit, rightSplit } = this.app.workspace;
+		const seen = new Set<unknown>();
+		let node: unknown = leaf;
+		while (node && !seen.has(node)) {
+			seen.add(node);
+			if (node === leftSplit) return "left";
+			if (node === rightSplit) return "right";
+			node = (node as { parent?: unknown }).parent ?? null;
+		}
+		// 兜底走 DOM：移动端的 parent 链会绕一个 MobileDrawer，个别版本还会重挂。
+		// `containerEl` 在 leaf 上没写进公开类型（只在 View 上），运行期却有 —— 都试一遍。
+		const el = (leaf as unknown as { containerEl?: HTMLElement }).containerEl ?? leaf.view?.containerEl;
+		if (el?.closest(".mod-right-split")) return "right";
+		if (el?.closest(".mod-left-split")) return "left";
+		return null;
+	}
+
+	/** 侧栏整体在哪一侧（null = 标签还没建过）。 */
+	private nativeSidebarSide(): "left" | "right" | null {
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		return leaf ? this.nativeSidebarSideOf(leaf) : null;
+	}
+
+	/** 侧栏所在那一侧是否**折叠着**（用户看不见）。 */
+	private nativeSidebarCollapsed(): boolean {
+		const side = this.nativeSidebarSide();
+		if (!side) return true;
+		const split = side === "left" ? this.app.workspace.leftSplit : this.app.workspace.rightSplit;
+		return (split as unknown as { collapsed?: boolean } | null)?.collapsed === true;
+	}
+
+	/** 「侧栏位置：在左侧 / 右侧之间切换」命令的本体（用户 2026-10-17）。
+	 *
+	 *  规则按用户原话：
+	 *  · 侧栏**没打开**（标签不存在 / 所在那侧折叠着）⇒ 直接在**右侧**打开；
+	 *  · 已经打开 ⇒ 换到另一侧。
+	 *
+	 *  换完把新侧写回 `settings.nativeSidebarSide` —— 否则下一次「打开书架」会按旧偏好
+	 *  把它搬回去，切换命令等于白切。这也是「默认在左侧」与「可以切换」能共存的原因：
+	 *  偏好默认 `left`，用户切过一次之后就跟着用户走。 */
+	async toggleNativeSidebarSide(): Promise<void> {
+		const current = this.nativeSidebarSide();
+		const opened = current !== null && !this.nativeSidebarCollapsed();
+		const target: "left" | "right" = opened ? (current === "left" ? "right" : "left") : "right";
+		this.settings.nativeSidebarSide = target;
+		void this.persistData();
+		const leaf = await this.ensureNativeSidebarLeaf(target);
+		if (!leaf) return;
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		this.syncNativeSidebarToolbarButtons();
+	}
+
+	/** 布局恢复后只迁移旧版已经存在的独立分区；不会自动创建标签，也不追着用户拖动后的布局跑。 */
+	private migrateExistingNativeSidebarLeaf(): void {
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR);
+		if (!leaves.length) return;
+		const fileExplorer = this.app.workspace.getLeavesOfType("file-explorer")[0];
+		if (!this.settings.nativeSidebarPlacementMigrated && !fileExplorer) return;
+		const sameGroupIndices = fileExplorer ? leaves.flatMap((leaf, index) => leaf.parent === fileExplorer.parent ? [index] : []) : [];
+		const activeIndex = leaves.findIndex(leaf => (leaf as unknown as { tabHeaderEl?: HTMLElement }).tabHeaderEl?.classList.contains("is-active"));
+		const keeperIndex = selectNativeSidebarKeeperIndex({
+			leafCount: leaves.length,
+			sameGroupIndices,
+			activeIndex,
+			migrationDone: this.settings.nativeSidebarPlacementMigrated,
+		});
+		const leaf = keeperIndex == null ? leaves[0] : leaves[keeperIndex] ?? leaves[0];
+		if (!leaf) return;
+		if (!this.settings.nativeSidebarPlacementMigrated && fileExplorer && shouldMigrateNativeSidebarGroup({
+			existingView: true,
+			migrationDone: false,
+			sameGroup: leaf.parent === fileExplorer.parent,
+		})) leaf.setGroupMember(fileExplorer);
+		for (const duplicate of leaves) if (duplicate !== leaf) duplicate.detach();
+		if (!this.settings.nativeSidebarPlacementMigrated) {
+			this.settings.nativeSidebarPlacementMigrated = true;
+			void this.persistData();
+		}
+	}
+
+	/** 打开原生侧栏；列表/标注页都走同一标签，重复点击只重显目标页。 */
+	async openSidePanel(mode?: SidePanelMode, context?: NativeSidebarContext | null): Promise<void> {
+		let nextContext = context === undefined ? this.activeNativeSidebarContext() : context;
+		const feedsEnabled = isRssFormatEnabled(this.settings.disabledFormats);
+		const pickerMode = resolveNativeSidebarPickerMode({
+			contentKind: nextContext?.kind ?? null,
+			savedMode: this.settings.lastSidebarMode,
+			hasSavedMode: this.settings.lastSidebarModeExplicit,
+			feedsEnabled,
+		});
+		const targetMode: SidePanelMode = mode === "annotations"
+			? "annotations"
+			: mode ? normalizeNativeSidebarMode(mode, feedsEnabled) : pickerMode;
+		if (targetMode === "annotations" && nextContext?.kind === "markdown") {
+			nextContext = await this.mdOverlay?.refreshNativeSidebarContext(nextContext.key) ?? null;
+		}
+		this.updateNativeSidebarContext(nextContext);
+		if (targetMode === "annotations") this.nativeSidebarAnnotationTarget = nextContext;
+		const leaf = await this.ensureNativeSidebarLeaf();
+		if (!leaf) return;
+		if (leaf.view instanceof UNreaderSidebarView) {
+			leaf.view.setContext(nextContext);
+			if (targetMode === "annotations") leaf.view.setAnnotationTarget(nextContext);
+		}
+		const view = leaf.view;
+		if (view instanceof UNreaderSidebarView) view.showMode(targetMode, mode !== undefined && mode !== "annotations");
+		if (mode && mode !== "annotations") {
+			this.settings.lastSidebarMode = normalizeNativeSidebarMode(mode, feedsEnabled);
+			this.settings.lastSidebarModeExplicit = true;
+			void this.persistData();
+		}
+		// revealLeaf 会展开左侧栏并选中这个标签；等待它完成，避免工具栏状态先于界面落地。
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		this.syncNativeSidebarToolbarButtons();
+	}
+
+	getNativeSidebarMode(): SidePanelMode | null {
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (!(leaf?.view instanceof UNreaderSidebarView) || !leaf.view.isPanelOpen()) return null;
+		const root = leaf.view.containerEl.closest<HTMLElement>(".workspace-leaf");
+		const tabHeader = (leaf as unknown as { tabHeaderEl?: HTMLElement }).tabHeaderEl;
+		const parent = leaf.parent as unknown as { children?: WorkspaceLeaf[]; tabHeaderEls?: HTMLElement[] };
+		const index = parent.children?.indexOf(leaf) ?? -1;
+		const selected = tabHeader?.classList.contains("is-active")
+			?? (index >= 0 && parent.tabHeaderEls?.[index]?.classList.contains("is-active") === true);
+		const rect = root?.getBoundingClientRect();
+		// 展开判定要按**当前所在侧**取：侧栏可以在右栏（2026-10-17 可切换），
+		// 写死 `mod-left-split` 会把右侧打开的侧栏一律判成「不可见」。
+		const collapsedSelector = this.nativeSidebarSide() === "right"
+			? ".workspace-split.mod-right-split.is-collapsed"
+			: ".workspace-split.mod-left-split.is-collapsed";
+		const expanded = !!rect && rect.width > 0 && rect.height > 0
+			&& !root?.closest(collapsedSelector);
+		return selected && expanded ? leaf.view.getPanelMode() : null;
+	}
+
+	syncNativeSidebarToolbarButtons(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (leaf.view instanceof UNreaderView) leaf.view.syncNativeSidebarToolbarButtons();
+		}
+		this.mdOverlay?.syncNativeSidebarToolbarButtons();
+	}
+
+	refreshNativeSidebarAnnotations(key?: string): void {
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (key && this.nativeSidebarAnnotationTarget?.key === key) {
+			void this.refreshNativeSidebarAnnotationTarget(key);
+			return;
+		}
+		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.refreshAnnotations(key);
+	}
+
+	refreshNativeSidebarBookshelf(): void {
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.refreshBookshelf();
+	}
+
+	refreshNativeSidebarFeeds(): void {
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.refreshFeeds();
+	}
+
+	refreshNativeSidebarNotes(): void {
+		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.refreshNotes();
+	}
+
+	collapseNativeSidebarOnPhone(): void {
+		if (!Platform.isPhone) return;
+		// 收哪一侧取决于侧栏现在在哪：写死 `leftSplit` 时，侧栏挪到右栏后手机上点卡片
+		// 会去收一个空的左栏，右栏照样铺满屏幕。
+		if (this.nativeSidebarSide() === "right") this.app.workspace.rightSplit.collapse();
+		else this.app.workspace.leftSplit.collapse();
+	}
+
+	async focusNativeSidebarContent(leaf: WorkspaceLeaf): Promise<void> {
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		this.collapseNativeSidebarOnPhone();
+	}
+
+	private async openNativeSidebarCard(key: string, open: () => Promise<boolean>, requestedNavigationIntent?: number): Promise<void> {
+		const intent = resolveNativeSidebarCardIntent({
+			targetKey: key,
+			loadedKey: this.activeNativeSidebarContext()?.key ?? this.nativeSidebarContext?.key ?? null,
+			pendingKey: this.pendingSidebarCardKey,
+		});
+		if (intent === "open-annotations") {
+			if (requestedNavigationIntent === undefined) await this.openSidePanel("annotations", this.activeNativeSidebarContext());
+			return;
+		}
+		if (intent === "wait-for-open") {
+			const pending = this.sidebarCardOpenPromises.get(key);
+			if (!pending) return;
+			if (requestedNavigationIntent !== undefined) {
+				await pending;
+				return;
+			}
+			const navigationIntent = this.sidebarCardNavigationIntent;
+			const annotationIntent = { key, navigationIntent };
+			this.pendingSidebarAnnotationIntent = annotationIntent;
+			const loaded = await pending;
+			if (loaded && this.pendingSidebarAnnotationIntent === annotationIntent
+				&& this.sidebarCardNavigationIntent === navigationIntent) {
+				this.pendingSidebarAnnotationIntent = null;
+				await this.openSidePanel("annotations", this.nativeSidebarContext);
+			}
+			return;
+		}
+
+		const navigationIntent = requestedNavigationIntent ?? ++this.sidebarCardNavigationIntent;
+		if (requestedNavigationIntent === undefined) {
+			const sidebarLeaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
+			if (sidebarLeaf?.view instanceof UNreaderSidebarView) sidebarLeaf.view.setAnnotationLoading(null);
+		}
+		this.pendingSidebarAnnotationIntent = null;
+		this.pendingSidebarCardKey = key;
+		const previous = this.sidebarCardOpenQueue;
+		const pending = (previous ? previous.catch(() => false).then(async () => {
+			this.updateNativeSidebarContext(null);
+			return open();
+		}) : Promise.resolve().then(async () => {
+			this.updateNativeSidebarContext(null);
+			return open();
+		})).catch(error => {
+			console.error("[UNreader] 原生侧栏打开内容失败", error);
+			return false;
+		});
+		this.sidebarCardOpenQueue = pending;
+		this.sidebarCardOpenPromises.set(key, pending);
+		let loaded = false;
+		try { loaded = await pending; }
+		finally {
+			if (this.sidebarCardOpenPromises.get(key) === pending) this.sidebarCardOpenPromises.delete(key);
+			if (this.sidebarCardOpenQueue === pending) this.sidebarCardOpenQueue = null;
+			if (this.pendingSidebarCardKey === key && this.sidebarCardNavigationIntent === navigationIntent) {
+				this.pendingSidebarCardKey = null;
+			}
+		}
+		if (!loaded && this.sidebarCardNavigationIntent === navigationIntent) {
+			this.pendingSidebarAnnotationIntent = null;
+			this.updateNativeSidebarContext(null);
+		}
+		if (loaded && this.sidebarCardNavigationIntent === navigationIntent) this.collapseNativeSidebarOnPhone();
+	}
+
+	async openBookFromNativeSidebar(path: string, navigationIntent?: number): Promise<void> {
+		const file = this.app.vault.getFileByPath(path);
+		if (!(file instanceof TFile) || !isReaderBookFile(file) || !isBookExtEnabled(file.extension, this.settings.disabledFormats)) {
+			new Notice("这本书不存在，或当前阅读格式已关闭");
+			return;
+		}
+		const key = `book:${file.path}`;
+		await this.openNativeSidebarCard(key, async () => {
+			const leaf = await this.openBook(file);
+			if (!leaf || !(leaf.view instanceof UNreaderView)) return false;
+			return leaf.view.waitForNativeSidebarSource(key);
+		}, navigationIntent);
+	}
+
+	async openAnnotationsFromNativeSidebar(key: string): Promise<void> {
+		const sequence = ++this.nativeSidebarAnnotationSequence;
+		const info = this.nativeAnnotationBrowseInfo(key);
+		if (!info) {
+			new Notice("内容不存在或对应格式已关闭，请刷新侧栏");
+			return;
+		}
+		const leaf = await this.ensureNativeSidebarLeaf();
+		if (!(leaf?.view instanceof UNreaderSidebarView)) return;
+		this.setNativeSidebarAnnotationTarget(null);
+		leaf.view.setAnnotationLoading(key, info.title);
+		leaf.view.showMode("annotations", false);
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
+		this.syncNativeSidebarToolbarButtons();
+		try {
+			await this.whenDataReady();
+			const target = await this.loadNativeAnnotationBrowseTarget(info);
+			if (sequence !== this.nativeSidebarAnnotationSequence) return;
+			this.setNativeSidebarAnnotationTarget(target);
+		} catch (error) {
+			console.error("[UNreader] 无法读取标注", key, error);
+			if (sequence === this.nativeSidebarAnnotationSequence) {
+				leaf.view.setAnnotationLoading(key, info.title, "读取标注失败；可关闭本页或重新点击查看标注");
+				new Notice("读取标注失败；原文不会被打开");
+			}
+		}
+	}
+
+	async openFeedEntryFromNativeSidebar(feedId: string, entryId: string, navigationIntent?: number): Promise<void> {
+		if (!isRssFormatEnabled(this.settings.disabledFormats)) {
+			new Notice(t("noticeRssFormatDisabled"));
+			return;
+		}
+		const key = `feed:${feedId}:${entryId}`;
+		await this.openNativeSidebarCard(key, async () => {
+			const leaf = await this.openFeedEntry(feedId, entryId);
+			if (!leaf || !(leaf.view instanceof UNreaderView)) return false;
+			return leaf.view.waitForNativeSidebarSource(key);
+		}, navigationIntent);
+	}
+
+	async openMarkdownNoteFromNativeSidebar(path: string, navigationIntent?: number): Promise<void> {
+		const key = `markdown:${path}`;
+		await this.openNativeSidebarCard(key, async () => {
+			const leaf = await this.openMarkdownNote(path);
+			if (!leaf) return false;
+			for (let i = 0; i < 60; i++) {
+				const context = this.mdOverlay?.getNativeSidebarContext(leaf) ?? null;
+				if (context?.key === key) {
+					this.updateNativeSidebarContext(context, leaf);
+					return true;
+				}
+				await new Promise(resolve => window.setTimeout(resolve, 50));
+			}
+			new Notice("笔记已经打开，但标注面板还没准备好；稍后可再次点击这张卡片");
+			return false;
+		}, navigationIntent);
+	}
+
+	private preferredReaderLeaf(targetKey?: string): WorkspaceLeaf | null {
+		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER);
+		const active = this.app.workspace.activeLeaf;
+		const activeIndex = active?.view instanceof UNreaderView ? leaves.indexOf(active) : -1;
+		const lastIndex = this.lastReader?.containerEl?.isConnected
+			? leaves.findIndex(leaf => leaf.view === this.lastReader)
+			: -1;
+		const targetIndex = targetKey ? leaves.findIndex(leaf => {
+			if (!(leaf.view instanceof UNreaderView)) return false;
+			if (leaf.view.getNativeSidebarContext()?.key === targetKey) return true;
+			if (targetKey.startsWith("book:")) return leaf.view.file?.path === targetKey.slice("book:".length);
+			const feedRef = leaf.view.getCurrentFeedRef();
+			return !!feedRef && targetKey === `feed:${feedRef.feedId}:${feedRef.entryId}`;
+		}) : -1;
+		const index = selectPreferredReaderIndex({ leafCount: leaves.length, targetIndex, activeIndex, lastUsedIndex: lastIndex });
+		return index == null ? null : leaves[index] ?? null;
+	}
+
+	getCurrentReaderTitle(): string | null { return this.getActiveReader()?.getDisplayText() ?? null; }
+	getCurrentBookPath(): string | null { return this.getActiveReader()?.file?.path ?? null; }
+	getCurrentFeedRef(): { feedId: string; entryId: string } | null { return this.getActiveReader()?.getCurrentFeedRef() ?? null; }
 	/** 用阅读视图打开一本书。
 	 *
 	 *  常规路径是 `leaf.openFile(file)` —— 它按**扩展名注册表**路由到本视图。
@@ -1620,7 +2425,7 @@ this.registerCommands();
 			new Notice(tf("noticeFormatDisabled", { name: file.basename || file.path }));
 			return null;
 		}
-		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)[0];
+		const existing = this.preferredReaderLeaf(`book:${file.path}`);
 		const leaf = existing ?? this.app.workspace.getLeaf(true);
 		try {
 			await leaf.openFile(file);
@@ -1636,7 +2441,8 @@ this.registerCommands();
 		}
 		// 复用的阅读器 leaf 可能在别的 pane / 后台标签（典型场景：从 md 叠加层抽屉点书）；
 		// setViewState 只灌内容不切前台，不 reveal 表现就是「点了没跳转」。
-		void this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
 		return leaf;
 	}
 
@@ -1691,13 +2497,19 @@ this.registerCommands();
 		if (leaf.view instanceof MarkdownView && leaf.view.getMode() !== "preview") {
 			await leaf.view.setState({ ...leaf.view.getState(), mode: "preview" }, { history: false });
 		}
-		void this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
 		return leaf;
 	}
 
-	/** 当前笔记是否已星标（列表与 Markdown 工具栏共用同一状态源）。 */
+	/** 历史存储字段的读取口：Markdown 界面现在把这项状态显示为「置顶」。 */
 	isMarkdownNoteStarred(path: string): boolean {
 		return !!path && typeof this.settings.markdownNoteStarred?.[path] === "number";
+	}
+
+	/** Markdown 的旧「星标」索引现在作为置顶状态展示；继续沿用原存储键，保留用户已有标记。 */
+	isMarkdownNotePinned(path: string): boolean {
+		return this.isMarkdownNoteStarred(path);
 	}
 
 	/** 笔记阅读计时：正在读的那篇笔记的统计键（null = 当前活动叶子不是 Markdown 笔记）。 */
@@ -1783,10 +2595,10 @@ this.registerCommands();
 		}
 	}
 
-	/** 收藏 / 取消收藏当前 Markdown 笔记。 */
+	/** 兼容历史调用名；旧 markdownNoteStarred 索引继续保存当前置顶状态。 */
 	toggleMarkdownNoteStar(path: string): void {
 		const file = this.app.vault.getFileByPath(path);
-		// 隔离墙：伪 markdown 不进星标索引（否则它会出现在笔记列表里）。
+		// 隔离墙：伪 markdown 不进置顶索引（否则它会出现在笔记列表里）。
 		if (!(file instanceof TFile) || !isMarkdownNoteFile(this.app, file)) return;
 		this.settings.markdownNoteStarred ??= {};
 		if (this.isMarkdownNoteStarred(file.path)) delete this.settings.markdownNoteStarred[file.path];
@@ -1794,6 +2606,10 @@ this.registerCommands();
 		this.scheduleSave();
 		this.mdOverlay?.applySettingsAll();
 		this.refreshMarkdownNotePanels();
+	}
+
+	toggleMarkdownNotePin(path: string): void {
+		this.toggleMarkdownNoteStar(path);
 	}
 
 	/** 记录一次「在阅读模式真正看过的笔记」；只保留最近 12 条，列表打开时现算文件信息。 */
@@ -1815,7 +2631,7 @@ this.registerCommands();
 		this.refreshMarkdownNotePanels();
 	}
 
-	/** 当前 vault 里仍存在、且属于最近/星标索引的 Markdown 笔记清单。
+	/** 当前 vault 里仍存在、且属于最近/置顶索引的 Markdown 笔记清单。
 	 *
 	 *  ⚠️ 路径解析必须走 `createNoteFileResolver`（精确命中 → 归一化回退），**不能**只写
 	 *  `getFileByPath`：他端写进索引的路径形态（NFC/NFD、大小写）在本端可能精确失配，
@@ -1827,13 +2643,10 @@ this.registerCommands();
 		const recent = this.settings.markdownNoteRecent ?? [];
 		const starred = this.settings.markdownNoteStarred ?? {};
 		const resolver = createNoteFileResolver(this.app);
-		const seen = new Set<string>();
 		const makeItem = (path: string, openedAt?: number, starredAt?: number): MarkdownNoteListItem | null => {
 			const file = resolver.resolve(path);
 			// 隔离墙：列表是「插件检索到的文件」的用户可见形态，伪 markdown 一个都不出现。
 			if (!(file instanceof TFile) || !isMarkdownNoteFile(this.app, file)) return null;
-			if (seen.has(file.path)) return null;
-			seen.add(file.path);
 			return {
 				path: file.path,
 				title: file.basename,
@@ -1844,24 +2657,50 @@ this.registerCommands();
 				meta: this.noteMetaFor(file),
 			};
 		};
-		// 星标组也必须带上**真实的**阅读状态：以前这里写死 `openedAt = undefined`，
-		// 于是「已读 + 星标」的笔记在星标组里永远画成**未读**（空环 + 「标记已读」按钮）——
+		// 置顶组也必须带上**真实的**阅读状态：以前这里写死 `openedAt = undefined`，
+		// 于是「已读 + 置顶」的笔记在置顶组里永远画成**未读**（空环 + 「标记已读」按钮）——
 		// 用户点了那个按钮，`toggleMarkdownNoteRead` 发现它已在「最近阅读」索引里，**反而把它
 		// 移出去**（= 置为未读），而按钮看上去毫无变化。这正是用户 2026-10-13 六轮报的
 		// 「点击那个已读按钮显示的不好」的第二个来源。已读判据只有一个真源：在 recent 索引里。
 		const openedAtByPath = new Map(recent.map(entry => [entry.path, entry.openedAt]));
-		return {
-			// 最近阅读项也要带上星标时间：同一路径若已收藏，recent 卡片右侧的星标按钮
-			// 必须画成填充态（用户 2026-10-10：最近阅读里也要反映星标）。不改变 recent
-			// 自身的顺序与条数 —— 收藏组仍单独按星标时间排在上面。
-			recent: recent
-				.map(entry => makeItem(entry.path, entry.openedAt, starred[entry.path]))
-				.filter((item): item is MarkdownNoteListItem => item !== null),
-			starred: Object.entries(starred)
-				.sort(([, a], [, b]) => b - a)
-				.map(([path, starredAt]) => makeItem(path, openedAtByPath.get(path), starredAt))
-				.filter((item): item is MarkdownNoteListItem => item !== null),
+		const makeGroup = (items: Array<{ path: string; openedAt?: number; starredAt?: number }>): MarkdownNoteListItem[] => {
+			const groupSeen = new Set<string>();
+			return items.map(item => makeItem(item.path, item.openedAt, item.starredAt)).filter((item): item is MarkdownNoteListItem => {
+				if (!item || groupSeen.has(item.path)) return false;
+				groupSeen.add(item.path);
+				return true;
+			});
 		};
+		return {
+			// 最近阅读项也要带上历史标记时间：同一路径若已置顶，recent 卡片显示激活的图钉按钮
+			// 必须画成激活态（用户 2026-10-10：最近阅读里也要反映置顶）。不改变 recent
+			// 自身的顺序与条数 —— 置顶组仍单独按置顶时间排在上面。
+			recent: makeGroup(recent.map(entry => ({ path: entry.path, openedAt: entry.openedAt, starredAt: starred[entry.path] }))),
+			starred: makeGroup(Object.entries(starred).sort(([, a], [, b]) => b - a)
+				.map(([path, starredAt]) => ({ path, openedAt: openedAtByPath.get(path), starredAt }))),
+		};
+	}
+
+	/** 笔记卡正文预览的 Markdown 渲染（用户 2026-10-17：「要渲染 markdown 格式」）。
+	 *
+	 *  为什么收在插件而不是卡片自己调：`ui/markdownNoteCards` 是纯 DOM 层，不 import
+	 *  Obsidian 渲染器（探针替身里也没有它）；两个宿主（阅读器抽屉 / 原生侧栏）需要
+	 *  **同一份**口径，收在这里两边都只接一根线。
+	 *
+	 *  `MarkdownRenderer.render` 是**追加**语义（自己不清空），调用方负责先 `empty()`。
+	 *  component **不能**用插件本身（`obsidianmd/no-plugin-as-component`：插件生命周期太长，
+	 *  卡片反复重绘会把渲染子组件越堆越多）。这里每次渲染新建一个临时 `Component`，
+	 *  它不被挂进任何父组件，渲染结束后随引用释放 —— 预览里只有行内元素（图片 / 代码块 /
+	 *  表格在 CSS 里已禁），没有需要主动 cleanup 的子组件。 */
+	async renderNotePreview(el: HTMLElement, markdown: string, sourcePath: string): Promise<void> {
+		// 存成变量（规则要求能显式 `unload()`）；不 unload 是刻意的：unload 会连带清掉
+		// 刚渲染出来的子组件状态。卡片被 DOM 丢弃后它自然随引用释放。
+		const host = new Component();
+		try {
+			await MarkdownRenderer.render(this.app, markdown, el, sourcePath, host);
+		} catch {
+			/* 渲染失败就让预览留空：卡片上弹错误横幅比没有预览更打扰 */
+		}
 	}
 
 	/** 打开 RSS 文章/播客条目；稳定身份不依赖数组下标或虚拟文件路径。 */
@@ -1877,14 +2716,15 @@ this.registerCommands();
 			new Notice("文章不存在或已被清理");
 			return null;
 		}
-		const existing = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)[0];
+		const existing = this.preferredReaderLeaf(`feed:${feedId}:${entryId}`);
 		const leaf = existing ?? this.app.workspace.getLeaf(true);
 		await leaf.setViewState({
 			type: VIEW_TYPE_UNREADER,
 			state: { source: { kind: "feed-entry", feedId, entryId } },
 		});
 		// 同 openBook：复用 leaf 时必须显式切前台，否则从 md 叠加层点文章「跳不过去」。
-		void this.app.workspace.revealLeaf(leaf);
+		await this.app.workspace.revealLeaf(leaf);
+		this.app.workspace.setActiveLeaf(leaf, { focus: true });
 		return leaf;
 	}
 
@@ -1892,7 +2732,9 @@ this.registerCommands();
 	 *  书架的列表数据每次渲染现算，所以这里只需通知视图重绘 —— 面板模式与滚动位置不变；
 	 *  面板没开（或当前不在书架模式）时什么都不做。 */
 	refreshBookshelfPanel(): void {
-		this.getActiveReader()?.refreshBookshelfPanel();
+		const reader = this.getActiveReader();
+		if (reader) reader.refreshBookshelfPanel();
+		else this.refreshNativeSidebarBookshelf();
 	}
 
 	/** UNagent 写完数据文件后的重扫：按路径前缀判断该动哪个库，再刷新已打开的界面。
@@ -1946,7 +2788,7 @@ this.registerCommands();
 		});
 		if (result.error) throw new Error(result.error);
 		new Notice(`已添加订阅：${this.feedStore.getFeed(result.feedId)?.title ?? candidate.title}`);
-		this.getActiveReader()?.refreshFeedsPanel();
+		this.refreshFeedsPanels();
 	}
 
 	importOpmlFromFile(): void {
@@ -1986,7 +2828,7 @@ this.registerCommands();
 	renameFeed(feedId: string, title: string, onDone?: () => void): void {
 		new RenameFeedModal(this.app, title, value => {
 			void this.feedStore.renameSubscription(feedId, value).then(() => {
-				this.getActiveReader()?.refreshFeedsPanel();
+				this.refreshFeedsPanels();
 				onDone?.();
 			});
 		}).open();
@@ -2096,7 +2938,7 @@ this.registerCommands();
 			|| JSON.stringify(beforeAssignments) !== JSON.stringify(this.settings.bookshelfCategoryAssignments);
 	}
 
-	/** Markdown 笔记索引的清场：文件/文件夹删除时同步删掉最近与星标路径。 */
+	/** Markdown 笔记索引的清场：文件/文件夹删除时同步删掉最近与置顶路径。 */
 	private pruneMarkdownNotePaths(path: string): boolean {
 		if (!path) return false;
 		const isRemoved = (candidate: string): boolean =>
@@ -2121,15 +2963,25 @@ this.registerCommands();
 	}
 
 	private refreshBookshelfPanels(): void {
-		this.getActiveReader()?.refreshBookshelfPanel();
+		const reader = this.getActiveReader();
+		if (reader) reader.refreshBookshelfPanel();
+		else this.refreshNativeSidebarBookshelf();
 	}
 
 	/** 星标/最近索引变化后刷新所有已挂载阅读器的「笔记」页；没有阅读器时是无操作。 */
 	private refreshMarkdownNotePanels(): void {
+		let hasReader = false;
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
 			const view = leaf.view;
-			if (view instanceof UNreaderView) view.refreshMarkdownNotesPanel();
+			if (view instanceof UNreaderView) { hasReader = true; view.refreshMarkdownNotesPanel(); }
 		}
+		if (!hasReader) this.refreshNativeSidebarNotes();
+	}
+
+	private refreshFeedsPanels(): void {
+		const reader = this.getActiveReader();
+		if (reader) reader.refreshFeedsPanel();
+		else this.refreshNativeSidebarFeeds();
 	}
 
 	/** 隔离墙去抖计时器（`scheduleNoteIndexPurge`；卸载时清，见 onload）。 */
@@ -2259,7 +3111,7 @@ this.registerCommands();
 		await this.feedService.setSubscriptionEnabled(feedId, enabled);
 		const title = this.feedStore.getFeed(feedId)?.title ?? "";
 		new Notice(enabled ? `已启用订阅：${title}` : `已停用订阅：${title}`);
-		this.getActiveReader()?.refreshFeedsPanel();
+		this.refreshFeedsPanels();
 	}
 
 	/** 只刷新一个订阅（订阅管理面板每行那颗刷新按钮；停用的订阅也能手动刷一次）。 */
@@ -2270,7 +3122,7 @@ this.registerCommands();
 		const result = await this.feedService.refreshFeed(feedId, true);
 		if (result.error) new Notice(`刷新失败：${result.error}`);
 		else new Notice(result.notModified ? `《${feed.title}》没有新文章` : `《${feed.title}》已更新 ${result.addedOrUpdated} 篇`);
-		this.getActiveReader()?.refreshFeedsPanel();
+		this.refreshFeedsPanels();
 	}
 
 	async downloadPodcast(feedId: string, entryId: string): Promise<boolean> {
@@ -2283,7 +3135,7 @@ this.registerCommands();
 		}
 		const bytes = this.settings.feeds.mediaCacheMb * 1024 * 1024;
 		const ok = await this.feedMediaStore.downloadMedia(url, bytes);
-		if (ok) this.getActiveReader()?.refreshFeedsPanel();
+		if (ok) this.refreshFeedsPanels();
 		return ok;
 	}
 
@@ -2300,7 +3152,7 @@ this.registerCommands();
 		}
 		const failed = results.filter(result => result.error).length;
 		new Notice(failed ? `刷新完成，${failed} 个订阅失败` : "订阅已刷新");
-		this.getActiveReader()?.refreshFeedsPanel();
+		this.refreshFeedsPanels();
 	}
 
 	async openNextUnreadFeed(): Promise<void> {
@@ -2408,6 +3260,57 @@ this.registerCommands();
 		return `unreader-appearance:${this.deviceScope()}`;
 	}
 
+	private releaseNotesSeenKey(): string {
+		return `unreader-release-notes-seen:${this.deviceScope()}`;
+	}
+
+	private markReleaseNotesSeen(version: string): void {
+		try { window.localStorage.setItem(this.releaseNotesSeenKey(), version); } catch { /* 手动命令仍可查看 */ }
+	}
+
+	private openReleaseNotes(versions = releaseNoteVersionsNewestFirst()): void {
+		if (this.activeReleaseNotesModal) return;
+		const currentVersion = this.manifest.version;
+		const modal = new ReleaseNotesModal(this.app, versions, currentVersion, () => {
+			if (this.activeReleaseNotesModal === modal) this.activeReleaseNotesModal = null;
+			this.markReleaseNotesSeen(currentVersion);
+		});
+		this.activeReleaseNotesModal = modal;
+		modal.open();
+	}
+
+	/** 新库首次安装不弹窗；检测到已有 UNreader 设置时，升级后的当前版本温和提醒一次。 */
+	private scheduleReleaseNotesReminder(): void {
+		const version = this.manifest.version;
+		if (!releaseNoteForVersion(version)) return;
+		const key = this.releaseNotesSeenKey();
+		let seen: string | null;
+		try { seen = window.localStorage.getItem(key); } catch { return; }
+		if (seen === version) return;
+		if (!shouldPromptReleaseNotes(version, seen, this.hasExistingPluginData)) {
+			if (!seen) this.markReleaseNotesSeen(version);
+			return;
+		}
+
+		let cancelled = false;
+		this.register(() => {
+			cancelled = true;
+			if (this.releaseNotesPromptTimer !== null) window.clearTimeout(this.releaseNotesPromptTimer);
+			this.releaseNotesPromptTimer = null;
+		});
+		void this.dataReady.then(() => {
+			if (cancelled || this.unloaded) return;
+			this.releaseNotesPromptTimer = window.setTimeout(() => {
+				this.releaseNotesPromptTimer = null;
+				if (cancelled || this.unloaded || this.activeReleaseNotesModal) return;
+				let latestSeen: string | null;
+				try { latestSeen = window.localStorage.getItem(key); } catch { return; }
+				if (latestSeen === version) return;
+				this.openReleaseNotes([version]);
+			}, 1300);
+		}).catch(() => undefined);
+	}
+
 	/** 插件目录的**库内相对路径**（`.obsidian/plugins/unreader`），给订阅正文当缓存落点。
 	 *
 	 *  正文是**可再生的抓取缓存**（换设备重新刷新订阅就能拿到同样的内容），不该占着库内可见
@@ -2489,7 +3392,25 @@ this.registerCommands();
 			/** 旧字段：曾是「打开书籍」的扫描范围（切换时把书迁进去）。语义已整体拆除，见下。 */
 			materialsFolder?: unknown;
 		}) | null;
+		this.hasExistingPluginData = !!data && typeof data === "object" && Object.keys(data).length > 0;
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, data ?? {});
+		if (typeof data?.lastSidebarModeExplicit === "boolean") {
+			this.settings.lastSidebarModeExplicit = data.lastSidebarModeExplicit;
+		} else {
+			// 旧版本没有显式标记；非默认页一定是用户选过的，默认书架则按当前内容推断。
+			this.settings.lastSidebarModeExplicit = data?.lastSidebarMode != null && data.lastSidebarMode !== "bookshelf";
+		}
+		this.settings.nativeSidebarPlacementMigrated = data?.nativeSidebarPlacementMigrated === true;
+		// 侧栏默认侧：只认 "right"，其余（含旧数据里的 undefined）一律回落 left。
+		this.settings.nativeSidebarSide = data?.nativeSidebarSide === "right" ? "right" : "left";
+		const retiredSettings = this.settings as unknown as Record<string, unknown>;
+		delete retiredSettings.annoPinned;
+		delete retiredSettings.pinThreshold;
+		delete retiredSettings.annoPanelHeight;
+		delete retiredSettings.annoPanelWidth;
+		if (!["bookshelf", "feeds", "notes"].includes(this.settings.lastSidebarMode)) {
+			this.settings.lastSidebarMode = "bookshelf";
+		}
 		// **绝不把旧 `materialsFolder` 当新 `dataFolder` 迁移**（2026-09-18，关键）：
 		// 旧字段表达的是「书扫描范围」，用户选过的值往往是他的**书**目录（作者库里就是
 		// `4-配置文件`）。照搬成数据落点的话，首次启动时活绑定就指向那个目录，而
@@ -2721,9 +3642,6 @@ this.registerCommands();
 		if (!a.darkTextColor) a.darkTextColor = DEFAULT_APPEARANCE.darkTextColor;
 		if (!a.backgroundColor) a.backgroundColor = DEFAULT_APPEARANCE.backgroundColor;
 		if (!a.textColor) a.textColor = DEFAULT_APPEARANCE.textColor;
-		if (typeof this.settings.annoPinned !== "boolean") this.settings.annoPinned = false;
-		if (typeof this.settings.annoPanelHeight !== "number" || !Number.isFinite(this.settings.annoPanelHeight) || this.settings.annoPanelHeight < 220) delete this.settings.annoPanelHeight;
-		if (typeof this.settings.pinThreshold !== "number" || this.settings.pinThreshold < 400 || this.settings.pinThreshold > 1200) this.settings.pinThreshold = DEFAULT_SETTINGS.pinThreshold;
 		// 本地 HTML 的阅读设备档位：值域写成显式枚举（不 import 视图层那张表，
 		// 它是 UI 文案层的东西）。兜底很重要——脏值会让设备按钮查表拿到 undefined。
 		if (this.settings.webDeviceMode !== "auto" && this.settings.webDeviceMode !== "phone"

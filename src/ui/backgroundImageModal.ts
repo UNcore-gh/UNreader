@@ -1,6 +1,7 @@
 import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
 import { UnreaderModal } from "./modalSkin";
+import { t } from "../core/i18n";
 
 /** 统一的图片来源：库内文件或系统文件选择器，由宿主负责读取。 */
 export interface BackgroundImagePick {
@@ -27,12 +28,12 @@ export class BackgroundImageModal extends UnreaderModal {
 	onOpen(): void {
 		// 移动端：键盘弹起时整个弹窗上移到键盘之上（见 keyboardInset 与 styles.css 的 .unreader-kb-safe）
 		markModalKeyboardSafe(this.containerEl);
-		this.titleEl.setText("选择背景图片");
+		this.titleEl.setText(t("bgPickTitle"));
 		this.contentEl.empty();
 
 		this.contentEl.createDiv({
 			cls: "unreader-tag-desc",
-			text: "从库中选择一张图片作为阅读背景（2MB 以内）。",
+			text: t("bgPickDesc"),
 		});
 
 		let submitted = false;
@@ -46,7 +47,7 @@ export class BackgroundImageModal extends UnreaderModal {
 		const input = this.contentEl.createEl("input", {
 			cls: "unreader-tag-input",
 			type: "text",
-			attr: { placeholder: "搜索图片文件名…" },
+			attr: { placeholder: t("bgPickSearch") },
 		});
 
 		const listEl = this.contentEl.createDiv({ cls: "unreader-bg-list" });
@@ -63,14 +64,14 @@ export class BackgroundImageModal extends UnreaderModal {
 				row.createSpan({ cls: "unreader-bg-row-ext", text: p.ext.toUpperCase() });
 				row.addEventListener("click", () => submit(p));
 			}
-			if (!shown) listEl.createDiv({ cls: "unreader-bg-empty", text: "没有匹配的图片" });
+			if (!shown) listEl.createDiv({ cls: "unreader-bg-empty", text: t("bgPickNoMatches") });
 		};
 		render("");
 
 		input.addEventListener("input", () => render(input.value));
 
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
-		btnRow.createEl("button", { text: "取消" }).addEventListener("click", () => this.close());
+		btnRow.createEl("button", { text: t("cancel") }).addEventListener("click", () => this.close());
 
 		window.setTimeout(() => input.focus(), 50);
 	}

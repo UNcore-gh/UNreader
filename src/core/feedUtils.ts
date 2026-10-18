@@ -93,6 +93,14 @@ export interface FeedAnnotationAnchorAdapter {
 	addHighlight(cfi: string, colorName: string, textHint?: string): void
 }
 
+/** Feed 阅读态正文快照。 */
+export function activeFeedContent(entry: Pick<FeedEntry, "contentHtml" | "contentHash" | "pendingContentHtml" | "pendingContentHash">): { html: string; hash: string | null } {
+	if (entry.pendingContentHtml?.trim() && entry.pendingContentHash) {
+		return { html: entry.pendingContentHtml, hash: entry.pendingContentHash };
+	}
+	return { html: entry.contentHtml, hash: entry.contentHtml.trim() ? entry.contentHash || null : null };
+}
+
 /** Feed 正文更新后迁移标注锚点，并让已渲染的高亮同步落到新位置。 */
 export function reconcileFeedAnnotationAnchors(
 	annotations: { highlights: FeedAnnotationAnchor[]; bookmarks: FeedBookmarkAnchor[] },

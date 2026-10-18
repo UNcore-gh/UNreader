@@ -1,6 +1,7 @@
 import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
 import { UnreaderModal } from "./modalSkin";
+import { t } from "../core/i18n";
 
 export class PresetNameModal extends UnreaderModal {
 	private name: string;
@@ -15,19 +16,19 @@ export class PresetNameModal extends UnreaderModal {
 	onOpen(): void {
 		// 移动端：键盘弹起时整个弹窗上移到键盘之上（见 keyboardInset 与 styles.css 的 .unreader-kb-safe）
 		markModalKeyboardSafe(this.containerEl);
-		this.titleEl.setText(this.name ? "重命名预设" : "保存预设");
+		this.titleEl.setText(this.name ? t("presetRenameTitle") : t("presetSaveTitle"));
 		this.contentEl.empty();
 
 		this.contentEl.createDiv({
 			cls: "unreader-tag-desc",
-			text: this.name ? "修改预设名称" : "为当前外观保存为新预设，请输入名称",
+			text: this.name ? t("presetRenameDesc") : t("presetSaveDesc"),
 		});
 
 		let submitted = false;
 		const input = this.contentEl.createEl("input", {
 			cls: "unreader-tag-input",
 			type: "text",
-			attr: { placeholder: "预设名称，如：夜间护眼" },
+			attr: { placeholder: t("presetNamePlaceholder") },
 		});
 		input.value = this.name;
 		input.select();
@@ -57,8 +58,8 @@ export class PresetNameModal extends UnreaderModal {
 		});
 
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
-		btnRow.createEl("button", { text: "取消" }).addEventListener("click", cancel);
-		btnRow.createEl("button", { text: this.name ? "重命名" : "保存", cls: "mod-cta" }).addEventListener("click", submit);
+		btnRow.createEl("button", { text: t("cancel") }).addEventListener("click", cancel);
+		btnRow.createEl("button", { text: this.name ? t("presetRenameAction") : t("presetSaveAction"), cls: "mod-cta" }).addEventListener("click", submit);
 
 		window.setTimeout(() => input.focus(), 50);
 	}

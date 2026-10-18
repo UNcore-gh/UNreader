@@ -4,7 +4,7 @@ import { fetchPageForExtraction, fetchParsedFeed, resolveFeedInput, type FeedRes
 import type { FeedStore } from "./feedStore";
 import { parseOpml, type ParsedOpmlFeed } from "./feedParser";
 import { entryFeedContentQuality } from "./feedContentQuality";
-import { stripHtml } from "./feedUtils";
+import { activeFeedContent, stripHtml } from "./feedUtils";
 
 const RETRY_BASE_MS = 30_000;
 const RETRY_MAX_MS = 30 * 60_000;
@@ -202,7 +202,6 @@ export class FeedService {
 	needsFulltext(entry: FeedEntry): boolean {
 		return entry.kind === "article"
 			&& !!entry.url
-			&& entry.contentSource !== "fulltext"
 			&& entryFeedContentQuality(entry) !== "full";
 	}
 
@@ -232,6 +231,8 @@ export class FeedService {
 				return entry;
 			}
 		}
+		const current = activeFeedContent(entry);
+		if (current.html && current.hash === extracted.hash) return entry;
 		return this.store.replaceEntryContent(feedId, entryId, extracted.html, extracted.hash, {
 			title: extracted.title,
 			author: extracted.byline,

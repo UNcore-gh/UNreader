@@ -12,32 +12,51 @@ import type { BookPreview } from "../core/bookPreview";
 import { subscribeKeyboardGeometry, usableBottom } from "./keyboardInset";
 import { entryFeedContentQuality } from "../core/feedContentQuality";
 import { canSaveFeedEntry } from "../core/feedUtils";
-import { formatRecentRead, renderMarkdownNotes, resettleStarredGroupHeight } from "./markdownNoteCards";
+import { disposeMarkdownNotesLayout, formatRecentRead, markdownNoteSignature, refreshMarkdownNotesLayout, renderMarkdownNotes, resettleStarredGroupHeight } from "./markdownNoteCards";
 import { CardThumbObserver, mountCardThumb, showCardThumb, type CardThumb } from "./cardThumb";
 import { createProgressRing } from "./progressRing";
 import { attachCardDetails, hideCardDetails, type CardDetailRow, type CardDetailSection, type CardDetailsContent } from "./cardDetailsPopover";
 import { bookStatKey, feedStatKey, formatReadingDuration, getReadingStat } from "../core/readingStatsStore";
+import { adjustNativeSidebarScrollTop } from "../core/nativeSidebarState";
+import { createCardActionButton } from "./cardActions";
 
 type PanelMode = "annotations" | "bookshelf" | "feeds" | "notes";
 
+interface PanelScrollPosition {
+	scrollTop: number
+	anchorKey: string | null
+	anchorOffset: number
+}
+
+interface StableCardSnapshot {
+	cards: Map<string, HTMLElement>
+	scroll: PanelScrollPosition
+	focusedKey: string | null
+	focusedClasses: string[]
+}
+
+const CARD_SELECTOR = ".unreader-shelf-card,.unreader-feed-card,.unreader-note-card";
+const cardRenderSignatures = new WeakMap<HTMLElement, string>();
+
 export interface AnnotationsPanelActions {
-	onJump: (cfi: string, textHint?: string) => void
-	onPreviewHighlight: (item: StoredHighlight, anchorEl: HTMLElement) => void
-	onCommentHighlight: (id: number, comment: string) => void
-	onCopyReference: (item: StoredHighlight) => void
-	onDeleteHighlight: (id: number) => void
-	onDeleteBookmark: (id: number) => void
+	onJump: (cfi: string, textHint?: string, contextKey?: string | null) => void
+	onPreviewHighlight: (item: StoredHighlight, anchorEl: HTMLElement, contextKey?: string | null) => void
+	onCommentHighlight: (id: number, comment: string, contextKey?: string | null) => void
+	onCopyReference: (item: StoredHighlight, contextKey?: string | null) => void
+	onDeleteHighlight: (id: number, contextKey?: string | null) => void
+	onDeleteBookmark: (id: number, contextKey?: string | null) => void
 	/** 重命名书签（label 已 trim 且非空时才会被调用） */
-	onRenameBookmark: (id: number, label: string) => void
+	onRenameBookmark: (id: number, label: string, contextKey?: string | null) => void
 	/** 位置 token → 全书页码。每次渲染/刷新现算，不缓存、不落盘；
 	 *  排版模型变化后页码自动跟随（见 AnnotationsPanel.refreshPages） */
-	getPageForAnchor?: (anchor: string) => { page: number; total: number } | null
+	getPageForAnchor?: (anchor: string, contextKey?: string | null) => { page: number; total: number } | null
 	/** 高亮评论能力位：不给 = 支持（书 / RSS 旁车笔记）；显式返回 false = 本宿主
 	 *  没有评论落点（如 markdown 笔记的官方 `==` 高亮），卡片上不渲染评论按钮。 */
 	isCommentEnabled?: () => boolean
 	/** 标注数据「现算」供给：markdown 笔记的官方高亮没有旁车文件，给了它之后，
 	 *  面板在打开 / 切到标注页时会先调用它重取数据再渲染，避免列表过期。 */
 	provideAnnotationData?: () => AnnotationFileData
+	getAnnotationContextKey?: () => string | null
 	/** 高亮页头部「← 返回列表」：**不离开当前书/文章**，只把抽屉切回来源选内容层
 	 *  （书架/订阅）。不给 = 不显示返回钮（md 宿主）。 */
 	onRequestHome?: () => void
@@ -56,6 +75,7 @@ export interface AnnotationsPanelActions {
 	getCurrentBookPath?: () => string | null
 	/** 当前正在阅读的页面名（书名 / 订阅文章名）；没有打开任何页面时返回 null。 */
 	getCurrentDocumentName?: () => string | null
+	onOpenCardAnnotations?: (key: string) => void
 	onBookshelfSortModeChange?: (mode: BookshelfSortMode) => void
 	onBookshelfReorder?: (paths: string[]) => void
 	onToggleBookPin?: (path: string) => void
@@ -67,17 +87,27 @@ export interface AnnotationsPanelActions {
 	onRemoveBookFromShelf?: (path: string) => void
 	onOpenBookshelfCategoryManager?: () => void
 	onOpenBook?: (path: string) => void
+	onOpenBookAnnotations?: (path: string) => void
 	/** 只展示这几页（缺省 = 四页全开）。由 `sidePanels.ts` 的共享接线传入 ——
 	 *  宿主给不出某页所需上下文时，那一页**整个不出现在界面里**，不留死按钮。 */
 	modes?: PanelMode[]
-	/** 「笔记」页只读当前 vault 的最近阅读 / 星标索引；不开放全库笔记扫描。 */
+	/** 「笔记」页只读当前 vault 的最近阅读 / 置顶索引；不开放全库笔记扫描。 */
 	getMarkdownNotes?: () => { recent: MarkdownNoteListItem[]; starred: MarkdownNoteListItem[] }
 	onOpenMarkdownNote?: (path: string) => void
-	onToggleMarkdownNoteStar?: (path: string) => void
+	onOpenMarkdownAnnotations?: (path: string) => void
+	onOpenFeedAnnotations?: (feedId: string, entryId: string) => void
+	onFeedContextMenu?: (feedId: string, entryId: string, event: MouseEvent) => void
+	onFileContextMenu?: (path: string, event: MouseEvent, kind: "markdown" | "book") => void
+	onToggleMarkdownNotePin?: (path: string) => void
 	/** 在文件浏览器里定位到这篇笔记（`app.showInFolder`）。不给 = 笔记卡不渲染那枚按钮。 */
 	onRevealMarkdownNote?: (path: string) => void
 	/** 笔记卡的字数供给（读盘统计后回填底栏）。不给 = 字数位显示占位符。 */
 	resolveNoteWordCount?: (path: string) => Promise<number | null>
+	/** 笔记卡的正文预览供给（Markdown 源片段）。不给 = 卡片不留预览行。 */
+	resolveNoteExcerpt?: (path: string) => Promise<string | null>
+	/** 笔记卡预览的渲染器（真机 = `MarkdownRenderer.render(app, md, el, path, component)`）。
+	 *  不给 = 预览退化成纯文本（语法符号会露出来，只作兜底）。 */
+	renderNoteMarkdown?: (el: HTMLElement, markdown: string, sourcePath: string) => void | Promise<void>
 	loadBookPreview?: (path: string) => Promise<BookPreview>
 	/** 订阅卡缩略图供给：返回可直接塞进 `<img src>` 的地址（blob:），null = 这张卡没有图。
 	 *  **不给就整个不做缩略图** —— 面板自己绝不直连远程图，网络请求必须来自宿主的受控通道
@@ -158,6 +188,15 @@ function formatMediaDuration(seconds: number | null): string {
 function readingDurationText(ms: number | undefined): string {
 	if (!ms) return "暂无记录";
 	return formatReadingDuration(ms) || "不足 1 分钟";
+}
+
+/** 书籍卡标题下那一行（用户 2026-10-17：「显示作者和书籍格式」）= `作者 · 格式`。
+ *  作者缺失时只留格式（格式是同步就有的），两者都没有返回空串（调用方据此不建这一行）。 */
+function bookMetaLine(extension: string | null | undefined, author: string | null | undefined): string {
+	const format = (extension ?? "").trim().toUpperCase();
+	const writer = (author ?? "").trim();
+	if (writer && format) return `${writer} · ${format}`;
+	return writer || format;
 }
 
 /** 书籍卡的详情看板内容。`preview` 是懒加载来的（作者名只有它知道），没加载完就没有那一行。 */
@@ -243,6 +282,8 @@ export class AnnotationsPanel {
 	private readonly modes: PanelMode[];
 	private annotationData: AnnotationFileData = { highlights: [], bookmarks: [] };
 	private headerTitleEl: HTMLElement | null = null;
+	private annotationLoadingKey: string | null = null;
+	private annotationLoadingTitle: string | null = null;
 	private bookshelfModeBtn: HTMLElement | null = null;
 	private feedsModeBtn: HTMLElement | null = null;
 	private notesModeBtn: HTMLElement | null = null;
@@ -273,7 +314,108 @@ export class AnnotationsPanel {
 	 *  上次退出的位置」）。切页 / 重新展开时由 `setMode` 落回去，见那里的注释。
 	 *  键由 `scrollKey()` 给：书架 / 订阅 / 笔记是全局列表 → 按页记；高亮页按**文档**记
 	 *  （换书 / 换文章后列表内容整批换掉，沿用上一篇的偏移只会落在一个无意义的位置）。 */
-	private readonly scrollMemo = new Map<string, number>();
+	private readonly scrollMemo = new Map<string, PanelScrollPosition>();
+	private captureListScrollPosition(): PanelScrollPosition {
+		const scrollRect = this.listEl.getBoundingClientRect();
+		const items = [...this.listEl.querySelectorAll<HTMLElement>(".unreader-shelf-card, .unreader-feed-card, .unreader-note-card, .unreader-anno-row")];
+		const anchor = items.find(item => {
+			const rect = item.getBoundingClientRect();
+			return rect.bottom > scrollRect.top + 1 && rect.top < scrollRect.bottom - 1;
+		});
+		const anchorKey = anchor ? this.scrollItemKey(anchor) : null;
+		const anchorOffset = anchor ? anchor.getBoundingClientRect().top - scrollRect.top : 0;
+		return { scrollTop: this.listEl.scrollTop, anchorKey, anchorOffset };
+	}
+
+	private scrollItemKey(item: HTMLElement): string | null {
+		if (item.classList.contains("unreader-note-card")) return this.cardKey(item);
+		if (item.dataset.path) return `path:${item.dataset.path}`;
+		if (item.dataset.feedId && item.dataset.entryId) return `feed:${item.dataset.feedId}:${item.dataset.entryId}`;
+		if (item.dataset.scrollKey) return item.dataset.scrollKey;
+		return null;
+	}
+
+	private cardKey(card: HTMLElement): string | null {
+		if (card.classList.contains("unreader-shelf-card") && card.dataset.path) return `book:${card.dataset.path}`;
+		if (card.classList.contains("unreader-feed-card") && card.dataset.feedId && card.dataset.entryId) return `feed:${card.dataset.feedId}:${card.dataset.entryId}`;
+		if (card.classList.contains("unreader-note-card") && card.dataset.path) {
+			const group = card.closest(".unreader-note-group-starred") ? "starred" : "recent";
+			return `markdown:${group}:${card.dataset.path}`;
+		}
+		return null;
+	}
+
+	private beginStableCardUpdate(): StableCardSnapshot {
+		const cards = new Map<string, HTMLElement>();
+		for (const card of this.listEl.querySelectorAll<HTMLElement>(CARD_SELECTOR)) {
+			const key = this.cardKey(card);
+			if (key) cards.set(key, card);
+		}
+		const focused = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+		const focusedCard = focused?.closest<HTMLElement>(CARD_SELECTOR) ?? null;
+		return {
+			cards,
+			scroll: this.captureListScrollPosition(),
+			focusedKey: focusedCard ? this.cardKey(focusedCard) : null,
+			focusedClasses: focused && focused !== focusedCard ? [...focused.classList] : [],
+		};
+	}
+
+	/** 只替换确实变化/新增/删除的卡片；身份和内容相同的卡片节点原样保留。 */
+	private finishStableCardUpdate(snapshot: StableCardSnapshot): void {
+		for (const fresh of this.listEl.querySelectorAll<HTMLElement>(CARD_SELECTOR)) {
+			const key = this.cardKey(fresh);
+			const old = key ? snapshot.cards.get(key) : null;
+			const oldSignature = fresh.classList.contains("unreader-note-card") ? markdownNoteSignature(old ?? fresh) : cardRenderSignatures.get(old ?? fresh);
+			const freshSignature = fresh.classList.contains("unreader-note-card") ? markdownNoteSignature(fresh) : cardRenderSignatures.get(fresh);
+			if (!old || old.outerHTML !== fresh.outerHTML || oldSignature !== freshSignature) continue;
+			fresh.replaceWith(old);
+		}
+		refreshMarkdownNotesLayout(this.listEl);
+		this.reattachCardThumbObservers();
+		this.restoreListScrollPosition(snapshot.scroll);
+		if (snapshot.focusedKey) {
+			const card = [...this.listEl.querySelectorAll<HTMLElement>(CARD_SELECTOR)].find(item => this.cardKey(item) === snapshot.focusedKey);
+			const target = snapshot.focusedClasses.length
+				? [...(card?.querySelectorAll<HTMLElement>("*") ?? [])].find(item => snapshot.focusedClasses.every(cls => item.classList.contains(cls)))
+				: card;
+			target?.focus({ preventScroll: true });
+		}
+	}
+
+	private reattachCardThumbObservers(): void {
+		this.cardThumbs.reset();
+		for (const card of this.listEl.querySelectorAll<HTMLElement>(".unreader-shelf-card")) {
+			const root = card.querySelector<HTMLElement>(".unreader-card-thumb");
+			const img = root?.querySelector<HTMLImageElement>("img");
+			const title = card.querySelector<HTMLElement>(".unreader-shelf-title");
+			const excerpt = card.querySelector<HTMLElement>(".unreader-shelf-excerpt");
+			if (!root || !img || !title || !excerpt || !card.dataset.path) continue;
+			this.observeShelfThumb(card, card.dataset.path, { root, img, revealed: !root.hasClass("is-hidden") }, excerpt, title, card.dataset.extension ?? "");
+		}
+		for (const card of this.listEl.querySelectorAll<HTMLElement>(".unreader-feed-card")) {
+			const root = card.querySelector<HTMLElement>(".unreader-card-thumb");
+			const img = root?.querySelector<HTMLImageElement>("img");
+			if (!root || !img || !card.dataset.feedId || !card.dataset.entryId) continue;
+			this.observeFeedThumb(card, card.dataset.feedId, card.dataset.entryId, { root, img, revealed: !root.hasClass("is-hidden") });
+		}
+		for (const card of this.listEl.querySelectorAll<HTMLElement>(".unreader-note-card")) {
+			const root = card.querySelector<HTMLElement>(".unreader-card-thumb");
+			const img = root?.querySelector<HTMLImageElement>("img");
+			if (root && img && card.dataset.path) this.attachNoteThumb(card, card.dataset.path, { root, img, revealed: !root.hasClass("is-hidden") });
+		}
+	}
+
+	private restoreListScrollPosition(position: PanelScrollPosition): void {
+		this.listEl.scrollTop = position.scrollTop;
+		if (!position.anchorKey) return;
+		const anchor = [...this.listEl.querySelectorAll<HTMLElement>(".unreader-shelf-card, .unreader-feed-card, .unreader-note-card, .unreader-anno-row")]
+			.find(item => this.scrollItemKey(item) === position.anchorKey);
+		if (!anchor) return;
+		const listTop = this.listEl.getBoundingClientRect().top;
+		const currentOffset = anchor.getBoundingClientRect().top - listTop;
+		this.listEl.scrollTop = adjustNativeSidebarScrollTop(this.listEl.scrollTop, currentOffset, position.anchorOffset);
+	}
 
 	/** 记账键（见 scrollMemo）：选内容页 = 页名；高亮页 = `annotations:<当前文档名>`。 */
 	private scrollKey(mode: PanelMode): string {
@@ -281,7 +423,7 @@ export class AnnotationsPanel {
 		return `annotations:${this.actions.getCurrentDocumentName?.() ?? ""}`;
 	}
 	/** 书签行的页码元素（anchor 供 refreshPages 重算），render 时重建 */
-	private bookmarkPageEls: { el: HTMLElement; anchor: string }[] = [];
+	private bookmarkPageEls: { el: HTMLElement; anchor: string; contextKey: string | null }[] = [];
 	/** 输入区（评论 / 重命名）展开期间的「跟着键盘走」清理函数；关闭、重渲染时调用 */
 	private revealCleanup: (() => void) | null = null;
 	/** 展开按钮「实测重定」的合并帧句柄（见 scheduleSettleExpand） */
@@ -420,7 +562,7 @@ export class AnnotationsPanel {
 		// （宿主在面板关着时刷新列表也走同一路径）。切页那一次由 setMode 的**同步**记账兜底。
 		this.listEl.addEventListener("scroll", () => {
 			if (!this.isOpen()) return;
-			this.scrollMemo.set(this.scrollKey(this.mode), this.listEl.scrollTop);
+			this.scrollMemo.set(this.scrollKey(this.mode), this.captureListScrollPosition());
 		}, { passive: true });
 
 		// 底部拖拽手柄：手动调节侧边栏高度（双击恢复默认）
@@ -642,20 +784,60 @@ export class AnnotationsPanel {
 	refreshHeaderTitle(): void {
 		const el = this.headerTitleEl;
 		if (!el) return;
+		if (this.annotationLoadingKey) {
+			const title = this.annotationLoadingTitle?.trim();
+			el.setText(title ? `正在加载“${title}”的标注…` : "正在加载标注…");
+			el.removeClass("is-placeholder");
+			el.setAttribute("title", title ? `正在加载“${title}”的标注…` : "正在加载标注…");
+			return;
+		}
 		const name = (this.actions.getCurrentDocumentName?.() ?? "").trim();
 		el.setText(name || this.modeLabel());
 		el.toggleClass("is-placeholder", !name);
 		el.setAttribute("title", name || this.modeLabel());
 	}
 
+	setAnnotationLoading(key: string | null, title?: string, error?: string): void {
+		this.annotationLoadingKey = key;
+		this.annotationLoadingTitle = title ?? null;
+		this.containerEl.toggleClass("is-loading-annotations", !!key);
+		this.refreshHeaderTitle();
+		if (this.mode === "annotations") {
+			this.listEl.empty();
+			this.listEl.createDiv({
+				cls: "unreader-toc-empty",
+				text: error ?? (key ? (title ? `正在读取“${title}”的标注…` : "正在读取标注…") : ""),
+			});
+		}
+	}
+
+	setAnnotationBrowseTarget(data: AnnotationFileData | null): void {
+		this.annotationLoadingKey = null;
+		this.annotationLoadingTitle = null;
+		this.containerEl.removeClass("is-loading-annotations");
+		this.refreshHeaderTitle();
+		if (data && this.mode === "annotations") this.render(data);
+	}
+
+	/** 上下文切换只更新可见状态，保留列表节点、滚动、焦点与展开状态。 */
+	updateContentContext(key: string | null): void {
+		this.refreshHeaderTitle();
+		for (const card of this.listEl.querySelectorAll<HTMLElement>(".unreader-shelf-card,.unreader-feed-card,.unreader-note-card")) {
+			const cardKey = card.classList.contains("unreader-shelf-card") ? `book:${card.dataset.path ?? ""}`
+				: card.classList.contains("unreader-note-card") ? `markdown:${card.dataset.path ?? ""}`
+					: `feed:${card.dataset.feedId ?? ""}:${card.dataset.entryId ?? ""}`;
+			card.classList.toggle("is-current", !!key && cardKey === key);
+		}
+	}
+
 	/** 四种内容共用同一抽屉、钉住状态、尺寸与开合状态，只切换列表主体。 */
 	setMode(mode: PanelMode): void {
 		this.shelfDragCleanup?.();
 		const changed = this.mode !== mode;
-		const previousScroll = this.listEl.scrollTop;
+		const previousPosition = this.captureListScrollPosition();
 		// 换页前**同步**把当前页的位置记下来（不能等 scroll 事件：那是下一帧才派的，
 		// 而这一刻的 scrollTop 马上就要被 `empty()` 冲成 0）。见 scrollMemo 字段注释。
-		if (changed) this.scrollMemo.set(this.scrollKey(this.mode), previousScroll);
+		if (changed) this.scrollMemo.set(this.scrollKey(this.mode), previousPosition);
 		this.mode = mode;
 		// markdown 宿主的标注是现算的：切到标注页前先重取数据（书 / RSS 不给此回调，
 		// 沿用既有 render() 喂入的内存数据，行为不变）。
@@ -666,14 +848,19 @@ export class AnnotationsPanel {
 		if (mode === "bookshelf") this.renderBookshelf();
 		else if (mode === "feeds") this.renderFeeds();
 		else if (mode === "notes") this.renderNotes();
-		else this.renderAnnotations();
+		else if (this.annotationLoadingKey) {
+			this.setAnnotationLoading(this.annotationLoadingKey, this.annotationLoadingTitle ?? undefined);
+		} else this.renderAnnotations();
 		// 切换模式回到**该页上次离开时的位置**（用户 2026-10-13：「侧边栏按钮打开要落
 		// 在上次退出的位置」—— 书架滚到中间翻了一半、关掉抽屉再打开，不该被弹回顶部）。
 		// 同一模式内的重绘（排序 / 置顶 / 拖动 / 刷新）仍保留当前滚动位置；
 		// 没记过账的页（首次进入）落 0 = 顶部，与改动前逐像素一致。
 		// ⚠️ 取值必须在渲染**之后**、且在这一次赋值里完成：赋值与渲染之间读到的
 		// scrollTop 已被 `empty()` 夹成 0，拿它当兜底会把位置丢掉。
-		this.listEl.scrollTop = changed ? (this.scrollMemo.get(this.scrollKey(mode)) ?? 0) : previousScroll;
+		const targetPosition = changed
+			? this.scrollMemo.get(this.scrollKey(mode)) ?? { scrollTop: 0, anchorKey: null, anchorOffset: 0 }
+			: previousPosition;
+		this.restoreListScrollPosition(targetPosition);
 		if (changed) this.actions.onModeChange?.(mode);
 	}
 
@@ -719,6 +906,13 @@ export class AnnotationsPanel {
 		if (this.mode !== target) this.setMode(target);
 	}
 
+	dispose(): void {
+		disposeMarkdownNotesLayout(this.listEl);
+		this.stopFeedListRendering();
+		this.disconnectShelfPreviews();
+		this.stopEditorReveal();
+	}
+
 	/** 切页 / 重绘时收口缩略图观察器（保留旧方法名，四个调用点不动）。 */
 	private disconnectShelfPreviews(): void {
 		this.cardThumbs.reset();
@@ -736,6 +930,7 @@ export class AnnotationsPanel {
 	private renderAnnotations(): void {
 		this.disconnectShelfPreviews();
 		const data = this.annotationData;
+		const contextKey = this.actions.getAnnotationContextKey?.() ?? null;
 		const current = this.actions.getCurrentFeedEntry?.();
 		const feed = !!current;
 		const podcast = current?.kind === "audio";
@@ -746,9 +941,12 @@ export class AnnotationsPanel {
 		if (!data.bookmarks.length && !data.highlights.length) {
 			// 当前读的是 Feed 文章时功能轨上是「星标」而不是「添加书签」（两枚互斥），
 			// 空态提示必须跟着走，否则指的那枚按钮根本不在屏幕上。
+			const hasContentContext = !this.actions.getAnnotationContextKey || contextKey !== null;
 			this.listEl.createDiv({
 				cls: "unreader-toc-empty",
-				text: podcast
+				text: !hasContentContext
+					? "先打开一本书、订阅文章或 Markdown 笔记，再查看对应的高亮和书签。"
+					: podcast
 					? "暂无标注。选中正文文字可高亮或评论；播放时点底部「标记」可给当前时间写备注，作为时间点书签显示在这里。"
 					: feed
 						? "暂无标注。选中文字可高亮或评论，点击工具栏星标按钮可收藏这篇文章。"
@@ -762,7 +960,7 @@ export class AnnotationsPanel {
 			this.listEl.createDiv({ cls: "unreader-anno-section unreader-anno-section--bookmark", text: `${podcast ? "书签与时间点" : "书签"} · ${data.bookmarks.length}` });
 			const ul = this.listEl.createEl("ul", { cls: "unreader-anno-list" });
 			for (const b of data.bookmarks) {
-				ul.appendChild(this.bookmarkRow(b));
+				ul.appendChild(this.bookmarkRow(b, contextKey));
 			}
 		}
 
@@ -770,7 +968,7 @@ export class AnnotationsPanel {
 			this.listEl.createDiv({ cls: "unreader-anno-section unreader-anno-section--highlight", text: `高亮与评论 · ${data.highlights.length}` });
 			const ul = this.listEl.createEl("ul", { cls: "unreader-anno-list" });
 			for (const h of data.highlights) {
-				ul.appendChild(this.highlightRow(h));
+				ul.appendChild(this.highlightRow(h, contextKey));
 			}
 		}
 		// 行已插入列表 → 下一帧按**实测**重定展开按钮（渲染时量不出高度，只能兜底）。
@@ -778,6 +976,7 @@ export class AnnotationsPanel {
 	}
 
 	private renderBookshelf(): void {
+		const stableCards = this.beginStableCardUpdate();
 		this.disconnectShelfPreviews();
 		// 重渲染会让旧卡片连同它的悬停接线一起消失：浮层是 body 上的单例、用 fixed 定位，
 		// 不主动收就会留在屏幕上（列表换了，看板还写着上一批卡片的数据）。
@@ -840,6 +1039,7 @@ export class AnnotationsPanel {
 					? "全库中还没有可收录的书籍（EPUB / AZW3 / MOBI / TXT / HTML）。若书在排除的文件夹里，可在 设置 → UNreader → 书架 调整。"
 					: "这个分类里还没有书。点书籍卡片右键（或右侧 ⋯ 按钮）可以移动分类。",
 			});
+			this.finishStableCardUpdate(stableCards);
 			return;
 		}
 		this.listEl.toggleClass("is-manual", sortMode === "manual");
@@ -847,6 +1047,7 @@ export class AnnotationsPanel {
 		const regular = entries.filter(entry => !entry.pinned);
 		if (pinned.length) this.renderShelfGroup(pinned, "置顶", sortMode, currentPath);
 		this.renderShelfGroup(regular, pinned.length ? sourceLabel : "", sortMode, currentPath);
+		this.finishStableCardUpdate(stableCards);
 	}
 
 	/** 书架分类选择按钮：交互与 RSS 的订阅源按钮同族，低频管理操作收进右侧面板。 */
@@ -894,33 +1095,14 @@ export class AnnotationsPanel {
 		});
 	}
 
-	private showBookshelfCardMenu(event: MouseEvent, entry: BookshelfEntry): void {
-		const menu = new Menu();
-		this.actions.onHoldAutoClose?.(true);
-		menu.addItem(item => item
-			.setTitle("未分类")
-			.setIcon("folder-minus")
-			.setChecked(!entry.categoryId)
-			.onClick(() => this.actions.onAssignBookCategory?.(entry.path, null)));
-		const categories = this.actions.getBookshelfCategories?.() ?? [];
-		for (const category of categories) {
-			menu.addItem(item => item
-				.setTitle(category.name)
-				.setIcon("folder")
-				.setChecked(entry.categoryId === category.id)
-				.onClick(() => this.actions.onAssignBookCategory?.(entry.path, category.id)));
-		}
-		menu.addSeparator();
-		menu.addItem(item => item
-			.setTitle("从书架移除（保留书籍文件）")
-			.setIcon("eye-off")
-			.onClick(() => this.actions.onRemoveBookFromShelf?.(entry.path)));
-		menu.onHide(() => this.actions.onHoldAutoClose?.(false));
-		menu.showAtMouseEvent(event);
-	}
+	// `showBookshelfCardMenu` 已删除（2026-10-17）：书卡 ⋯ 与卡片右键统一走
+	// `onFileContextMenu` → `sidePanels.showVaultFileMenu` 的**原生文件菜单**，
+	// 自建那份「未分类 / 各分类 / 从书架移除」是用户否掉的「老版本」。
+	// 分类与移除没有丢 —— `showVaultFileMenu` 的 book 分支照样把它们追加在原生菜单后面。
 
 	/** 重建第三板块。所有数据从缓存读取，不在这里发网络请求。 */
 	renderFeeds(): void {
+		const stableCards = this.beginStableCardUpdate();
 		this.disconnectShelfPreviews();
 		this.stopFeedListRendering();
 		this.stopEditorReveal();
@@ -981,6 +1163,7 @@ export class AnnotationsPanel {
 			add.addEventListener("click", () => this.actions.onAddFeed?.());
 			const importOpml = emptyActions.createEl("button", { text: "导入 .opml" });
 			importOpml.addEventListener("click", () => this.actions.onImportOpml?.());
+			this.finishStableCardUpdate(stableCards);
 			return;
 		}
 
@@ -997,6 +1180,7 @@ export class AnnotationsPanel {
 				cls: "unreader-toc-empty",
 				text: filter === "unread" ? "没有未读文章。" : filter === "starred" ? "没有收藏文章。" : sourceFilter ? "当前订阅还没有文章，点击刷新试试。" : "还没有文章，点击右上角刷新试试。",
 			});
+			this.finishStableCardUpdate(stableCards);
 			return;
 		}
 
@@ -1011,9 +1195,10 @@ export class AnnotationsPanel {
 			generation: this.feedListGeneration,
 		};
 		const done = this.appendFeedChunk();
-		if (done) return;
+		if (done) { this.finishStableCardUpdate(stableCards); return; }
 		if (typeof IntersectionObserver === "undefined") {
 			while (!this.appendFeedChunk()) { /* 旧环境一次性完成，保持功能可用 */ }
+			this.finishStableCardUpdate(stableCards);
 			return;
 		}
 		this.feedListObserver = new IntersectionObserver(records => {
@@ -1025,12 +1210,14 @@ export class AnnotationsPanel {
 		}, { root: this.listEl, rootMargin: "480px 0px" });
 		this.feedListSentinel = list.createDiv({ cls: "unreader-feed-load-more" });
 		this.feedListObserver.observe(this.feedListSentinel);
+		this.finishStableCardUpdate(stableCards);
 	}
 
 	/** 第四板块：只列最近阅读与星标 Markdown 笔记，不扫描/展示全库。
 	 *  卡片本体在 `markdownNoteCards.renderMarkdownNotes`（与 Markdown 阅读模式的笔记抽屉共用一份，
 	 *  避免两处行为漂移）。正文仍交给 Obsidian 原生阅读模式，本页只负责「找到并打开」。 */
 	private renderNotes(): void {
+		const stableCards = this.beginStableCardUpdate();
 		this.disconnectShelfPreviews();
 		this.stopFeedListRendering();
 		this.stopEditorReveal();
@@ -1039,16 +1226,22 @@ export class AnnotationsPanel {
 		this.bookmarkPageEls = [];
 		renderMarkdownNotes(this.listEl, this.actions.getMarkdownNotes?.() ?? { recent: [], starred: [] }, {
 			onOpen: path => this.actions.onOpenMarkdownNote?.(path),
-			onToggleStar: path => this.actions.onToggleMarkdownNoteStar?.(path),
+			onOpenAnnotations: path => this.actions.onOpenMarkdownAnnotations?.(path),
+			onContextMenu: (path, event) => this.actions.onFileContextMenu?.(path, event, "markdown"),
+			onTogglePin: path => this.actions.onToggleMarkdownNotePin?.(path),
 			onRevealInFolder: this.actions.onRevealMarkdownNote
 				? path => this.actions.onRevealMarkdownNote?.(path)
 				: undefined,
 			resolveWordCount: this.actions.resolveNoteWordCount,
+			// 正文预览（2026-10-17）：标题下面那截空白填「笔记最强的字」，按 Markdown 渲染。
+			resolveExcerpt: this.actions.resolveNoteExcerpt,
+			renderMarkdown: this.actions.renderNoteMarkdown,
 			// 缩略图接线只在宿主给了 resolver 时才存在 —— 不给就整卡不建缩略图列（不留空档）。
 			attachThumb: this.actions.resolveNoteThumb
 				? (card, path, thumb) => this.attachNoteThumb(card, path, thumb)
 				: undefined,
 		});
+		this.finishStableCardUpdate(stableCards);
 	}
 
 	/** 工具栏左端的「订阅源选择」按钮：点开是「全部订阅 + 各订阅源」的菜单。
@@ -1129,12 +1322,16 @@ export class AnnotationsPanel {
 	private feedEntryCard(entry: FeedEntry, feed: FeedSubscription | null, current: { feedId: string; entryId: string } | null): HTMLElement {
 		const card = createDiv();
 		card.className = "unreader-feed-card";
+		card.dataset.feedId = entry.feedId;
+		card.dataset.entryId = entry.id;
+		cardRenderSignatures.set(card, JSON.stringify({ entry, feed }));
 		card.toggleClass("is-unread", entry.state.readAt == null);
 		card.toggleClass("is-starred", entry.state.starredAt != null);
 		card.toggleClass("is-audio", entry.kind === "audio");
 		card.toggleClass("is-current", current?.feedId === entry.feedId && current.entryId === entry.id);
 		card.setAttribute("role", "button");
 		card.setAttribute("tabindex", "0");
+		card.addEventListener("contextmenu", e => { e.preventDefault(); e.stopPropagation(); this.actions.onFeedContextMenu?.(entry.feedId, entry.id, e); });
 		const open = (): void => this.actions.onOpenFeedEntry?.(entry.feedId, entry.id);
 		card.addEventListener("click", e => {
 			const target = e.target as HTMLElement | null;
@@ -1143,6 +1340,8 @@ export class AnnotationsPanel {
 		});
 		card.addEventListener("keydown", e => {
 			if (e.key !== "Enter" && e.key !== " ") return;
+			const target = e.target as HTMLElement | null;
+			if (target && target !== card && target.closest("button, a, [role=button], audio, select")) return;
 			e.preventDefault();
 			open();
 		});
@@ -1192,22 +1391,18 @@ export class AnnotationsPanel {
 		// （那枚按钮的历史包袱也一并卸掉：它的读态图标反复与进度环撞脸，五轮六轮都在
 		//  修「卡片上有两个圈」，根因就是「一个状态被画了两次」。）
 		const cardActions = foot.createDiv({ cls: "unreader-feed-card-actions" });
-		const star = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
+		const annotations = createCardActionButton(cardActions, { cls: "unreader-feed-inline-action unreader-card-annotations", icon: "highlighter", fallback: "▰", label: "查看标注" });
+		annotations.addEventListener("click", e => { e.stopPropagation(); this.actions.onOpenFeedAnnotations?.(entry.feedId, entry.id); });
+		const star = createCardActionButton(cardActions, { cls: "unreader-feed-inline-action", icon: "star", fallback: "★", label: entry.state.starredAt ? "取消收藏" : "收藏文章", pressed: entry.state.starredAt != null });
 		star.toggleClass("is-starred", entry.state.starredAt != null);
-		star.setAttribute("aria-label", entry.state.starredAt ? "取消收藏" : "收藏文章");
-		star.setAttribute("title", entry.state.starredAt ? "取消收藏" : "收藏文章");
 		// 图标**恒为 `star`**，靠 `is-starred` 填充（与笔记卡、功能轨同一套读数）——
 		// 换成 `star-off`（带斜杠的星）是第三套画法，同一件事在三处长成三个样子。
-		try { setIcon(star, "star"); } catch { star.setText("☆"); }
 		star.addEventListener("click", e => {
 			e.stopPropagation();
 			this.actions.onToggleFeedStar?.(entry.feedId, entry.id);
 		});
 		if (entry.url) {
-			const original = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
-			original.setAttribute("aria-label", "在系统浏览器打开原文");
-			original.setAttribute("title", "在系统浏览器打开原文");
-			try { setIcon(original, "external-link"); } catch { original.setText("↗"); }
+			const original = createCardActionButton(cardActions, { cls: "unreader-feed-inline-action", icon: "external-link", fallback: "↗", label: "在系统浏览器打开原文" });
 			original.addEventListener("click", e => {
 				e.stopPropagation();
 				this.actions.onOpenOriginal?.(entry.url);
@@ -1223,22 +1418,18 @@ export class AnnotationsPanel {
 		// `isPinnedFeedEntry`）：订阅链接失效、刷新裁剪都不会让这篇从列表里消失。
 		if (canSaveFeedEntry(entry)) {
 			const saved = entry.state.savedAt != null;
-			const save = cardActions.createEl("button", { cls: "unreader-feed-inline-action" });
+			const save = createCardActionButton(cardActions, { cls: "unreader-feed-inline-action", icon: saved ? "file-check" : "file-down", fallback: "存", label: saved ? "已保存为 Markdown，再次点击重新保存" : "保存为 Markdown", pressed: saved });
 			save.toggleClass("is-saved", saved);
-			save.setAttribute("aria-label", saved ? "已保存为 Markdown，再次点击重新保存" : "保存为 Markdown");
-			save.setAttribute("title", saved ? "已保存为 Markdown（长期保留）· 再次点击重新保存" : "保存为 Markdown（长期保留）");
-			// setIcon 碰到不存在的图标名不会抛错、只是什么都不画（按钮会整个空白），
-			// 所以画完看一眼 DOM 再决定要不要退到文字兜底。
-			setIcon(save, saved ? "file-check" : "file-down");
-			if (!save.querySelector("svg")) {
-				setIcon(save, "file-down");
-				if (!save.querySelector("svg")) save.setText("存");
-			}
 			save.addEventListener("click", e => {
 				e.stopPropagation();
 				this.actions.onSaveNote?.(entry.feedId, entry.id);
 			});
 		}
+
+		// 这里**没有 ⋯**（用户 2026-10-17 定稿）：RSS 条目只是缓存里的一条记录，vault 里
+		// 没有对应文件，弹不出 Obsidian 原生文件菜单；给它一枚 ⋯ 只能点出一堆通用项。
+		// 条目操作仍走卡片**右键**（`sidePanels.showFeedEntryMenu`，两宿主共用一份）。
+		// 书籍卡 / 笔记卡才有 ⋯ —— 它们是真实文件，详见 `markdownNoteCards` 与 `appendShelfCard`。
 
 		// 缩略图列（末子节点，默认 is-hidden）。宿主没给 resolver 就不建这一列。
 		if (this.actions.resolveFeedThumb) {
@@ -1272,12 +1463,17 @@ export class AnnotationsPanel {
 
 	private appendShelfCard(group: HTMLElement, entry: BookshelfEntry, sortMode: BookshelfSortMode, currentPath: string | null): void {
 		const card = group.createDiv({ cls: "unreader-shelf-card" });
+		cardRenderSignatures.set(card, JSON.stringify(entry));
 		card.dataset.path = entry.path;
+		// 格式要在「缩略图观察器被重挂」时还能读到（`reattachCardThumbObservers` 只拿到 DOM，
+		// 拿不到 `BookshelfEntry`）—— 作者补写的那一行就靠它拼「作者 · 格式」。
+		card.dataset.extension = entry.extension;
 		card.toggleClass("is-current", entry.path === currentPath);
 		card.toggleClass("is-pinned", entry.pinned);
 		card.setAttribute("role", "button");
 		card.setAttribute("tabindex", "0");
-		card.addEventListener("click", () => {
+		card.addEventListener("click", e => {
+			if ((e.target as HTMLElement | null)?.closest(".unreader-shelf-card-actions,button,a")) return;
 			const draggedAt = Number(card.dataset.draggedAt ?? 0);
 			if (draggedAt && Date.now() - draggedAt < 320) return;
 			// 不再在此提前切页：文档落定后由宿主 openAnnotationsPage() 统一切到高亮页，
@@ -1286,14 +1482,12 @@ export class AnnotationsPanel {
 		});
 		card.addEventListener("keydown", e => {
 			if (e.key !== "Enter" && e.key !== " ") return;
+			const target = e.target as HTMLElement | null;
+			if (target && target !== card && target.closest("button, a, [role=button], select")) return;
 			e.preventDefault();
 			this.actions.onOpenBook?.(entry.path);
 		});
-		card.addEventListener("contextmenu", e => {
-			e.preventDefault();
-			e.stopPropagation();
-			this.showBookshelfCardMenu(e, entry);
-		});
+		card.addEventListener("contextmenu", e => { e.preventDefault(); e.stopPropagation(); this.actions.onFileContextMenu?.(entry.path, e, "book"); });
 
 		if (sortMode === "manual") {
 			const drag = card.createDiv({ cls: "unreader-shelf-drag" });
@@ -1302,13 +1496,17 @@ export class AnnotationsPanel {
 			this.attachShelfDrag(group, card, drag);
 		}
 
-		// 卡片 = 网格 2 行：第 1 行 = 标题 + 正文首行兜底（无封面时，第 1 列）｜缩略图
-		// （第 2 列，固定 3:4）；第 2 行 = **通栏底栏** `.unreader-card-foot`
-		// （最左进度环 + 最右动作钮）。拖拽把手绝对定位、被 CSS 排除。
-		const body = card.createDiv({ cls: "unreader-shelf-body" });
-		const title = body.createDiv({ cls: "unreader-shelf-title", text: entry.name });
-		// 无封面时补的正文首行：与缩略图**二选一**（互斥），默认藏起来。
-		const excerpt = body.createDiv({ cls: "unreader-shelf-excerpt is-hidden" });
+	// 卡片 = 网格 2 行：第 1 行 = 标题 + 「作者 · 格式」（第 1 列）｜缩略图
+	// （第 2 列，固定 3:4）；第 2 行 = **通栏底栏** `.unreader-card-foot`
+	// （最左进度环 + 最右动作钮）。拖拽把手绝对定位、被 CSS 排除。
+	const body = card.createDiv({ cls: "unreader-shelf-body" });
+	const title = body.createDiv({ cls: "unreader-shelf-title", text: entry.name });
+	// 标题下那一行（用户 2026-10-17：「书籍文件的话，这里显示作者和书籍格式」）：
+	// 与 RSS 卡的「订阅名 + 简介」、笔记卡的正文预览占**同一格**，三类卡扫下来行数一致。
+	// 格式是同步的（`entry.extension`），作者只有懒加载的 `BookPreview` 知道 ⇒ 先写格式、
+	// 作者到了再补。**不再与封面互斥**：有封面时这一行照样显示（旧的「无封面才显示正文首行」
+	// 是拿这一格当封面兜底，现在这一格有自己的信息了）。
+	const excerpt = body.createDiv({ cls: "unreader-shelf-excerpt", text: bookMetaLine(entry.extension, null) });
 
 		// 底栏只留「进度环（最左）+ 动作钮（最右）」—— 进度**文字**、格式、日期、
 		// 「正在阅读」标记全部移进悬停看板（`shelfDetailsContent`）。正文列里原来那条
@@ -1322,28 +1520,34 @@ export class AnnotationsPanel {
 		});
 		foot.appendChild(ring);
 		const cardActions = foot.createDiv({ cls: "unreader-shelf-card-actions" });
-		const more = cardActions.createDiv({ cls: "unreader-shelf-more" });
-		more.setAttribute("aria-label", "书籍操作：分类或从书架移除（保留书籍文件）");
-		more.setAttribute("title", "书籍操作：分类或从书架移除（保留书籍文件）");
-		try { setIcon(more, "ellipsis-vertical"); } catch { more.setText("⋯"); }
-		more.addEventListener("click", e => {
-			e.stopPropagation();
-			this.showBookshelfCardMenu(e, entry);
-		});
-		const pin = cardActions.createDiv({ cls: "unreader-shelf-pin" });
+		const annotations = createCardActionButton(cardActions, { cls: "unreader-card-annotations", icon: "highlighter", fallback: "▰", label: "查看标注" });
+		annotations.addEventListener("click", e => { e.stopPropagation(); this.actions.onOpenBookAnnotations?.(entry.path); });
+		const pin = createCardActionButton(cardActions, { cls: "unreader-shelf-pin", icon: entry.pinned ? "pin-off" : "pin", fallback: entry.pinned ? "顶" : "钉", label: entry.pinned ? "取消置顶" : "置顶书籍", pressed: entry.pinned });
 		pin.toggleClass("is-active", entry.pinned);
-		pin.setAttribute("aria-label", entry.pinned ? "取消置顶" : "置顶书籍");
-		pin.setAttribute("title", entry.pinned ? "取消置顶" : "置顶书籍");
-		try { setIcon(pin, entry.pinned ? "pin-off" : "pin"); } catch { pin.setText(entry.pinned ? "顶" : "钉"); }
 		pin.addEventListener("click", e => {
 			e.stopPropagation();
 			this.actions.onToggleBookPin?.(entry.path);
 		});
+		// 「⋯」**必须是动作组最后一个**（用户 2026-10-17：「位置在最右边」）——
+		// 旧实现把它排在置顶钮前面，同一枚按钮在书卡和笔记卡上位置不一致。
+		// 它现在弹的是**和文件浏览器里右键这本书完全一样**的原生菜单
+		// （用户 2026-10-17：「相当于在文件菜单点击对应文件鼠标右键，从而打开的菜单栏」）。
+		// 走的就是卡片右键同一条路：`onFileContextMenu(path, event, "book")` →
+		// `sidePanels.showVaultFileMenu`（原生菜单 + UNreader 的分类/移除项）。
+		// 因此**不能再弹自建的 `showBookshelfCardMenu`** —— 那正是用户说的「老版本」。
+		// 宿主没给这个回调就不渲染（绝不留下点了没反应的死按钮）。
+		if (this.actions.onFileContextMenu) {
+			const more = createCardActionButton(cardActions, { cls: "unreader-shelf-more", icon: "ellipsis-vertical", fallback: "⋯", label: "更多操作（与文件右键菜单相同）" });
+			more.addEventListener("click", e => {
+				e.stopPropagation();
+				this.actions.onFileContextMenu?.(entry.path, e, "book");
+			});
+		}
 
 		// 缩略图列必须是**最后一个子节点**（CSS 靠 `grid-column: 2` 定位，与 DOM 序无关，
 		// 但保持一致便于阅读，也避免以后有人在它后面插元素时误判第 2 列会被占）。
 		const thumb = mountCardThumb(card);
-		this.observeShelfThumb(card, entry.path, thumb, excerpt, title);
+		this.observeShelfThumb(card, entry.path, thumb, excerpt, title, entry.extension);
 		// 悬停看板：作者名只有懒加载的 `BookPreview` 知道，所以内容**现取**（见 shelfPreview）。
 		attachCardDetails(card, () => shelfDetailsContent(entry, this.shelfPreviews.get(card) ?? null, entry.path === currentPath), ring);
 	}
@@ -1351,10 +1555,12 @@ export class AnnotationsPanel {
 	/** 卡片 → 已加载的书籍预览。作者名 / 正文开头只在看板里用，没必要留在 DOM 里。 */
 	private shelfPreviews = new WeakMap<HTMLElement, BookPreview>();
 
-	/** 书籍卡：可见时才 `loadBookPreview`（读封面 + 正文首行）。
-	 *  有封面 → 右列缩略图；没封面 → 正文首行落到 `excerpt` 行；两者都没有 → 保持全宽文字。
-	 *  加载失败也**不写「暂无封面」占位** —— 卡片本来就该是无图形态，多一行灰字只是噪声。 */
-	private observeShelfThumb(card: HTMLElement, path: string, thumb: CardThumb, excerpt: HTMLElement, title: HTMLElement): void {
+	/** 书籍卡：可见时才 `loadBookPreview`（读封面 + 作者）。
+	 *  封面 → 右列缩略图；作者 → 标题下那行「作者 · 格式」（格式在卡片创建时就同步写好了，
+	 *  这里只补作者）。两件事**都做**，不再互斥 —— 这一行现在有自己的信息，不再是封面兜底。
+	 *  加载失败也不写「未知作者」占位：卡片本来就该是「只有书名 + 格式」的形态，
+	 *  多一行灰字只是噪声。 */
+	private observeShelfThumb(card: HTMLElement, path: string, thumb: CardThumb, excerpt: HTMLElement, title: HTMLElement, extension: string): void {
 		const loader = this.actions.loadBookPreview;
 		if (!loader) return;
 		this.cardThumbs.observe(card, () => {
@@ -1362,15 +1568,13 @@ export class AnnotationsPanel {
 				if (!card.isConnected) return;
 				this.shelfPreviews.set(card, preview);
 				if (preview.title) title.setText(preview.title);
-				if (preview.coverUrl) {
-					showCardThumb(thumb, preview.coverUrl);
-					return;
+				const line = bookMetaLine(extension, preview.author);
+				if (line) {
+					excerpt.setText(line);
+					excerpt.removeClass("is-hidden");
 				}
-				const text = preview.excerpt?.trim();
-				if (!text) return;
-				excerpt.setText(text);
-				excerpt.removeClass("is-hidden");
-			}).catch(() => { /* 读不出来就当这本书没有封面也没有首行 */ });
+				if (preview.coverUrl) showCardThumb(thumb, preview.coverUrl);
+			}).catch(() => { /* 读不出来就当这本书没有封面也没有作者 */ });
 		});
 	}
 
@@ -1381,7 +1585,7 @@ export class AnnotationsPanel {
 		this.cardThumbs.observe(card, () => {
 			void resolve(path).then(url => {
 				if (!card.isConnected || !url) return;
-				// 缩略图就位会让卡片变高：星标组是限高 + 组内滚动，不重钉一次组高就会溢出。
+				// 缩略图就位会让卡片变高：置顶组是限高 + 组内滚动，不重钉一次组高就会溢出。
 				showCardThumb(thumb, url, () => resettleStarredGroupHeight(card));
 			}).catch(() => { /* 无图 → 保持全宽文字 */ });
 		});
@@ -1427,11 +1631,11 @@ export class AnnotationsPanel {
 	/** 页码实时刷新：只重算页码文字，**不重建 DOM**——避免破坏展开态、
 	 *  正在输入的重命名/评论框与滚动位置。书签行渲染时登记，render 时重置。 */
 	refreshPages(): void {
-		for (const rec of this.bookmarkPageEls) this.paintBookmarkPage(rec.el, rec.anchor);
+		for (const rec of this.bookmarkPageEls) this.paintBookmarkPage(rec.el, rec.anchor, rec.contextKey);
 	}
 
 	/** 把现算页码写进书签行的页码胶囊；算不出（书未就绪/畸形 token）时整块隐藏。 */
-	private paintBookmarkPage(el: HTMLElement, anchor: string): void {
+	private paintBookmarkPage(el: HTMLElement, anchor: string, contextKey: string | null = null): void {
 		if (anchor.startsWith("audio:")) {
 			const seconds = Number(anchor.slice("audio:".length));
 			const label = formatMediaDuration(Number.isFinite(seconds) ? seconds : 0);
@@ -1441,7 +1645,7 @@ export class AnnotationsPanel {
 			return;
 		}
 		let res: { page: number; total: number } | null = null;
-		try { res = this.actions.getPageForAnchor?.(anchor) ?? null; } catch { res = null; }
+		try { res = this.actions.getPageForAnchor?.(anchor, contextKey) ?? null; } catch { res = null; }
 		if (res && res.page > 0) {
 			el.setText(`第 ${res.page} 页`);
 			el.setAttribute("aria-label", `第 ${res.page} 页，共 ${res.total} 页`);
@@ -1460,14 +1664,15 @@ export class AnnotationsPanel {
 	/** 数据是宿主「现算」的（markdown 笔记的官方高亮没有旁车文件）：外部数据变化
 	 *  （删除 / 新划高亮 / 切换笔记）后调用，仅当面板开着且正停在标注页才重算重绘。 */
 	refreshAnnotations(data?: AnnotationFileData): void {
-		if (!this.isOpen() || this.mode !== "annotations") return;
+		if (!this.isOpen() || this.mode !== "annotations" || this.annotationLoadingKey) return;
 		if (data) this.annotationData = data;
 		else if (this.actions.provideAnnotationData) this.annotationData = this.actions.provideAnnotationData();
 		this.renderAnnotations();
 	}
 
-	private highlightRow(h: StoredHighlight): HTMLElement {
+	private highlightRow(h: StoredHighlight, contextKey: string | null): HTMLElement {
 		const li = this.listEl.createEl("li", { cls: "unreader-anno-row unreader-anno-row--highlight" });
+		li.dataset.scrollKey = `highlight:${contextKey ?? ""}:${h.id}`;
 		li.toggleClass("is-stale", h.stale === true);
 		// 单击：浮动简介（AnnotationHover 预览），Cmd/Ctrl+单击：直接跳转，双击：全选文字
 		let clickTimer: number | null = null;
@@ -1482,13 +1687,13 @@ export class AnnotationsPanel {
 			// 触屏：单击直接跳转（无 hover 预览，无需等双击判定）
 			if (isCoarse()) {
 				e.stopPropagation();
-				this.actions.onJump(h.anchor, h.text);
+				this.actions.onJump(h.anchor, h.text, contextKey);
 				return;
 			}
 			if (me.metaKey || me.ctrlKey) {
 				e.stopPropagation();
 				clearClickTimer();
-				this.actions.onJump(h.anchor, h.text);
+				this.actions.onJump(h.anchor, h.text, contextKey);
 				return;
 			}
 			if (clickTimer != null) {
@@ -1499,7 +1704,7 @@ export class AnnotationsPanel {
 			// 单击 = 直接跳转到划线位置（与书签行一致）；预览改由悬浮触发
 			clickTimer = window.setTimeout(() => {
 				clickTimer = null;
-				this.actions.onJump(h.anchor, h.text);
+				this.actions.onJump(h.anchor, h.text, contextKey);
 			}, 220);
 			e.stopPropagation();
 		});
@@ -1563,7 +1768,7 @@ export class AnnotationsPanel {
 			commentBtn.setAttribute("title", "编辑这条高亮的评论");
 			commentBtn.addEventListener("click", e => {
 				e.stopPropagation();
-				this.toggleCommentEditor(li, h);
+				this.toggleCommentEditor(li, h, contextKey);
 			});
 		}
 		// 复制按钮：复制高亮文字（含评论）
@@ -1583,7 +1788,7 @@ export class AnnotationsPanel {
 		refBtn.setAttribute("title", "复制高亮引用（含书名和章节）");
 		refBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onCopyReference(h);
+			this.actions.onCopyReference(h, contextKey);
 		});
 		const delBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-anno-action is-danger" });
 		setIcon(delBtn, "trash-2");
@@ -1591,12 +1796,12 @@ export class AnnotationsPanel {
 		delBtn.setAttribute("title", "立即删除此高亮及其评论");
 		delBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onDeleteHighlight(h.id);
+			this.actions.onDeleteHighlight(h.id, contextKey);
 		});
 		footer.addEventListener("click", e => e.stopPropagation());
 		dot.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onJump(h.anchor, h.text);
+			this.actions.onJump(h.anchor, h.text, contextKey);
 		});
 		return li;
 	}
@@ -1677,7 +1882,7 @@ export class AnnotationsPanel {
 	}
 
 	/** 在高亮卡片内部嵌入评论框：与正文清晰区分，又同属一个整体 */
-	private toggleCommentEditor(li: HTMLElement, h: StoredHighlight): void {
+	private toggleCommentEditor(li: HTMLElement, h: StoredHighlight, contextKey: string | null): void {
 		const existing = li.querySelector<HTMLElement>(".unreader-anno-comment-editor");
 		if (existing) {
 			this.stopEditorReveal();
@@ -1697,7 +1902,7 @@ export class AnnotationsPanel {
 		const saveBtn = row.createEl("button", { text: "保存", cls: "unreader-anno-comment-save" });
 		saveBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onCommentHighlight(h.id, ta.value);
+			this.actions.onCommentHighlight(h.id, ta.value, contextKey);
 			this.stopEditorReveal();
 			editorEl.remove();
 			li.classList.remove("is-editing");
@@ -1732,9 +1937,10 @@ export class AnnotationsPanel {
 	 * 「页码胶囊 + 操作按钮」。页码由 getPageForAnchor 现算并登记进
 	 * bookmarkPageEls，排版模型变化时靠 refreshPages 就地刷新。
 	 */
-	private bookmarkRow(b: StoredBookmark): HTMLElement {
+	private bookmarkRow(b: StoredBookmark, contextKey: string | null): HTMLElement {
 		const isAudioBookmark = b.anchor.startsWith("audio:");
 		const li = this.listEl.createEl("li", { cls: "unreader-anno-row unreader-anno-row--bookmark" });
+		li.dataset.scrollKey = `bookmark:${contextKey ?? ""}:${b.id}`;
 		li.toggleClass("is-audio-bookmark", isAudioBookmark);
 		li.toggleClass("is-stale", b.stale === true);
 
@@ -1751,13 +1957,13 @@ export class AnnotationsPanel {
 			// 触屏：单击直接跳转（无 hover 预览，无需等双击判定）
 			if (isCoarse()) {
 				e.stopPropagation();
-				this.actions.onJump(b.anchor);
+				this.actions.onJump(b.anchor, undefined, contextKey);
 				return;
 			}
 			if (me.metaKey || me.ctrlKey) {
 				e.stopPropagation();
 				clearBmTimer();
-				this.actions.onJump(b.anchor);
+				this.actions.onJump(b.anchor, undefined, contextKey);
 				return;
 			}
 			if (bmTimer != null) {
@@ -1767,7 +1973,7 @@ export class AnnotationsPanel {
 			}
 			bmTimer = window.setTimeout(() => {
 				bmTimer = null;
-				this.actions.onJump(b.anchor);
+				this.actions.onJump(b.anchor, undefined, contextKey);
 			}, 220);
 			e.stopPropagation();
 		});
@@ -1790,12 +1996,12 @@ export class AnnotationsPanel {
 		// 第二行：页码胶囊（左） + 功能按钮（右）
 		const footer = li.createDiv({ cls: "unreader-anno-footer" });
 		const pageEl = footer.createDiv({ cls: "unreader-anno-page" });
-		this.paintBookmarkPage(pageEl, b.anchor);
-		this.bookmarkPageEls.push({ el: pageEl, anchor: b.anchor });
+		this.paintBookmarkPage(pageEl, b.anchor, contextKey);
+		this.bookmarkPageEls.push({ el: pageEl, anchor: b.anchor, contextKey });
 		// 与高亮卡片的色点同理：点页码也直接跳到该书签位置
 		pageEl.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onJump(b.anchor);
+			this.actions.onJump(b.anchor, undefined, contextKey);
 		});
 
 		const actions = footer.createDiv({ cls: "unreader-anno-footer-actions" });
@@ -1805,7 +2011,7 @@ export class AnnotationsPanel {
 		renameBtn.setAttribute("title", "重命名此书签");
 		renameBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.toggleRenameEditor(li, b);
+			this.toggleRenameEditor(li, b, contextKey);
 		});
 		const delBtn = actions.createDiv({ cls: "unreader-clickable-icon unreader-anno-action is-danger" });
 		setIcon(delBtn, "trash-2");
@@ -1813,7 +2019,7 @@ export class AnnotationsPanel {
 		delBtn.setAttribute("title", "立即删除此书签");
 		delBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.actions.onDeleteBookmark(b.id);
+			this.actions.onDeleteBookmark(b.id, contextKey);
 		});
 		footer.addEventListener("click", e => e.stopPropagation());
 		return li;
@@ -1821,9 +2027,9 @@ export class AnnotationsPanel {
 
 	/** 就地重命名：把名称行换成输入框，Enter/失焦保存、Esc 取消。
 	 *  与注释编辑同套路——不弹窗、不打断列表上下文。 */
-	private toggleRenameEditor(li: HTMLElement, b: StoredBookmark): void {
+	private toggleRenameEditor(li: HTMLElement, b: StoredBookmark, contextKey: string | null): void {
 		const existing = li.querySelector<HTMLElement>(".unreader-anno-rename");
-		if (existing) { this.finishRename(li, b, null); return; }
+		if (existing) { this.finishRename(li, b, null, contextKey); return; }
 		// blur-保存 先于 click 触发：再次点「重命名」时编辑器已被 blur 摘掉，
 		// 不设这道时间闸就会「关掉又立刻重开」。只拦紧随其后的那一次点击
 		const closedAt = Number(li.dataset.renameClosedAt ?? 0);
@@ -1845,15 +2051,15 @@ export class AnnotationsPanel {
 			e.stopPropagation();
 			if (e.key === "Enter") {
 				e.preventDefault();
-				this.finishRename(li, b, input.value);
+				this.finishRename(li, b, input.value, contextKey);
 			} else if (e.key === "Escape") {
 				e.preventDefault();
-				this.finishRename(li, b, null);
+				this.finishRename(li, b, null, contextKey);
 			}
 		});
 		// 失焦即保存（点击列表其他位置时不用额外点一下「保存」）。
 		// 无需防重入：finishRename 先摘掉编辑器，行已不存在时直接返回
-		input.addEventListener("blur", () => this.finishRename(li, b, input.value));
+		input.addEventListener("blur", () => this.finishRename(li, b, input.value, contextKey));
 		// 输入框内的指针事件不得冒泡到卡片（否则点一下就触发跳转；
 		// dblclick 也要拦，否则在输入框里双击会被卡片当成「双击全选」抢走选区）
 		row.addEventListener("click", e => e.stopPropagation());
@@ -1866,7 +2072,7 @@ export class AnnotationsPanel {
 	}
 
 	/** 收尾重命名：label === null 表示取消（Esc）。保存时 trim，空值不落库。 */
-	private finishRename(li: HTMLElement, b: StoredBookmark, label: string | null): void {
+	private finishRename(li: HTMLElement, b: StoredBookmark, label: string | null, contextKey: string | null): void {
 		const row = li.querySelector<HTMLElement>(".unreader-anno-rename");
 		const excerpt = li.querySelector<HTMLElement>(".unreader-anno-excerpt");
 		if (!row) return;
@@ -1881,7 +2087,7 @@ export class AnnotationsPanel {
 		if (!next || next === (b.label || "")) return;
 		b.label = next;
 		excerpt?.setText(next);
-		this.actions.onRenameBookmark(b.id, next);
+		this.actions.onRenameBookmark(b.id, next, contextKey);
 	}
 
 	isOpen(): boolean {

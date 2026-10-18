@@ -469,23 +469,36 @@ export class FeedStore {
 		contentHash: string,
 		metadata?: { title?: string; author?: string },
 	): Promise<FeedEntry | null> {
-		const entry = this.entries.get(feedId)?.get(entryId);
-		if (!entry) return null;
-		entry.contentHtml = contentHtml;
-		entry.contentHash = contentHash;
-		entry.contentSource = "fulltext";
-		entry.contentQuality = "full";
-		if (metadata?.title?.trim()) entry.title = metadata.title.trim();
-		if (!entry.author && metadata?.author?.trim()) entry.author = metadata.author.trim();
-		entry.pendingContentHtml = undefined;
-		entry.pendingContentHash = undefined;
-		entry.pendingContentSource = undefined;
-		entry.pendingContentQuality = undefined;
-		entry.updatedAt = Date.now();
+		const entries = this.entries.get(feedId);
+		const entry = entries?.get(entryId);
+		if (!entry || !entries) return null;
+		const updated: FeedEntry = {
+			...entry,
+			contentHtml,
+			contentHash,
+			contentSource: "fulltext",
+			contentQuality: "full",
+			title: metadata?.title?.trim() || entry.title,
+			author: entry.author || metadata?.author?.trim() || "",
+			pendingContentHtml: undefined,
+			pendingContentHash: undefined,
+			pendingContentSource: undefined,
+			pendingContentQuality: undefined,
+			updatedAt: Date.now(),
+		};
+		// 写盘成功前不替换内存里的旧快照；失败时阅读器仍能继续显示旧正文。
+		await this.writeEntryContent(feedId, updated);
+		const liveEntries = this.entries.get(feedId);
+		const latest = liveEntries?.get(entryId);
+		if (!liveEntries || !latest) return null;
+		liveEntries.set(entryId, {
+			...updated,
+			state: latest.state,
+			updatedAt: Math.max(updated.updatedAt, latest.updatedAt),
+		});
 		this.loadedContent.get(feedId)?.add(entryId);
-		await this.writeEntryContent(feedId, entry);
 		this.scheduleFeedWrite(feedId);
-		return entry;
+		return liveEntries.get(entryId) ?? null;
 	}
 
 	/** 完成一次正文更新：只有当前待处理哈希仍匹配时才提交，避免两个刷新结果互相覆盖。 */

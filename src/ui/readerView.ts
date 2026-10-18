@@ -5,6 +5,7 @@ import { createVaultResourceResolver, getBookshelfEntries, isHtmlBookFile, isRea
 import { isBookExtEnabled, isRssFormatEnabled, filterSidePanelModes } from "../core/readableFormats";
 import { loadBookPreview } from "../core/bookPreview";
 import { createFeedThumbResolver, createNoteThumbResolver } from "../core/cardThumbSources";
+import { resolveNoteExcerpt } from "../core/noteExcerpt";
 import { makeHtmlBook } from "../core/htmlBook";
 import { ProgressCursor } from "../core/progressCursor";
 import { perfReset, perfBegin, perfEnd } from "../core/perf";
@@ -13,6 +14,7 @@ import { t, tf } from "../core/i18n";
 import { confirmAction } from "./confirmModal";
 import { endsImmersionOnActiveLeafChange, isSidePanelLeaf, type ActiveLeafChangeFacts } from "./immersionSession";
 import { SideHoverKeepAlive } from "./sideHoverKeepAlive";
+import { showFeedEntryMenu, showVaultFileMenu, type NativeSidebarContext } from "./sidePanels";
 
 /** 悬浮预览锚点的兜底尺寸（range 量不到时的 12px 占位）。常量提取只为满足
  *  官方 lint「不得给 .style 赋字面量」；值与写入时机不变。 */
@@ -84,7 +86,7 @@ import {
 	StoredHighlight,
 } from "../core/annotationStore";
 import { makeFeedBook } from "../core/feedBookFactory";
-import { canSaveFeedEntry, reconcileFeedAnnotationAnchors } from "../core/feedUtils";
+import { activeFeedContent, canSaveFeedEntry, isSafeRemoteUrl, reconcileFeedAnnotationAnchors } from "../core/feedUtils";
 import { revealFileInFolder } from "../core/fileReveal";
 import { entryFeedContentQuality } from "../core/feedContentQuality";
 import { sanitizeArticleHtml } from "../core/articleExtractor";
@@ -116,6 +118,7 @@ import { clampHeightToUsable, bottomBarOverlap, usableBottom } from "./keyboardI
 import type { Bounds } from "./floatingPlacement";
 import { idleYield } from "../core/idle";
 import { resolveRailBounds, RAIL_FREEZE_MS } from "./railBounds";
+import { dispatchNativeContextMenu } from "./nativeContextMenu";
 
 export const VIEW_TYPE_UNREADER = "unreader-view";
 
@@ -228,6 +231,8 @@ export class UNreaderView extends ItemView {
 	private podcastSleepUntil = 0;
 	private podcastSleepTimer: number | null = null;
 	private loadedPath: string | null = null;
+	private sidebarLoadWaiters = new Map<string, Set<(loaded: boolean) => void>>();
+	private sidebarLoadOutcome: { key: string; loaded: boolean } | null = null;
 	private loadingToken = 0;
 	/** 正在开书恢复上次阅读位置（见 loadBook 的 is-restoring / whenRestored）。
 	 *  期间**不落盘进度**：恢复落定前视口还在书首（或估算落点），
@@ -315,6 +320,10 @@ export class UNreaderView extends ItemView {
 	private railStarBtn: HTMLElement | null = null;
 	/** Feed 专属：把当前文章（必要时先抓全文）另存为一篇 Obsidian 笔记 */
 	private railSaveNoteBtn: HTMLElement | null = null;
+	/** Feed 专属：用户主动重新抓取当前文章正文 */
+	private railReacquireBodyBtn: HTMLElement | null = null;
+	private readonly feedFulltextBusy = new Set<string>();
+	private isClosing = false;
 	/** 本地 HTML 专属：阅读设备档位（自动/手机/平板/桌面）。非 HTML 书由 CSS 收走
 	 *  （`is-html-only-control`，靠 root 上的 `is-html-source` 类判定）。 */
 	private railDeviceBtn: HTMLElement | null = null;
@@ -422,6 +431,105 @@ export class UNreaderView extends ItemView {
 
 	getIcon(): string {
 		return this.isFeedSource() ? "rss" : "book-open";
+	}
+
+	/** 给插件级原生侧栏读取当前正文对象的稳定订阅身份。 */
+	getCurrentFeedRef(): { feedId: string; entryId: string } | null {
+		return this.feedRef ? { feedId: this.feedRef.feedId, entryId: this.feedRef.entryId } : null;
+	}
+
+	/** 当前成功加载的内容 → 原生侧栏标注适配器；加载中 / 失败时返回 null，绝不沿用旧标注。 */
+	getNativeSidebarContext(): NativeSidebarContext | null {
+		const key = this.loadedPath;
+		if (!key || key !== this.currentSourceKey() || !this.adapter.hasBook()) return null;
+		const feedRef = this.feedRef ? { ...this.feedRef, kind: this.currentFeedEntry?.kind } : null;
+		const file = this.file;
+		const isCurrent = (): boolean => this.loadedPath === key && this.currentSourceKey() === key
+			&& this.adapter.hasBook();
+		const empty = (): AnnotationFileData => ({ highlights: [], bookmarks: [] });
+		return {
+			key,
+			kind: feedRef ? "feed" : "book",
+			title: this.currentFeedEntry?.title || file?.basename || "当前内容",
+			pickerMode: feedRef ? "feeds" : "bookshelf",
+			...(file ? { bookPath: file.path } : {}),
+			...(feedRef ? { feedRef } : {}),
+			annotation: {
+				key,
+				data: () => isCurrent() ? {
+					highlights: this.annotations.highlights.map(item => ({ ...item })),
+					bookmarks: this.annotations.bookmarks.map(item => ({ ...item })),
+				} : empty(),
+				onJump: (anchor, hint) => { if (isCurrent()) this.jumpToAnnotation(anchor, hint); },
+				onPreview: (item, anchorEl) => { if (isCurrent()) this.showNativePreview(item, anchorEl); },
+				onComment: (id, comment) => { if (isCurrent()) this.saveHighlightComment(id, comment); },
+				onCopyReference: item => { if (isCurrent()) this.copyReference(item.text, item.anchor); },
+				onDeleteHighlight: id => { if (isCurrent()) this.deleteHighlight(id); },
+				onDeleteBookmark: id => { if (isCurrent()) this.deleteBookmark(id); },
+				onRenameBookmark: (id, label) => { if (isCurrent()) this.renameBookmark(id, label); },
+				getPageForAnchor: anchor => isCurrent() ? this.adapter.getPageForAnchor(anchor) : null,
+			},
+		};
+	}
+
+	private jumpToAnnotation(anchor: string, textHint?: string): void {
+		if (anchor.startsWith("audio:")) {
+			const seconds = Number(anchor.slice("audio:".length));
+			const audio = this.podcastAudioEl;
+			if (audio && this.podcastBarRef && Number.isFinite(seconds)) {
+				try { audio.currentTime = Math.max(0, seconds); } catch { /* ignore */ }
+				void audio.play().catch(() => undefined);
+				this.syncPodcastProgressUi();
+			void this.plugin.focusNativeSidebarContent(this.leaf);
+				return;
+			}
+		}
+		void this.adapter.jumpToCfi(anchor, textHint);
+		void this.plugin.focusNativeSidebarContent(this.leaf).then(() => this.adapter.focusContent());
+	}
+
+	/** 等待同一内容的引擎载入结果，供原生侧栏区分打开失败与成功。 */
+	waitForNativeSidebarSource(key: string, timeoutMs = 30_000): Promise<boolean> {
+		if (this.loadedPath === key && this.currentSourceKey() === key && this.adapter.hasBook()) return Promise.resolve(true);
+		if (this.sidebarLoadOutcome?.key === key) return Promise.resolve(this.sidebarLoadOutcome.loaded);
+		if (this.currentSourceKey() !== key) return Promise.resolve(false);
+		return new Promise(resolve => {
+			const waiters = this.sidebarLoadWaiters.get(key) ?? new Set<(loaded: boolean) => void>();
+			let timer = window.setTimeout(() => finish(false), timeoutMs);
+			const finish = (loaded: boolean): void => {
+				window.clearTimeout(timer);
+				waiters.delete(finish);
+				if (!waiters.size) this.sidebarLoadWaiters.delete(key);
+				resolve(loaded);
+			};
+			waiters.add(finish);
+			this.sidebarLoadWaiters.set(key, waiters);
+		});
+	}
+
+	isNativeSidebarSourceLoaded(key: string): boolean {
+		return this.loadedPath === key && this.currentSourceKey() === key && this.adapter.hasBook();
+	}
+
+	/** 只在用户点了具体高亮/书签后调用；已加载的同一正文直接定位，不重开标签。 */
+	async jumpToNativeSidebarAnnotation(key: string, anchor: string, textHint?: string): Promise<boolean> {
+		if (!this.isNativeSidebarSourceLoaded(key)) return false;
+		if (anchor.startsWith("audio:")) {
+			const seconds = Number(anchor.slice("audio:".length));
+			const audio = this.podcastAudioEl;
+			if (!audio || !this.podcastBarRef || !Number.isFinite(seconds)) return false;
+			try { audio.currentTime = Math.max(0, seconds); } catch { return false; }
+			this.syncPodcastProgressUi();
+			void audio.play().catch(() => undefined);
+			return true;
+		}
+		try {
+			await this.adapter.jumpToCfi(anchor, textHint);
+			return true;
+		} catch (error) {
+			console.warn("[UNreader] 标注位置跳转失败", error);
+			return false;
+		}
 	}
 
 	/** 开放接口：书内当前选区（三方插件经插件对象调用，见 main.ts getReaderSelection）。
@@ -548,6 +656,26 @@ export class UNreaderView extends ItemView {
 		return this.sourceKey();
 	}
 
+	private beginNativeSidebarSourceLoad(key: string): void {
+		for (const [pendingKey, waiters] of this.sidebarLoadWaiters) {
+			if (pendingKey !== key) for (const resolve of [...waiters]) resolve(false);
+		}
+		this.sidebarLoadOutcome = null;
+	}
+
+	private settleNativeSidebarSourceLoad(key: string, loaded: boolean): void {
+		this.sidebarLoadOutcome = { key, loaded };
+		const waiters = this.sidebarLoadWaiters.get(key);
+		if (waiters) for (const resolve of [...waiters]) resolve(loaded);
+	}
+
+	private invalidateNativeSidebarSourceForReload(): void {
+		const key = this.currentSourceKey();
+		if (!key) return;
+		this.beginNativeSidebarSourceLoad(key);
+		this.plugin.updateNativeSidebarContext(null, this.leaf);
+	}
+
 	/** 阅读计时键（与 `sourceKey` 同一套字符串，见 core/readingStatsStore）。 */
 	private readingKey: string | null = null;
 
@@ -566,6 +694,10 @@ export class UNreaderView extends ItemView {
 	}
 
 	private applyReaderSource(source: ReaderSource): void {
+		const nextKey = this.sourceKey(source);
+		if (nextKey) this.beginNativeSidebarSourceLoad(nextKey);
+		this.loadedPath = null;
+		this.plugin.updateNativeSidebarContext(null);
 		if (source.kind === "book") {
 			this.hidePodcastBar();
 			this.feedRef = null;
@@ -886,6 +1018,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.isClosing = true;
 		this.plugin.forgetActiveReader(this);
 		// 视图已关：在飞的翻译请求与 AI 任务必须取消，结果也不再触碰已 detach 的 UI
 		this.hideTranslation();
@@ -971,6 +1104,9 @@ export class UNreaderView extends ItemView {
 			this.themeRefreshTimer = null;
 		}
 			this.cancelAnnoAutoClose();
+			const pendingSource = this.currentSourceKey();
+			if (pendingSource) this.settleNativeSidebarSourceLoad(pendingSource, false);
+			this.plugin.forgetNativeSidebarContext(this);
 			// 抽屉「保持打开」判定器挂在 document 上，随视图一起摘（否则整窗一直在收
 			// pointermove，且回调会打到已经销毁的面板上）。
 			this.sideKeepAlive?.detach();
@@ -994,14 +1130,14 @@ export class UNreaderView extends ItemView {
 		this.toggleSidePanel("annotations");
 	}
 
-	/** 工具栏/命令入口：打开书籍侧边栏；已在该模式时再点关闭。 */
+	/** 工具栏/命令入口：稳定显示原生书架标签页；重复点击不负责收起。 */
 	toggleBookshelf(): void {
-		this.toggleSidePanel("bookshelf");
+		void this.plugin.openSidePanel("bookshelf", this.getNativeSidebarContext());
 	}
 
-	/** 工具栏/命令入口：打开订阅侧边栏；已在该模式时再点关闭。 */
+	/** 工具栏/命令入口：稳定显示原生订阅标签页；重复点击不负责收起。 */
 	toggleFeeds(): void {
-		this.toggleSidePanel("feeds");
+		void this.plugin.openSidePanel("feeds", this.getNativeSidebarContext());
 	}
 
 	/** 功能轨「侧边栏」按钮（书架 / 订阅两枚合成一枚，2026-10-01）：**只负责在选内容
@@ -1011,18 +1147,15 @@ export class UNreaderView extends ItemView {
 	 *  · 开着且停在**高亮页**（阅读中） → 切到选内容页（书架/订阅/笔记），**保留当前阅读**
 	 *    （用户 2026-10-11 拍板：高亮页点侧边栏 = 切选择界面，而非关掉抽屉）。 */
 	private toggleSidePanelOpen(): void {
-		const open = this.annotationsPanel.isOpen();
-		const current = open ? this.annotationsPanel.getMode() : this.lastSidePanelMode;
-		if (open && current === "annotations") {
-			this.toggleSidePanel(this.panelOriginMode);
-			return;
-		}
-		this.toggleSidePanel(current);
+		void this.plugin.openSidePanel(undefined, this.getNativeSidebarContext());
 	}
 
 	refreshFeedsPanel(): void {
 		this.annotationsPanel?.refreshFeeds();
+		this.plugin.refreshNativeSidebarFeeds();
 	}
+
+	syncNativeSidebarToolbarButtons(): void { this.syncRailButtons(); }
 
 	/** UNagent 写完当前书/文章的旁车标注笔记后，重读并立即覆盖当前视图。
 	 *  只处理已经加载完成的同一 source；等待读盘期间若用户换书则整轮作废。 */
@@ -1054,24 +1187,24 @@ export class UNreaderView extends ItemView {
 	/** 预设文件夹被外部（UNagent / 同步）改动后重绘**已打开**的外观面板：
 	 *  面板里的预设下拉是 render 时现算的，不重绘就还是旧列表。面板没开则不做。 */
 	refreshAppearancePanel(): void {
-		if (!this.appearancePanel?.isOpen()) return;
-		this.appearancePanel.open(this.plugin.settings.appearance);
+		if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
+		this.syncRailButtons();
 	}
 
 	/** 书架排除项 / 收录格式变更后重绘书架（设置页那条路径调过来）。
 	 *  只在书架**正显示**时重绘：其他模式下重绘是白做功，而 `setMode` 到别的模式
 	 *  会把用户从当前列表拽走。同模式重绘保留滚动位置（见 annotationsPanel.setMode）。 */
 	refreshBookshelfPanel(): void {
-		if (!this.annotationsPanel?.isOpen()) return;
-		if (this.annotationsPanel.getMode() !== "bookshelf") return;
-		this.annotationsPanel.setMode("bookshelf");
+		if (this.annotationsPanel?.isOpen() && this.annotationsPanel.getMode() === "bookshelf") {
+			this.annotationsPanel.setMode("bookshelf");
+		}
+		this.plugin.refreshNativeSidebarBookshelf();
 	}
 
 	/** Markdown 笔记的最近阅读 / 星标索引变化后重绘「笔记」页；其它页面不动。 */
 	refreshMarkdownNotesPanel(): void {
-		if (!this.annotationsPanel?.isOpen()) return;
-		if (this.annotationsPanel.getMode() !== "notes") return;
-		this.annotationsPanel.setMode("notes");
+		if (this.annotationsPanel?.isOpen() && this.annotationsPanel.getMode() === "notes") this.annotationsPanel.setMode("notes");
+		this.plugin.refreshNativeSidebarNotes();
 	}
 
 	getCurrentFeedSource(): { feedId: string; entryId: string } | null {
@@ -1079,6 +1212,9 @@ export class UNreaderView extends ItemView {
 	}
 
 	showEmptyState(): void {
+		const sourceKey = this.currentSourceKey();
+		if (sourceKey) this.settleNativeSidebarSourceLoad(sourceKey, false);
+		this.plugin.updateNativeSidebarContext(null);
 		this.hidePodcastBar();
 		this.loadedPath = null;
 		this.feedRef = null;
@@ -1098,10 +1234,14 @@ export class UNreaderView extends ItemView {
 	 *  书架里一点就回来。 */
 	goHome(): void {
 		if (this.fullImmersion) this.exitFullImmersion();
+		const sourceKey = this.currentSourceKey();
+		if (sourceKey) this.settleNativeSidebarSourceLoad(sourceKey, false);
+		this.plugin.updateNativeSidebarContext(null);
 		this.file = null;
 		this.notePath = "";
 		this.setReadingKey(null);
 		this.showEmptyState();
+		void this.plugin.openSidePanel(this.panelOriginMode, null);
 		try { this.adapter.destroy(); } catch { /* ignore */ }
 	}
 
@@ -1109,16 +1249,12 @@ export class UNreaderView extends ItemView {
 	 *  panelOriginMode 决定：书→书架、feed 文章→订阅）。阅读引擎、进度、正文全部
 	 *  保持不动 —— 与「侧边栏」按钮同语义（用户 2026-10-11 定稿）。 */
 	private returnToSourcePanel(): void {
-		this.annotationsPanel.openPickerPage(this.panelOriginMode);
-		this.annotationsPanel.show();
+		void this.plugin.openSidePanel(this.panelOriginMode, this.getNativeSidebarContext());
 	}
 
 	private async openFeedEntry(feedId: string, entryId: string): Promise<void> {
 		if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId && this.adapter.hasBook()) {
-			this.annotationsPanel.openAnnotationsPage();
-			this.annotationsPanel.show();
 			this.annotationsPanel.refreshFeeds();
-			this.adapter.focusContent();
 			return;
 		}
 		this.applyReaderSource({ kind: "feed-entry", feedId, entryId });
@@ -1185,6 +1321,7 @@ export class UNreaderView extends ItemView {
 			this.annotationsPanel.refreshFeeds();
 			if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId) {
 				// scheduleLoad 对“同一篇文章已加载”会早退；抓到全文后必须清掉当前 key 才会重渲染。
+				this.invalidateNativeSidebarSourceForReload();
 				this.loadedPath = null;
 				this.scheduleLoad();
 			}
@@ -1192,6 +1329,41 @@ export class UNreaderView extends ItemView {
 			if (!options?.auto) {
 				new Notice(`全文抓取失败：${error instanceof Error ? error.message : String(error)}`);
 			}
+		}
+	}
+
+	/** 用户主动重抓当前 RSS 正文；结果始终写回点击时的条目，只有还在读这篇时才刷新视图。 */
+	private async reacquireCurrentFeedBody(): Promise<void> {
+		const ref = this.feedRef;
+		if (!ref) return;
+		const key = `${ref.feedId}:${ref.entryId}`;
+		if (this.feedFulltextBusy.has(key)) return;
+		const entry = this.plugin.feedStore.getEntry(ref.feedId, ref.entryId);
+		if (!entry || !isSafeRemoteUrl(entry.url)) return;
+		const before = activeFeedContent(entry);
+		this.feedFulltextBusy.add(key);
+		this.syncRailButtons();
+		new Notice("正在重新获取正文…");
+		try {
+			const updated = await this.plugin.feedService.fetchFulltext(ref.feedId, ref.entryId);
+			if (!updated) throw new Error("文章不存在");
+			const after = activeFeedContent(updated);
+			const changed = !before.html || before.hash !== after.hash;
+			if (!this.isClosing) this.annotationsPanel.refreshFeeds();
+			if (!this.isClosing && this.feedRef?.feedId === ref.feedId && this.feedRef.entryId === ref.entryId) {
+				this.currentFeedEntry = updated;
+				if (changed) {
+					this.invalidateNativeSidebarSourceForReload();
+					this.loadedPath = null;
+					this.scheduleLoad();
+				}
+			}
+			if (!this.isClosing) new Notice(changed ? "正文已更新" : "正文没有变化，已保留现有内容");
+		} catch (error) {
+			if (!this.isClosing) new Notice(`重新获取正文失败：${error instanceof Error ? error.message : String(error)}`);
+		} finally {
+			this.feedFulltextBusy.delete(key);
+			if (!this.isClosing) this.syncRailButtons();
 		}
 	}
 
@@ -1204,6 +1376,7 @@ export class UNreaderView extends ItemView {
 		if (this.feedRef?.feedId === feedId && this.feedRef.entryId === entryId) {
 			const updated = this.plugin.feedStore.getEntry(feedId, entryId);
 			if (updated && entryFeedContentQuality(updated) === "full") {
+				this.invalidateNativeSidebarSourceForReload();
 				this.loadedPath = null;
 				this.scheduleLoad();
 			}
@@ -1905,45 +2078,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	private toggleSidePanel(requestedMode: "annotations" | "bookshelf" | "feeds" | "notes"): void {
-		let mode = requestedMode;
-		// 页层语义（2026-10-11 重构）：
-		// · 选内容页（无文档）没有「高亮与书签」——lastSidePanelMode 可能残留它
-		//   （功能轨高亮按钮 / 命令入口），这里回收到来源选择页，避免开出空标注页；
-		// · 有文档时去书架/订阅 = **切页，不离开文档**（此前是 goHome 销毁引擎，
-		//   现在阅读保持，浏览器只管换列表；见 openPickerPage / returnToSourcePanel）。
-		const hasDoc = !!(this.file || this.feedRef);
-		if (!hasDoc && mode === "annotations") mode = this.panelOriginMode;
-		// RSS 停用（设置 → 阅读格式）时「订阅」页签已从面板摘掉，但 lastSidePanelMode /
-		// panelOriginMode 可能还残留 "feeds"（关掉格式前的阅读状态，甚至随布局持久化）
-		// ⇒ 这里统一重定向到书架，绝不让 setMode 拿到一个不存在的页（空白页）。
-		if (mode === "feeds" && !isRssFormatEnabled(this.plugin.settings.disabledFormats)) mode = "bookshelf";
-		// 面板是**贴顶 / 贴底铺满的不透明抽屉**，开合前把两条原生 chrome 的让位量
-		// （--ur-top-inset / --ur-bottom-inset）重测一遍：页首与底栏随时会被收走或收起
-		// （官方全屏 / 悬浮导航 / 键盘弹起 / 沉浸模式），上一次同步可能是几分钟前的几何。
-		this.syncProgressTop();
-		const hide = this.annotationsPanel.isOpen() && this.annotationsPanel.getMode() === mode;
-		if (hide) {
-			this.annotationsPanel.hide();
-		} else {
-			// 两面板可共存：不再主动关闭外观面板（外观面板会自动向右避让）
-			if (mode === "annotations") this.annotationsPanel.render(this.annotations);
-			this.annotationsPanel.setMode(mode);
-			this.annotationsPanel.show();
-			if (mode === "feeds" && !this.feedAutoRefreshDone && this.plugin.settings.feeds.refreshOnOpen !== false) {
-				this.feedAutoRefreshDone = true;
-				const feeds = this.plugin.feedStore.listFeeds();
-				const oldestFetch = feeds.reduce((oldest, feed) => Math.min(oldest, feed.lastFetchedAt || 0), Date.now());
-				if (Date.now() - oldestFetch > 10 * 60_000) {
-					void idleYield().then(() => this.refreshFeeds()).catch(() => undefined);
-				}
-			}
-		}
-		if (hide) this.cancelAnnoAutoClose();
-		// 标注侧边栏显隐会移动按钮轨，外观面板若已打开需重新对齐
-		this.alignAppearancePanel();
-		this.alignActionsRail();
-		// 侧边栏开合改变正文宽度 → 文字重排，驱动高亮矩形重定位（布局变化不触发 onResize）
-		this.adapter.notifyVisible();
+		void this.plugin.openSidePanel(requestedMode, this.getNativeSidebarContext());
 	}
 
 	private setBookshelfSortMode(mode: BookshelfSortMode): void {
@@ -2003,14 +2138,10 @@ export class UNreaderView extends ItemView {
 			return;
 		}
 		if (this.file?.path === path) {
-			// 同书早返回不重走 loadBook：在这里直接切到高亮页
-			this.annotationsPanel.openAnnotationsPage();
-			this.annotationsPanel.show();
-			this.adapter.focusContent();
+			await this.plugin.openSidePanel("annotations", this.getNativeSidebarContext());
 			return;
 		}
-		// 跨书：不在加载前预先切页（那会短暂显示上一本书的标注），
-		// 等 loadBook 成功揭示段统一 openAnnotationsPage()。
+		// 首次打开只加载正文；用户再次点同一张卡片时由原生侧栏进入标注页。
 		await this.plugin.openBook(file);
 	}
 
@@ -2524,11 +2655,9 @@ export class UNreaderView extends ItemView {
 				this.notePath = annotationFileForFeed(entry.feedId, entry.id, entry.title);
 				annotations = await loadAnnotations(this.app.vault, this.notePath, entry.url || entry.title);
 					if (token !== this.loadingToken) return;
-				const pendingHash = this.currentFeedEntry.pendingContentHash;
-				const contentHtml = pendingHash && this.currentFeedEntry.pendingContentHtml != null
-					? this.currentFeedEntry.pendingContentHtml
-					: this.currentFeedEntry.contentHtml;
-				this.activeFeedContentHash = pendingHash || this.currentFeedEntry.contentHash;
+				const selectedContent = activeFeedContent(this.currentFeedEntry);
+				const contentHtml = selectedContent.html;
+				this.activeFeedContentHash = selectedContent.hash;
 				const sanitized = sanitizeArticleHtml(
 					contentHtml || `<p>${this.currentFeedEntry.summary}</p>`,
 					this.currentFeedEntry.url,
@@ -2605,19 +2734,16 @@ export class UNreaderView extends ItemView {
 				this.sideNav.closePanel();
 				this.annotationsPanel.refreshFeeds();
 			}
-			// 文档落定 → 高亮页：头部返回钮可见，内容页签组整组隐藏。
-			// 必须在 render(this.annotations)（上面）之后：换页会重绘标注列表，
-			// 否则一拍内显示上一份文档的标注。书/feed/启动恢复三条路都汇到这个收口。
-			this.annotationsPanel.openAnnotationsPage();
 			// 星标按钮的状态源是「当前文章」，换书/换文章/刷新后都要重算一次
 			this.syncRailButtons();
 			void this.refreshSideNavCounts();
 
 			this.loadedPath = sourceKey;
+			this.plugin.noteActiveReader(this);
+			this.settleNativeSidebarSourceLoad(sourceKey, true);
 			// 装载完成取证：key + 当前 token 是否仍是本轮（STALE = 装载期间来源已被换走）
 			debugLog.info("[restore] 装载完成", sourceKey, token === this.loadingToken ? "" : "STALE",
 				source.kind === "feed-entry" ? (this.currentFeedEntry?.title ?? "").slice(0, 40) : "");
-			this.plugin.noteActiveReader(this);
 			// 加载完成后再驱动一次填充/重定位：移动端（尤其手机竖屏）加载期间布局
 			// 未稳定、resize 事件可能不触发，填充链需要这里兜底一次
 			this.adapter.notifyVisible();
@@ -2633,7 +2759,6 @@ export class UNreaderView extends ItemView {
 			// 才能把文章标题也写进去 —— 否则恢复出的标签页名字只有 "UNreader"。
 			this.requestLayoutSave("loaded");
 			this.updatePinButtonVisibility();
-			if (this.pinned) this.annotationsPanel.show();
 			this.syncOuterAppearance();
 			// 数据还没落地的窗口内被打开的外观面板会列出空预设（预设定义随库
 			// 文件夹同步，getPresets 是同步读缓存）。就绪后只在「预设数真的变了」
@@ -3077,9 +3202,6 @@ export class UNreaderView extends ItemView {
 		if (this.annotationsPanel) {
 			this.annotationsPanel.setPinned(this.pinned);
 		}
-		if (this.pinned && this.annotationsPanel) {
-			this.annotationsPanel.show();
-		}
 		this.scheduleFloatingFit();
 		if (persist) {
 			const s = this.plugin.settings as unknown as { annoPinned?: boolean };
@@ -3267,22 +3389,7 @@ export class UNreaderView extends ItemView {
 				["annotations", "bookshelf", "feeds", "notes"],
 				this.plugin.settings.disabledFormats,
 			),
-			onJump: (anchor, textHint) => {
-				// 播客书签用 audio:秒 作为位置 token；点击后直接回到音频时间点。
-				if (anchor.startsWith("audio:")) {
-					const seconds = Number(anchor.slice("audio:".length));
-					const audio = this.podcastAudioEl;
-					if (audio && this.podcastBarRef && Number.isFinite(seconds)) {
-						try { audio.currentTime = Math.max(0, seconds); } catch { /* ignore */ }
-						void audio.play().catch(() => undefined);
-						this.syncPodcastProgressUi();
-						return;
-					}
-				}
-				// 书签/高亮点击：jumpToCfi 精确定位（章内比例/文本位置），而非只到章节开头
-				void this.adapter.jumpToCfi(anchor, textHint);
-				this.adapter.focusContent();
-			},
+			onJump: (anchor, textHint) => this.jumpToAnnotation(anchor, textHint),
 			onPreviewHighlight: (item, anchorEl) => {
 				this.showNativePreview(item, anchorEl);
 			},
@@ -3331,11 +3438,20 @@ export class UNreaderView extends ItemView {
 			onRemoveBookFromShelf: path => void this.plugin.removeBookFromBookshelf(path),
 			onOpenBookshelfCategoryManager: () => this.plugin.openBookshelfCategoryManager(),
 			onOpenBook: path => void this.openBookFromShelf(path),
+			onOpenBookAnnotations: path => void this.plugin.openAnnotationsFromNativeSidebar(`book:${path}`),
 			getMarkdownNotes: () => this.plugin.getMarkdownNoteListItems(),
 			onOpenMarkdownNote: path => void this.plugin.openMarkdownNote(path),
-			onToggleMarkdownNoteStar: path => this.plugin.toggleMarkdownNoteStar(path),
+			onOpenMarkdownAnnotations: path => void this.plugin.openAnnotationsFromNativeSidebar(`markdown:${path}`),
+			// 书卡 / 笔记卡右键 = 原生文件菜单（`sidePanels.showVaultFileMenu`，与原生侧栏同源）。
+			// 阅读器抽屉这条装配路径原来**没接** ⇒ 抽屉里右键书或笔记没有任何反应，
+			// 而卡片上那枚 ⋯ 正是靠这个回调才不是死按钮（2026-10-17）。
+			onFileContextMenu: (path, event, kind) => showVaultFileMenu(this.app, this.plugin, path, event, kind),
+			onToggleMarkdownNotePin: path => this.plugin.toggleMarkdownNotePin(path),
 			onRevealMarkdownNote: path => revealFileInFolder(this.app, path),
 			resolveNoteWordCount: path => this.plugin.countMarkdownNoteWords(path),
+			// 笔记卡标题下的正文预览（2026-10-17）：与原生侧栏同一套供给 + 同一个渲染器。
+			resolveNoteExcerpt: path => resolveNoteExcerpt(this.app, path),
+			renderNoteMarkdown: (el, markdown, path) => this.plugin.renderNotePreview(el, markdown, path),
 			// 缩略图取数与 md 侧（sidePanels.createSidePanel）**同一套实现** ——
 			// 两条装配路径都必须接，否则分屏时两处卡片表现会分裂（见 core/cardThumbSources 头注）。
 			resolveNoteThumb: createNoteThumbResolver(this.app),
@@ -3353,6 +3469,7 @@ export class UNreaderView extends ItemView {
 			onFeedFilterChange: filter => { this.feedFilter = filter; },
 			onFeedSourceFilterChange: feedId => { this.feedSourceFilter = feedId; },
 				onOpenFeedEntry: (feedId, entryId) => void this.openFeedEntry(feedId, entryId),
+				onOpenFeedAnnotations: (feedId, entryId) => void this.plugin.openAnnotationsFromNativeSidebar(`feed:${feedId}:${entryId}`),
 				onToggleFeedStar: (feedId, entryId) => void this.toggleFeedStar(feedId, entryId),
 			onRefreshFeeds: () => void this.refreshFeeds(),
 			onAddFeed: () => this.plugin.promptAddFeed(),
@@ -3363,6 +3480,17 @@ export class UNreaderView extends ItemView {
 				if (hold) this.cancelAnnoAutoClose();
 			},
 			onSaveNote: (feedId, entryId) => void this.saveFeedNote(feedId, entryId),
+			// 卡片最右那枚 ⋯ 与卡片右键走同一份菜单（`sidePanels.showFeedEntryMenu`）。
+			// 阅读器抽屉这条装配路径原来**没有**接这个口子 ⇒ 同一张 RSS 卡片在原生侧栏
+			// 点得出来、在阅读器里点了没反应（两宿主必须各接一次）。
+			onFeedContextMenu: (feedId, entryId, event) => showFeedEntryMenu(this.plugin, feedId, entryId, event, {
+				refreshFeeds: () => this.annotationsPanel?.refreshFeeds(),
+				holdAutoClose: hold => {
+					this.annoAutoCloseHold = hold;
+					if (hold) this.cancelAnnoAutoClose();
+				},
+				saveNote: (id, entry) => void this.saveFeedNote(id, entry),
+			}),
 			onOpenOriginal: url => openExternalLink(url),
 					onDownloadPodcast: (feedId, entryId) => this.plugin.downloadPodcast(feedId, entryId),
 					onPodcastProgress: (feedId, entryId, seconds, duration) => this.queuePodcastProgress(feedId, entryId, seconds, duration),
@@ -3581,9 +3709,9 @@ export class UNreaderView extends ItemView {
 		// 开着且停在选内容页就整条关；停在**高亮页**则切到选内容页（保留阅读）。
 		// 高亮页由下面那枚标注按钮负责；命令面板的「切换书籍/订阅侧边栏」
 		// 仍走 toggleBookshelf / toggleFeeds。
-		this.railPanelBtn = this.sideNav.addIconButton("panel-left", "打开侧边栏", () => this.toggleSidePanelOpen());
+		this.railPanelBtn = this.sideNav.addIconButton("panel-left", "显示内容列表", () => this.toggleSidePanelOpen());
 		paintIcon(this.railPanelBtn, "panel-left", "sidebar");
-		this.railAnnoBtn = this.sideNav.addIconButton("highlighter", "打开标注列表", () => this.toggleAnnotations());
+		this.railAnnoBtn = this.sideNav.addIconButton("highlighter", "显示标注列表", () => this.toggleAnnotations());
 		// 标注属于当前文档（书或 Feed 文章），空态首页没有可列的内容
 		this.railAnnoBtn.addClass("is-doc-only-control");
 		// 「星标（收藏文章）」与「书签（收藏当前位置）」是两件事，但占功能轨上同一格：
@@ -3600,12 +3728,14 @@ export class UNreaderView extends ItemView {
 		// `file-down` 是较新的 lucide 名，取不到时 setIcon 静默失败 → 按钮整个空白
 		paintIcon(this.railSaveNoteBtn, "file-down", "save");
 		this.railSaveNoteBtn.addClass("is-feed-only-control");
+		this.railReacquireBodyBtn = this.sideNav.addIconButton("refresh-cw", "重新获取正文", () => void this.reacquireCurrentFeedBody());
+		this.railReacquireBodyBtn.addClass("is-feed-only-control");
 		// 「阅读原文」只对 Feed 文章有意义：非 Feed 源下由 CSS 收走（is-feed-only-control）
 		this.railOriginalBtn = this.sideNav.addIconButton("external-link", "在系统浏览器打开原文", () => this.openCurrentFeedOriginal());
 		this.railOriginalBtn.addClass("is-feed-only-control");
 		this.sideNav.addSeparator();
 		// ③ 阅读方式
-		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", "打开阅读外观", () => this.toggleAppearance());
+		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", t("apOpen"), () => this.toggleAppearance());
 		this.railAppearanceBtn.addClass("is-doc-only-control");
 		// 「阅读设备」：只对本地 HTML（网页原样通道）有意义 —— 固定宽度 / min-width 的桌面页面
 		// 在手机上会横向溢出，而 frame 内 touch-action:pan-y 把横滑让给了原生侧栏手势，
@@ -3623,6 +3753,8 @@ export class UNreaderView extends ItemView {
 		paintIcon(this.railImmersionBtn, "maximize-2", "scan");
 		this.sideNav.addSeparator();
 		// ④ 系统
+		const contextMenuBtn = this.sideNav.addIconButton("ellipsis", "打开 Obsidian 原生右键菜单", () => this.openNativeContextMenu());
+		contextMenuBtn.addClass("is-doc-only-control");
 		this.syncRailButtons();
 		this.sideNav.addIconButton("settings", "打开 UNreader 设置", () => this.openPluginSettings());
 		this.sideNav.setBackHandler(() => this.goBack());
@@ -3639,17 +3771,8 @@ export class UNreaderView extends ItemView {
 				this.sideNav.setActionsExpanded(true);
 			}
 		});
-		// 面板首帧分层，放在 sideNav 构建之后（换页会经 onModeChange 回调 syncRailButtons）：
-		//  - setState 已带入待恢复的书 / feed 文章（getReaderSource 非 null，正文稍后由 loadBook
-		//    揭示段收口翻到高亮页）→ 直接落高亮页，**不要**先翻书架/订阅，否则会触发
-		//    它们的数据口（如 feedStore.listFeeds），而恢复序列里这些依赖此刻未必就绪
-		//    （persist-layout 回归：listFeeds is not a function）。
-		//  - 无源 = 插件首页 → 选内容层。文档落定 / 回空态后两个收口仍会再驱动一次（幂等）。
-		if (this.getReaderSource()) {
-			this.annotationsPanel.openAnnotationsPage();
-		} else {
-			this.annotationsPanel.openPickerPage(this.panelOriginMode);
-		}
+		// 阅读器内部不再弹第二套标注抽屉；内容列表与标注统一由原生侧栏承载。
+		this.annotationsPanel.openPickerPage(this.panelOriginMode);
 		// 沉浸模式拉绳开关：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏。
 		// 图形完全由 CSS 绘制，避免 iPad / 旧版本图标集缺名时只剩系统按钮底框。
 		// 官方 button 皮肤选择器带 :not(.clickable-icon)，特异性高于单类；样式侧必须用
@@ -3752,7 +3875,17 @@ export class UNreaderView extends ItemView {
 		window.requestAnimationFrame(() => this.updatePinButtonVisibility());
 	}
 
+	/** 左侧三点按钮与书页右键共用 Obsidian 的 contextmenu 事件通路。 */
+	private openNativeContextMenu(): void {
+		const target = this.adapter.getContextMenuTarget() ?? this.contentHost;
+		const hostWindow = this.containerEl.ownerDocument.defaultView ?? window;
+		if (target) dispatchNativeContextMenu(target, hostWindow);
+	}
+
 	private showEmpty(): void {
+		const sourceKey = this.currentSourceKey();
+		if (sourceKey && this.loadedPath !== sourceKey) this.settleNativeSidebarSourceLoad(sourceKey, false);
+		this.plugin.updateNativeSidebarContext(null);
 		this.loadingToken++;
 		this.rootEl?.removeClass("has-book");
 		this.rootEl?.removeClass("is-feed-source");
@@ -3771,13 +3904,6 @@ export class UNreaderView extends ItemView {
 		// （getReaderSource 非 null，正文稍后由 loadBook 收口）—— 先翻书架/订阅会触发
 		// 它们的数据口（feedStore.listFeeds），而恢复序列里依赖此刻未必就绪。
 		// showEmptyState 已先清空 file/feedRef，走的是真·空态分支，不受影响。
-		if (!this.getReaderSource()) {
-			const origin = this.panelOriginMode;
-			this.annotationsPanel?.openPickerPage(origin);
-			if (this.annotationsPanel && !(this.annotationsPanel.isOpen() && this.annotationsPanel.getMode() === origin)) {
-				this.toggleSidePanel(origin);
-			}
-		}
 	}
 
 	private showLoading(): void {
@@ -4314,7 +4440,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	private saveAppearancePreset(): void {
-		const defaultName = `预设 ${this.plugin.presetStore.list().length + 1}`;
+		const defaultName = `${t("apPreset")} ${this.plugin.presetStore.list().length + 1}`;
 		const modal = new PresetNameModal(this.app, defaultName, (name: string | null) => {
 			if (!name || !name.trim()) return;
 			const trimmed = name.trim().slice(0, 32);
@@ -4323,9 +4449,9 @@ export class UNreaderView extends ItemView {
 			// （同步阻塞、样式与 Obsidian 无关），统一走 ConfirmModal。
 			void (async (): Promise<void> => {
 				if (existing && !await confirmAction(this.app, {
-					title: "覆盖预设",
-					body: `已存在名为“${trimmed}”的外观预设。覆盖会替换其中保存的整套外观设置；当前阅读外观不会因此改变。`,
-					cta: "覆盖",
+					title: t("presetOverwriteTitle"),
+					body: tf("presetOverwriteBody", { name: trimmed }),
+					cta: t("presetOverwriteAction"),
 					destructive: true,
 				})) return;
 				if (existing) {
@@ -4340,7 +4466,7 @@ export class UNreaderView extends ItemView {
 						createdAt: Date.now(),
 					});
 				}
-				new Notice(`已保存预设“${trimmed}”`);
+				new Notice(tf("presetSaved", { name: trimmed }));
 				if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
 			})();
 		});
@@ -4379,7 +4505,7 @@ export class UNreaderView extends ItemView {
 				if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
 			}, 0);
 		}
-		new Notice(`已应用预设“${preset.name}”`);
+		new Notice(tf("presetApplied", { name: preset.name }));
 	}
 
 	private deleteAppearancePreset(id: string): void {
@@ -4387,15 +4513,15 @@ export class UNreaderView extends ItemView {
 		if (!preset) return;
 		void (async (): Promise<void> => {
 			const ok = await confirmAction(this.app, {
-				title: "删除预设",
-				body: `删除外观预设“${preset.name}”？这只删除已保存的预设，不会改动当前阅读外观或书籍。`,
-				cta: "删除",
+				title: t("presetDeleteTitle"),
+				body: tf("presetDeleteBody", { name: preset.name }),
+				cta: t("presetDeleteAction"),
 				destructive: true,
 			});
 			if (!ok) return;
 			void this.plugin.presetStore.remove(id);
 			if (this.getDevicePresetId() === id) this.setDevicePresetId(null);
-			new Notice(`已删除预设“${preset.name}”`);
+			new Notice(tf("presetDeleted", { name: preset.name }));
 			if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
 		})();
 	}
@@ -4407,7 +4533,7 @@ export class UNreaderView extends ItemView {
 			if (!name || !name.trim() || name.trim() === preset.name) return;
 			const trimmed = name.trim().slice(0, 32);
 			void this.plugin.presetStore.rename(id, trimmed).then(() => {
-				new Notice(`已重命名为“${trimmed}”`);
+				new Notice(tf("presetRenamed", { name: trimmed }));
 				if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
 			});
 		}).open();
@@ -4419,16 +4545,16 @@ export class UNreaderView extends ItemView {
 		if (!preset) return;
 		void (async (): Promise<void> => {
 			const ok = await confirmAction(this.app, {
-				title: "覆盖预设",
-				body: `用当前阅读外观替换已保存的预设“${preset.name}”？原来保存在该预设里的设置将被覆盖。`,
-				cta: "覆盖",
+				title: t("presetOverwriteTitle"),
+				body: tf("presetUpdateBody", { name: preset.name }),
+				cta: t("presetOverwriteAction"),
 				destructive: true,
 			});
 			if (!ok) return;
 			preset.appearance = { ...this.plugin.settings.appearance };
 			preset.createdAt = Date.now();
 			this.plugin.presetStore.upsert(preset);
-			new Notice(`已更新预设“${preset.name}”`);
+			new Notice(tf("presetUpdated", { name: preset.name }));
 			if (this.appearancePanel?.isOpen()) this.appearancePanel.open(this.plugin.settings.appearance);
 		})();
 	}
@@ -4664,6 +4790,8 @@ export class UNreaderView extends ItemView {
 
 	private syncAnnotationViews(): void {
 		if (this.annotationsPanel.isOpen()) this.annotationsPanel.render(this.annotations);
+		const context = this.getNativeSidebarContext();
+		if (context) this.plugin.refreshNativeSidebarAnnotations(context.key);
 		void this.refreshSideNavCounts();
 	}
 
@@ -6774,23 +6902,21 @@ export class UNreaderView extends ItemView {
 		const tocLabel = tocOpen ? "关闭目录" : "打开目录";
 		this.railTocBtn?.setAttribute("aria-label", tocLabel);
 		this.railTocBtn?.setAttribute("title", tocLabel);
-		const panelOpen = !!this.annotationsPanel?.isOpen();
-		const panelOnAnnotations = panelOpen && this.annotationsPanel?.getMode() === "annotations";
-		// 侧边栏开关（书架/订阅合并而来）：抽屉开着就亮 —— 它代表的只是「侧边栏开着」
-		// 这一个状态。无障碍名读「点下去会发生什么」：关着=打开；开在选内容页=关闭；
-		// 开在**高亮页**（阅读中）=切到内容列表（保留阅读），不是关闭。
+		const nativeMode = this.plugin.getNativeSidebarMode();
+		const panelOpen = nativeMode !== null;
+		const panelOnAnnotations = nativeMode === "annotations";
+		// 两枚入口只负责显示各自目标页；收起由 Obsidian 原生侧栏控制。
 		this.railPanelBtn?.toggleClass("is-active", panelOpen);
-		const panelLabel = !panelOpen ? "打开侧边栏" : (panelOnAnnotations ? "切换到内容列表" : "关闭侧边栏");
+		const panelLabel = "显示内容列表";
 		this.railPanelBtn?.setAttribute("aria-label", panelLabel);
 		this.railPanelBtn?.setAttribute("title", panelLabel);
-		this.railAnnoBtn?.toggleClass("is-active", panelOpen && this.annotationsPanel?.getMode() === "annotations");
-		const annotationsOpen = panelOpen && this.annotationsPanel?.getMode() === "annotations";
-		const annotationsLabel = annotationsOpen ? "关闭标注列表" : "打开当前内容的标注列表";
+		this.railAnnoBtn?.toggleClass("is-active", panelOnAnnotations);
+		const annotationsLabel = "显示当前内容的标注列表";
 		this.railAnnoBtn?.setAttribute("aria-label", annotationsLabel);
 		this.railAnnoBtn?.setAttribute("title", annotationsLabel);
 		const appearanceOpen = !!this.appearancePanel?.isOpen();
 		this.railAppearanceBtn?.toggleClass("is-active", appearanceOpen);
-		const appearanceLabel = appearanceOpen ? "关闭阅读外观" : "打开阅读外观";
+		const appearanceLabel = appearanceOpen ? t("apClose") : t("apOpen");
 		this.railAppearanceBtn?.setAttribute("aria-label", appearanceLabel);
 		this.railAppearanceBtn?.setAttribute("title", appearanceLabel);
 		this.railSearchBtn?.toggleClass("is-active", this.searchOpen);
@@ -6818,6 +6944,14 @@ export class UNreaderView extends ItemView {
 		// 原文的文章没有可转 Markdown 的正文，按钮整个收走（不收走就是「点了必然报错」的死按钮）。
 		// 已保存的换成 `file-check` 实心态：图标即状态。
 		const feedEntry = this.currentFeedEntry;
+		const canReacquire = !!feedEntry && isSafeRemoteUrl(feedEntry.url);
+		const reacquireBusy = !!feedEntry && this.feedFulltextBusy.has(`${feedEntry.feedId}:${feedEntry.id}`);
+		this.railReacquireBodyBtn?.toggleClass("is-hidden", !canReacquire);
+		this.railReacquireBodyBtn?.toggleClass("is-loading", reacquireBusy);
+		this.railReacquireBodyBtn?.setAttribute("aria-disabled", reacquireBusy ? "true" : "false");
+		this.railReacquireBodyBtn?.setAttribute("aria-label", reacquireBusy ? "正在重新获取正文" : "重新获取正文");
+		this.railReacquireBodyBtn?.setAttribute("title", reacquireBusy ? "正在重新获取正文…" : "重新获取正文");
+		if (this.railReacquireBodyBtn) paintIcon(this.railReacquireBodyBtn, reacquireBusy ? "loader" : "refresh-cw", "refresh-cw");
 		const saved = feedEntry?.state.savedAt != null;
 		this.railSaveNoteBtn?.toggleClass("is-hidden", !feedEntry || !canSaveFeedEntry(feedEntry));
 		this.railSaveNoteBtn?.toggleClass("is-active", saved);

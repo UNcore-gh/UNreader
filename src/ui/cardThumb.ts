@@ -30,7 +30,7 @@ export function mountCardThumb(card: HTMLElement): CardThumb {
 /** 挂上一张图；**只有 load 成功才揭开缩略图列**。
  *
  *  @param onSettled 无论成功失败都会在「已定局」时回调一次 —— 给需要重算高度的调用方
- *  （如星标笔记组的 max-height）用。 */
+ *  （如置顶笔记组的 max-height）用。 */
 export function showCardThumb(thumb: CardThumb, url: string, onSettled?: () => void): void {
 	if (thumb.revealed) return;
 	thumb.img.addEventListener("load", () => {

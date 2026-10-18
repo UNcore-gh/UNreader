@@ -1,0 +1,48 @@
+{
+	"1.0.1": {
+		"title": {
+			"zh": "阅读显隐与交互修复",
+			"en": "Reading visibility and interaction fixes"
+		},
+		"summary": {
+			"zh": "修复移动端阅读时 Obsidian 原生底栏反复显隐；统一阅读视图的导航栏状态，并改善灯绳跟随与加载期间侧边工具栏响应。",
+			"en": "Fixed repeated visibility changes in Obsidian's native mobile bars, unified reader navigation state, and improved the floating rail and toolbar response while content loads."
+		},
+		"items": {
+			"zh": [
+				"修复移动端阅读时 Obsidian 原生底栏反复显隐。",
+				"统一阅读视图导航栏状态，并改善灯绳跟随与加载期间侧边工具栏响应。"
+			],
+			"en": [
+				"Fixed repeated visibility changes in Obsidian's native mobile bars while reading.",
+				"Unified reader navigation state and improved the floating rail and toolbar response while content loads."
+			]
+		}
+	},
+	"1.0.2": {
+		"title": {
+			"zh": "侧栏与笔记整理改进",
+			"en": "Sidebar and note organization improvements"
+		},
+		"summary": {
+			"zh": "书架、RSS、Markdown 笔记和标注的侧栏操作更清楚，订阅列表与笔记卡片也更稳。",
+			"en": "Clearer sidebar actions for the bookshelf, RSS, Markdown notes, and annotations, with more reliable feed lists and note cards."
+		},
+		"items": {
+			"zh": [
+				"书架、订阅、笔记和标注可以在 Obsidian 原生侧栏中浏览；卡片上的标注入口只展示标注，点击某条标注才打开正文并定位。",
+				"RSS 订阅首次加载完成后会自动刷新列表；新正文写入失败时保留原有内容，避免缓存被空内容覆盖。",
+				"Markdown 笔记卡和阅读侧边工具栏统一使用图钉置顶；已有星标会保留为置顶，不需要重新标记。",
+				"卡片按钮外观更紧凑；Markdown 笔记预览会略过图片、代码块、引用块和空白内容，优先显示正文。",
+				"设置页、阅读外观面板和资源管理弹窗现在提供完整英文文案；语言可跟随 Obsidian 或手动切换。"
+			],
+			"en": [
+				"Browse the bookshelf, feeds, notes, and annotations in Obsidian's native sidebar. Annotation links show the list first; selecting an annotation opens and locates its source text.",
+				"The feed list refreshes after its initial cache loads. If writing refreshed article content fails, the previous content stays available instead of being replaced with an empty snapshot.",
+				"Markdown note cards and the reading toolbar now use pin controls. Existing starred notes remain pinned without needing to be marked again.",
+				"Card actions are more compact. Markdown note previews skip images, code blocks, quotes, and empty content so the preview favors readable text.",
+				"Settings, reading appearance panels, and resource dialogs now have English copy. The interface can follow Obsidian's language or be switched manually."
+			]
+		}
+	}
+}

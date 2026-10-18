@@ -1,5 +1,6 @@
 import type { App } from "obsidian";
 import { UnreaderModal } from "./modalSkin";
+import { t } from "../core/i18n";
 
 export interface ConfirmOptions {
 	title: string;
@@ -31,8 +32,8 @@ export class ConfirmModal extends UnreaderModal {
 		this.titleEl.setText(this.options.title);
 		this.contentEl.createEl("p", { text: this.options.body });
 		const buttons = this.contentEl.createDiv({ cls: "modal-button-container" });
-		buttons.createEl("button", { text: "取消" }).addEventListener("click", () => this.finish(false));
-		const cta = buttons.createEl("button", { text: this.options.cta ?? "确定", cls: "mod-cta" });
+		buttons.createEl("button", { text: t("cancel") }).addEventListener("click", () => this.finish(false));
+		const cta = buttons.createEl("button", { text: this.options.cta ?? t("confirm"), cls: "mod-cta" });
 		if (this.options.destructive) cta.addClass("mod-warning");
 		cta.addEventListener("click", () => this.finish(true));
 	}

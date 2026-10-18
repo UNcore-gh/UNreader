@@ -1,6 +1,7 @@
 import { App } from "obsidian";
 import { markModalKeyboardSafe, unmarkModalKeyboardSafe } from "./keyboardInset";
 import { UnreaderModal } from "./modalSkin";
+import { t } from "../core/i18n";
 
 /** 字体来源：库内文件（path 用于判断是否已在字体夹内）或系统文件选择器。 */
 export interface FontPick {
@@ -35,12 +36,12 @@ export class FontPickModal extends UnreaderModal {
 	onOpen(): void {
 		// 移动端：键盘弹起时整个弹窗上移到键盘之上（见 keyboardInset 与 styles.css 的 .unreader-kb-safe）
 		markModalKeyboardSafe(this.containerEl);
-		this.titleEl.setText("选择字体文件");
+		this.titleEl.setText(t("fontPickTitle"));
 		this.contentEl.empty();
 
 		this.contentEl.createDiv({
 			cls: "unreader-tag-desc",
-			text: "从库中选择一个字体文件（ttf / otf / woff / woff2）。选中的文件会复制到插件的字体文件夹，之后所有设备都能用。",
+			text: t("fontPickDesc"),
 		});
 
 		let submitted = false;
@@ -54,7 +55,7 @@ export class FontPickModal extends UnreaderModal {
 		const input = this.contentEl.createEl("input", {
 			cls: "unreader-tag-input",
 			type: "text",
-			attr: { placeholder: "搜索字体文件名…" },
+			attr: { placeholder: t("fontPickSearch") },
 		});
 
 		const listEl = this.contentEl.createDiv({ cls: "unreader-bg-list" });
@@ -72,14 +73,14 @@ export class FontPickModal extends UnreaderModal {
 				row.createSpan({ cls: "unreader-bg-row-ext", text: p.ext.toUpperCase() });
 				row.addEventListener("click", () => submit(p));
 			}
-			if (!shown) listEl.createDiv({ cls: "unreader-bg-empty", text: "没有匹配的字体" });
+			if (!shown) listEl.createDiv({ cls: "unreader-bg-empty", text: t("fontPickNoMatches") });
 		};
 		render("");
 
 		input.addEventListener("input", () => render(input.value));
 
 		const btnRow = this.contentEl.createDiv({ cls: "unreader-tag-buttons" });
-		btnRow.createEl("button", { text: "取消" }).addEventListener("click", () => this.close());
+		btnRow.createEl("button", { text: t("cancel") }).addEventListener("click", () => this.close());
 
 		window.setTimeout(() => input.focus(), 50);
 	}

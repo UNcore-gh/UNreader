@@ -41,6 +41,7 @@ export class MdAnnotationAdapter {
 	 *  由 `refresh()`（读盘）或 `onDeleteHighlight` 成功后（自算）写入；换文件 / 外部
 	 *  改动后必须重新 refresh，否则会拿上一份文件的源码给当前文件枚举。 */
 	private srcCache: { path: string; src: string } | null = null;
+	private refreshSequence = 0;
 
 	/** 对外（mdOverlay.jumpToHighlight）的权威源码快照：缓存命中当前文件才给，
 	 *  否则 null —— 绝不回退幽灵编辑器（见 sourceOf 注释：阅读模式下它不跟随写盘，
@@ -86,11 +87,17 @@ export class MdAnnotationAdapter {
 		const view = this.deps.view();
 		const file = view?.file;
 		if (!file) {
+			this.refreshSequence++;
 			this.srcCache = null;
 			return;
 		}
+		const path = file.path;
+		const sequence = ++this.refreshSequence;
 		try {
-			this.srcCache = { path: file.path, src: await this.deps.app.vault.read(file) };
+			const src = await this.deps.app.vault.read(file);
+			// 阅读文件期间可能已经切到另一份笔记；过期读取不能把旧内容写回共享适配器。
+			if (sequence !== this.refreshSequence || this.deps.view()?.file?.path !== path) return;
+			this.srcCache = { path, src };
 		} catch {
 			// 读不到（文件被删 / 正在写）就保留旧缓存，比清空列表更接近用户所见。
 		}
@@ -151,6 +158,8 @@ export class MdAnnotationAdapter {
 	async onDeleteHighlight(id: number): Promise<boolean> {
 		const view = this.deps.view();
 		if (!view?.file) return false;
+		const path = view.file.path;
+		const file = view.file;
 		const isSource = (() => {
 			try { return view.getMode?.() === "source"; } catch { return false; }
 		})();
@@ -159,12 +168,13 @@ export class MdAnnotationAdapter {
 		if (src == null) {
 			// preview 恒走读盘（与 vault.process 复核同一内容）；source editor 取不到也兜底读盘。
 			try {
-				src = await this.deps.app.vault.read(view.file);
+				src = await this.deps.app.vault.read(file);
 			} catch {
 				return false;
 			}
 			channel = "vault";
 		}
+		if (this.deps.view()?.file?.path !== path) return false;
 		const spans = collectHighlights(src);
 		const sp = spans[id - 1];
 		if (!sp) return false;
@@ -172,17 +182,18 @@ export class MdAnnotationAdapter {
 		// 区间是整个 `==...==`（含首尾标记），替换成裸正文即「去高亮」。
 		const plan = { from: sp.openStart, to: sp.closeEnd, replacement: body };
 		const expected = src.slice(plan.from, plan.to);
-		const res = await applyEditPlan(this.deps.app, view, plan, expected, channel);
+		const res = await applyEditPlan(this.deps.app, view, plan, expected, channel, path);
 		if (!res.ok) {
 			new Notice("删除失败（笔记可能已被改动）");
 			return false;
 		}
+		if (this.deps.view()?.file?.path !== path) return false;
 		// 写入成功 → 把**自算出的新源码**钉进缓存，再让宿主重绘。
 		// 为什么不在此处重新 `vault.read`：编辑通道（source 模式）的改动到 vault 有一道
 		// debounce，立刻读盘读到的还是旧内容 —— 列表会「删了又回来」。自算值与两条通道
 		// 的写入结果逐字一致，且下一次 refresh() 会用盘上真值覆盖它。
 		this.srcCache = {
-			path: view.file.path,
+			path,
 			src: src.slice(0, plan.from) + plan.replacement + src.slice(plan.to),
 		};
 		this.deps.onChanged?.();

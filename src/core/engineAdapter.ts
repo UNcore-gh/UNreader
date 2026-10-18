@@ -2478,6 +2478,26 @@ export class EngineAdapter {
 		return frame?.doc?.body ? frame.doc : null
 	}
 
+	/** 当前阅读位置所在的 iframe 文档，供宿主侧的原生菜单入口复用。 */
+	getContextMenuTarget(): HTMLElement | null {
+		const docs: { index: number; doc: Document }[] = [];
+		if (this.isContinuous) {
+			for (const [index, frame] of this.contFrames) if (frame.doc?.body) docs.push({ index, doc: frame.doc });
+		} else {
+			try {
+				for (const content of this.el?.renderer?.getContents?.() ?? []) {
+					if (content.doc?.body) docs.push(content);
+				}
+			} catch { /* 读页尚未就绪时由调用方退回宿主正文容器。 */ }
+		}
+		const selected = docs.find(({ doc }) => {
+			const selection = doc.getSelection();
+			return !!selection && !selection.isCollapsed && selection.rangeCount > 0;
+		});
+		const current = docs.find(item => item.index === this.currentIndex);
+		return (selected ?? current ?? docs[0])?.doc.body ?? null;
+	}
+
 
 	private findAdjacentIndex(dir: -1 | 1): number | null {
 		const sections = this.el?.book?.sections as unknown as { linear?: string }[] | undefined
@@ -4718,6 +4738,13 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 		// 会与之同时弹出、位置冲突。桌面右键菜单不影响选区，仅拦长按/触屏触发的 contextmenu。
 		d.addEventListener("contextmenu", (e: Event) => {
 			const ev = e as MouseEvent
+			const contextMenuWindow = d.defaultView as (Window & { __unreaderNativeContextMenuRequestUntil?: number }) | null;
+			const requestUntil = contextMenuWindow?.__unreaderNativeContextMenuRequestUntil ?? 0;
+			if (requestUntil > Date.now()) {
+				delete contextMenuWindow!.__unreaderNativeContextMenuRequestUntil;
+				return;
+			}
+			if (requestUntil) delete contextMenuWindow!.__unreaderNativeContextMenuRequestUntil;
 			// 触屏长按在移动端 contextmenu 的 detail 常为 0/1；桌面右键 detail 为 2
 			if (ev.detail < 2 || (navigator.maxTouchPoints > 0 && ev.detail === 0)) e.preventDefault()
 		})

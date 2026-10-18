@@ -1783,7 +1783,7 @@ body:not(.is-phone) .unreader-continuous {
 	max-width: min(400px, calc(100% - 24px));
 	display: flex;
 	flex-direction: column;
-	background: var(--background-primary);
+	background: transparent;
 	border: 1px solid var(--background-modifier-border);
 	border-radius: 12px;
 	box-shadow: 0 10px 30px rgba(0, 0, 0, 0.16), 0 3px 10px rgba(0, 0, 0, 0.08);
@@ -1805,7 +1805,7 @@ body:not(.is-phone) .unreader-continuous {
 	width: 12px;
 	height: 12px;
 	transform: translateX(-50%) rotate(45deg);
-	background: var(--background-primary);
+	background: transparent;
 	border-right: 1px solid var(--background-modifier-border);
 	border-bottom: 1px solid var(--background-modifier-border);
 	border-radius: 0 0 2px 0;
@@ -1944,7 +1944,7 @@ body:not(.is-phone) .unreader-continuous {
 	font-size: var(--font-text-size, 15px);
 	line-height: 1.65;
 	color: var(--text-normal);
-	background: var(--background-primary);
+	background: transparent;
 	overscroll-behavior: contain;
 	scrollbar-width: thin;
 	/* 气泡文字可选中：像正文一样，供三方插件经 getReaderSelection 读取 */
@@ -2788,7 +2788,7 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 	justify-content: center;
 	width: 27px;
 	height: 24px;
-	border-radius: 5px;
+	border-radius: 6px;
 	color: var(--text-muted);
 	cursor: pointer;
 	transition: background-color 120ms ease, color 120ms ease, box-shadow 120ms ease;
@@ -2801,7 +2801,7 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 
 .unreader-anno-mode-btn.is-active {
 	color: var(--text-accent);
-	background: var(--background-primary);
+	background: transparent;
 	box-shadow: 0 1px 3px rgba(0, 0, 0, 0.10);
 }
 
@@ -2868,12 +2868,15 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 25px;
-	height: 25px;
+	/* 24px / opacity 1（2026-10-17）：与共享按钮 `.unreader-card-action` 逐项对齐。
+	   旧值 25px + 0.62 就是用户说的「书籍卡片的三个点按钮还是老版本的」——
+	   同一枚 ⋯ 在 RSS 卡上是实心深浅、在书卡上是发灰的小图标。 */
+	width: 24px;
+	height: 24px;
 	border-radius: 6px;
-	color: var(--text-faint);
+	color: var(--icon-color, var(--text-faint));
 	cursor: pointer;
-	opacity: 0.62;
+	opacity: 1;
 	transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
 }
 
@@ -2888,8 +2891,8 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 }
 
 .unreader-shelf-more .svg-icon {
-	width: 14px;
-	height: 14px;
+	width: 16px;
+	height: 16px;
 }
 
 .unreader-shelf-sort {
@@ -2921,9 +2924,14 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 	opacity: 0.78;
 }
 
+/* 2026-10-17 五调：`flex column` → `grid` + `grid-auto-rows: 1fr`。
+   用户要求「卡片高度固定，按最高那张，没内容的地方留空」：单列网格里每个 `1fr`
+   隐式行（容器高度 auto）会取**所有行里最高的 max-content** 作为统一行高 ⇒ 同一
+   列表内三类卡一律等高，且高于内容的部分就是留白。改成 grid 后 `flex: …` 对
+   本容器的子项全部失效（只有 `.unreader-feed-load-more` 依赖过，已改绝对定位）。 */
 .unreader-shelf-group {
-	display: flex;
-	flex-direction: column;
+	display: grid;
+	grid-auto-rows: 1fr;
 	gap: 8px;
 	padding: 0 10px 12px;
 }
@@ -2981,7 +2989,7 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 }
 
 .unreader-shelf-cover.has-cover {
-	background: var(--background-primary);
+	background: transparent;
 }
 
 .unreader-shelf-cover-img {
@@ -2991,8 +2999,11 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 	display: block;
 }
 
-/* 无封面时改用卡片右侧缩略图列失败 / 缺图的统一回退：标题下一行正文首行。
-   ⚠️ `.unreader-shelf-cover-fallback` 是**保留的旧类名别名** —— 产品已不再渲染
+/* 书架卡标题下那一行 = **作者 · 格式**（用户 2026-10-17：「书籍文件的话，这里显示
+   作者和书籍格式」）。与 RSS 卡的「订阅名 + 简介」、笔记卡的正文预览占同一格。
+   ⚠️ 2026-10-17 之前它是「无封面时的正文首行兜底」，与缩略图**互斥**（`is-hidden`）；
+   现在这一格有自己的信息（格式同步就有、作者懒加载后补），**有封面也显示**。
+   `.unreader-shelf-cover-fallback` 仍是**保留的旧类名别名** —— 产品已不再渲染
    `.unreader-shelf-cover`（封面移到右侧 `.unreader-card-thumb`），但
    `test/shelf-dark.html` 与 `test/theme-audit.html` 两个夹具都在采样这个类
    （判「深色下无封面兜底文字是否跟随 --text-muted」）。删掉它等于同时改两个
@@ -3019,7 +3030,7 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 	white-space: nowrap;
 }
 
-/* 有封面时这一行不出现（它与缩略图**互斥**）；无封面才由 JS 摘掉 is-hidden。
+/* 作者 + 格式那一行：钳 2 行 —— 作者名长（合集 / 多作者）时不能把卡片顶高。
    ⚠️ 本文件**没有**全局 `.is-hidden`，每条都是逐元素声明 —— 别指望别的规则顺手兜住。 */
 .unreader-shelf-excerpt.is-hidden {
 	display: none;
@@ -3034,7 +3045,11 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 }
 
 .unreader-shelf-title {
-	flex: 1 1 auto;
+	/* 2026-10-17 五调：`flex: 1 1 auto` → `0 1 auto`。卡片被列表拉到统一高度后，
+	   文字块是 `flex-direction: column`，标题 grow 会把多余高度**吃掉**并把作者行 /
+	   底栏推散开（实测「人类简史」卡作者行悬在卡片正中）；改成不增长，多余高度就
+	   停在最后一行下方 = 真正的「留白」。卡片高度=内容高度时两者完全等价。 */
+	flex: 0 1 auto;
 	min-width: 0;
 	font-size: var(--font-ui-small);
 	font-weight: 650;
@@ -3052,12 +3067,13 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 	display: flex;
 	align-items: center;
 	justify-content: center;
-	width: 25px;
-	height: 25px;
+	/* 与共享按钮同尺寸/同透明度，理由见上面的 `.unreader-shelf-more`。 */
+	width: 24px;
+	height: 24px;
 	border-radius: 6px;
-	color: var(--text-faint);
+	color: var(--icon-color, var(--text-faint));
 	cursor: pointer;
-	opacity: 0.62;
+	opacity: 1;
 	transition: opacity 120ms ease, color 120ms ease, background-color 120ms ease;
 }
 
@@ -3076,8 +3092,8 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
 }
 
 .unreader-shelf-pin .svg-icon {
-	width: 14px;
-	height: 14px;
+	width: 16px;
+	height: 16px;
 }
 
 /* `.unreader-shelf-head` / `.unreader-shelf-meta` / `.unreader-shelf-author` /
@@ -3108,12 +3124,8 @@ body.is-tablet .unreader-anno-panel.is-open ~ .unreader-empty {
    `npm run test:shelf-dark` 的 D 组 + `?legacy-shelf=1`（注回旧白卡 → 卡片底色 ≠
    `--background-primary`，必红）。别再往统一段里加任何固定浅色值。 */
 
-@media (hover: none) {
-	.unreader-shelf-pin,
-	.unreader-shelf-more {
-		opacity: 0.86;
-	}
-}
+/* 触屏不再把 ⋯ / 置顶钮调淡（2026-10-17）：基准已是 opacity 1，旧的 0.86 会让
+   无悬停设备上的按钮比桌面端更淡 —— 那是「老版本」视觉的最后一块残留。 */
 
 .unreader-anno-section {
 	padding: 14px 14px 7px 14px;
@@ -5224,9 +5236,12 @@ body.is-tablet .unreader-feed-action .svg-icon {
 	font-size: var(--font-ui-smaller);
 }
 
+/* 与书架组同一条规则（见上方 `.unreader-shelf-group` 注释）：单列网格 + `1fr` 隐式行
+   ⇒ 列表内所有 RSS 卡等高。`position: relative` 是给底部加载哨兵用的（见下一条）。 */
 .unreader-feed-list {
-	display: flex;
-	flex-direction: column;
+	position: relative;
+	display: grid;
+	grid-auto-rows: 1fr;
 	gap: 8px;
 	padding: 0 10px 14px;
 }
@@ -5240,8 +5255,16 @@ body.is-tablet .unreader-feed-action .svg-icon {
 	contain-intrinsic-size: 0 132px;
 }
 
+/* 无限滚动哨兵：只是 IntersectionObserver 的观察目标，视觉上是 1px 空条。
+   ⚠️ 必须是**绝对定位**：列表已改成 `grid-auto-rows: 1fr`，它若留在流内就会单独吃
+   一整行（= 一张卡片的高度）⇒ 列表底部凭空多一块空白，还会把「滚到底」判定提前。
+   绝对定位后它不再是网格项，但仍有 layout box（贴在列表 padding box 底部），
+   IO + `rootMargin: 480px` 的行为与流内时一致。 */
 .unreader-feed-load-more {
-	flex: 0 0 1px;
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 0;
 	width: 100%;
 	height: 1px;
 	pointer-events: none;
@@ -5322,8 +5345,8 @@ body.is-tablet .unreader-feed-action .svg-icon {
 	   border-box，塞不下 40px 内边距时**内容盒被压成 0**，里面的 svg 图标（flex 子项、
 	   可收缩）随之变 0 宽 —— 按钮还在、图标没了，整排看起来就是「按钮没有出现」。
 	   手机端官方皮肤与主题按钮皮肤同理。缺一条，test:feedcard 的阴性对照立刻变红。 */
-	width: 28px !important;
-	height: 28px !important;
+	width: 24px !important;
+	height: 24px !important;
 	padding: 0 !important;
 	appearance: none;
 	-webkit-appearance: none;
@@ -5357,7 +5380,7 @@ body.is-tablet .unreader-feed-action .svg-icon {
 }
 
 /* 星标填充：lucide 的 `star` 是描边图形，靠 `fill` 变实心才认得出「已收藏」
-   （与 `.unreader-note-star.is-starred`、功能轨的 `.is-starred` 同口径 —— 三类卡
+   （与 `.unreader-note-pin.is-pinned`、功能轨的置顶状态同口径 —— 三类卡
    的星标必须是同一套读数，否则同一件事在三个地方长得不一样）。 */
 .unreader-feed-card .unreader-feed-inline-action.is-starred .svg-icon {
 	fill: currentColor;
@@ -5375,17 +5398,21 @@ body.is-tablet .unreader-feed-action .svg-icon {
 body.is-phone .unreader-feed-card .unreader-feed-inline-action,
 body.is-tablet .unreader-feed-card .unreader-feed-inline-action {
 	/* 与上面同一族站外覆盖：手机/平板档的按钮尺寸同样不许被官方按钮皮肤改写。 */
-	width: 32px !important;
-	height: 32px !important;
+	width: 24px !important;
+	height: 24px !important;
 }
 
 body.is-phone .unreader-feed-card .unreader-feed-inline-action .svg-icon,
 body.is-tablet .unreader-feed-card .unreader-feed-inline-action .svg-icon {
+	/* 保留旧设备档尺寸；正常态由下方共享按钮的 !important 统一到 16px。
+	   test:feedcard 会在阴性档移除共享规则，验证旧设备档 17px 确实被识别。 */
 	width: 17px;
 	height: 17px;
 }
 
+.unreader-feed-card .unreader-feed-inline-action .svg-icon,
 .unreader-feed-inline-action .svg-icon {
+	/* 旧桌面尺寸留作阴性基线；正常态由共享按钮统一覆盖。 */
 	width: 15px;
 	height: 15px;
 }
@@ -7453,6 +7480,78 @@ body.theme-dark .unreader-modal {
 	color: var(--text-on-accent);
 }
 
+.unreader-modal.unreader-release-notes-modal {
+	width: min(560px, calc(100vw - 32px));
+	max-width: calc(100vw - 32px);
+}
+
+.unreader-release-notes {
+	max-height: min(72vh, 680px);
+	overflow-y: auto;
+	display: flex;
+	flex-direction: column;
+	gap: 14px;
+}
+
+.unreader-release-notes-hint,
+.unreader-release-notes-empty {
+	color: var(--text-muted);
+	font-size: var(--font-ui-small);
+}
+
+.unreader-release-note {
+	padding: 14px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--ur-radius);
+	background: var(--background-primary);
+}
+
+.unreader-release-note-header {
+	display: flex;
+	align-items: center;
+	gap: 8px;
+}
+
+.unreader-release-note-header h3 {
+	flex: 1 1 auto;
+	min-width: 0;
+	margin: 0;
+	font-size: var(--font-ui-medium);
+	color: var(--text-normal);
+}
+
+.unreader-release-note-version {
+	flex: 0 0 auto;
+	padding: 2px 7px;
+	border-radius: 999px;
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-variant-numeric: tabular-nums;
+}
+
+.unreader-release-note-version.is-current {
+	background: color-mix(in srgb, var(--interactive-accent) 14%, transparent);
+	color: var(--text-accent);
+}
+
+.unreader-release-note-summary {
+	margin-top: 8px;
+	color: var(--text-normal);
+	line-height: 1.5;
+}
+
+.unreader-release-note-items {
+	margin: 8px 0 0;
+	padding-inline-start: 1.25em;
+	color: var(--text-muted);
+	line-height: 1.55;
+}
+
+.unreader-release-note-items li + li {
+	margin-top: 5px;
+}
+
 /* ---------- 8. RSS / 书架残余按钮与卡片收尾 ---------- */
 
 /* 订阅工具栏与筛选区：和 UNmemos 输入框下方按钮同一套「无边框 + 近白面 +
@@ -7653,25 +7752,48 @@ body.theme-dark {
 	color: var(--text-muted);
 }
 
+/* 与书架 / RSS 组同一条规则（见 `.unreader-shelf-group` 注释）：单列网格 + `1fr`
+   隐式行 ⇒ 组内笔记卡等高。滚动限高的置顶组要退回 `auto`（见
+   `.unreader-note-group-starred.is-scrollable`）：那里 `max-height` 是按「5 张卡实测
+   总高」写的确定高度，`1fr` 会让 6 行去均分 5 行的高度 ⇒ 每张卡被压扁。 */
 .unreader-note-group {
-	display: flex;
-	flex-direction: column;
+	display: grid;
+	grid-auto-rows: 1fr;
 	gap: 8px;
 	padding: 0 10px 12px;
 }
 
-/* 星标组：超过 5 条时由 JS 写 max-height（实测前 5 张卡片高度），组内滚动看更多。
+/* 置顶组：超过 5 条时由 JS 写 max-height（实测前 5 张卡片高度），组内滚动看更多。
    overscroll-behavior:contain 防止滚到边界后把滚动链传给外层 .unreader-toc-scroll。 */
 .unreader-note-group-starred {
 	flex: 0 0 auto;
 	overflow-y: auto;
-	overscroll-behavior: contain;
 	-webkit-overflow-scrolling: touch;
+}
+
+.unreader-note-group-starred.is-scrollable {
+	/* 限高滚动区必须退回「各行按内容自适应」：`max-height` 由 JS 写成「前 5 张实测
+	   总高」（`capStarredGroupHeight`），若父级仍是 `grid-auto-rows: 1fr`，6 行会去
+	   均分 5 行的高度 ⇒ 每张卡被压到 min-content、内容挤爆。 */
+	grid-auto-rows: auto;
+	overscroll-behavior-y: contain;
+	scrollbar-width: thin;
+	scrollbar-gutter: stable;
+	scrollbar-color: var(--background-modifier-border) transparent;
+}
+
+.unreader-note-group-starred.is-scrollable::-webkit-scrollbar {
+	width: 6px;
+}
+
+.unreader-note-group-starred.is-scrollable::-webkit-scrollbar-thumb {
+	border-radius: 999px;
+	background: var(--background-modifier-border);
 }
 
 /* 笔记卡片的外壳（grid 两列 / 内边距 / 圆角 / 阴影环 / hover / active）与另两类卡片
    **同皮**，规则统一到文件末尾的「三类列表卡片统一外壳」段（2026-10-12）。
-   这里只留笔记卡独有的排布：标题行（标题 + 星标按钮同排）与正文行的省略。
+   这里只留笔记卡独有的排布：标题行（标题 + 置顶按钮同排）与正文行的省略。
    ⚠️ `.unreader-note-icon` 已删除 —— 「图标在左」是旧范式，与「文字靠左」冲突，
    且无图时白吃 40px、违背「无图全宽」。无夹具断言它。 */
 
@@ -7682,7 +7804,7 @@ body.theme-dark {
 	min-width: 0;
 }
 
-.unreader-note-star .svg-icon {
+.unreader-note-pin .svg-icon {
 	width: 17px;
 	height: 17px;
 }
@@ -7696,13 +7818,15 @@ body.theme-dark {
 }
 
 .unreader-note-title {
-	flex: 1 1 auto;
+	/* 同 `.unreader-shelf-title`（2026-10-17 五调）：不 grow，避免卡片被拉高后
+	   标题把「1.2 万字」等尾巴推到卡片中段。 */
+	flex: 0 1 auto;
 	min-width: 0;
 	font-size: 0.9em;
 	font-weight: 600;
 	line-height: 1.4;
 	color: var(--text-normal);
-	/* 钳 2 行：笔记卡第 1 行只有标题，钳住后与 72px 缩略图的差距由垂直居中吸收。 */
+	/* 钳 2 行：笔记卡第 1 行只有标题。 */
 	display: -webkit-box;
 	-webkit-box-orient: vertical;
 	-webkit-line-clamp: 2;
@@ -7714,7 +7838,122 @@ body.theme-dark {
    路径与时间不再画在底栏（底栏只留进度环 + 动作钮），改在悬停看板里展示。
    类名保留一段空规则没必要，这里直接删掉 —— 若还有别处引用会立刻表现为样式缺失。 */
 
-/* ---------- 笔记卡动作钮组（⋯ / 已读·未读 / 星标） ---------- */
+/* 正文预览（用户 2026-10-17：「标题下面那段空白里写上笔记最强的一些字，用来预览，
+   要渲染 markdown 格式」）。与 RSS 卡的「订阅名 + 简介」占**同一格**（第 1 行第 1 列）：
+   同一档字号、同一档颜色，三类卡扫下来行数才齐。
+
+   ⚠️ 这里**不能**照抄标题那条 `display:-webkit-box + -webkit-line-clamp`：预览是
+   `MarkdownRenderer` 渲染出来的**多个块级子元素**（`<p>` / `<ul>` / `<h6>`），
+   `-webkit-box` 会把每个块当成横向 flex 项排成一行、整段挤在 1 行里。所以改用
+   `max-height` + `overflow:hidden` 裁到 2 行，行高由 `line-height:1.45` 定死
+   （2 × 1.45 = 2.9em）—— 内部块元素的 margin / 字号必须一起压平，否则 2.9em
+   算不准，裁出来是半行。
+
+   `max-height` 里的 `+ 9px` 是给下面那条「短横」留的预算（1.5px 线 + 2px 上距 +
+   5px 下距 ≈ 8.5px）。改横线高度/间距时必须同步改这个偏移，否则第 2 行会被切一半。 */
+.unreader-note-excerpt {
+	font-size: var(--font-ui-smaller);
+	line-height: 1.45;
+	color: var(--text-muted);
+	max-height: calc(2.9em + 9px);
+	overflow: hidden;
+	overflow-wrap: anywhere;
+	/* 预览是**纯展示**：里面渲染出来的 `[[链接]]` / 外链不该把点击截走 ——
+	   整张卡只有一个动作（打开这篇笔记），点预览里的任何一处都算点卡片。 */
+	pointer-events: none;
+}
+
+/* 标题与内容之间的**短横**（用户 2026-10-18：「位置靠左，左右不要相连，用于区分标题和
+   详细内容」，同日：「同步到其他各种卡片」）。
+   三类卡同一套写法，用**背景**而不是 `::before`：
+   · `.unreader-shelf-excerpt` / `.unreader-feed-card-summary` 是 `display:-webkit-box`，
+     伪元素会被当成一个 flex item、直接把 `-webkit-line-clamp:2` 的一行吃掉（文字只剩 1 行）；
+   · 背景画在 padding 区，不参与行盒计算，也不碰文字颜色；
+   · 22×1.5px 靠左：`background-size: 22px 1.5px` + `background-position: left top`
+     ⇒ 短、贴左、左右留白（不是通栏分隔线）。
+   `padding-top: 9px` 同时是「线到文字」的间距来源（1.5px 线 + 7.5px 空隙）；
+   笔记卡的 `max-height: calc(2.9em + 9px)` 正好把这份 padding 算进 2 行预算里。 */
+.unreader-note-excerpt,
+.unreader-shelf-excerpt,
+.unreader-feed-card-summary {
+	--ur-hairline: color-mix(in srgb, var(--text-faint) 60%, transparent);
+	padding-top: 9px;
+	background-image: linear-gradient(var(--ur-hairline), var(--ur-hairline));
+	background-repeat: no-repeat;
+	background-size: 22px 1.5px;
+	background-position: left top;
+}
+
+/* 渲染结果的块级间距一律压平：卡片上这是一行摘要，不是一篇文章。
+   特异性 (0,1,1) 足够压过主题里写 `p { margin: 1em 0 }` 的那类规矩 —— 容器不带
+   `.markdown-rendered`，官方的 `.markdown-rendered p` 根本匹配不到。 */
+.unreader-note-excerpt p,
+.unreader-note-excerpt ul,
+.unreader-note-excerpt ol,
+.unreader-note-excerpt li,
+.unreader-note-excerpt blockquote,
+.unreader-note-excerpt h1,
+.unreader-note-excerpt h2,
+.unreader-note-excerpt h3,
+.unreader-note-excerpt h4,
+.unreader-note-excerpt h5,
+.unreader-note-excerpt h6 {
+	margin: 0;
+	padding: 0;
+	font-size: inherit;
+	line-height: inherit;
+	border: 0;
+}
+
+/* 标题保留一点层级感（加粗即可，绝不放大 —— 放大就会把 2 行预算撑爆）。 */
+.unreader-note-excerpt h1,
+.unreader-note-excerpt h2,
+.unreader-note-excerpt h3,
+.unreader-note-excerpt h4,
+.unreader-note-excerpt h5,
+.unreader-note-excerpt h6 {
+	font-weight: 600;
+	color: var(--text-normal);
+}
+
+.unreader-note-excerpt ul,
+.unreader-note-excerpt ol {
+	padding-left: 1.1em;
+}
+
+/* 图片 / 代码块 / 表格 / 分隔线不进预览：一行摘要是文字预览，不是缩略图。
+   图片另有一条硬理由 —— 它会撑高卡片、还会在列表里发起一堆图片解码。 */
+.unreader-note-excerpt img,
+.unreader-note-excerpt pre,
+.unreader-note-excerpt table,
+.unreader-note-excerpt hr {
+	display: none;
+}
+
+.unreader-note-excerpt a {
+	color: var(--text-accent);
+	text-decoration: none;
+}
+
+.unreader-note-excerpt code {
+	font-size: 0.95em;
+}
+
+/* 本文件没有全局 `.is-hidden`（每条逐元素声明）—— 预览的「还没读到正文」态靠这条藏。 */
+.unreader-note-excerpt.is-hidden {
+	display: none;
+}
+
+/* 渲染后清场（`pruneNotePreview`）的 CSS 兜底：如果脚本没跑到 / 清完只剩一个空壳，
+   `:empty` 也把这一格收掉 —— 卡片内容区不留「占着却不显示」的空白
+   （用户 2026-10-18：「确保没有浪费的空间」）。三类卡同一口径。 */
+.unreader-note-excerpt:empty,
+.unreader-shelf-excerpt:empty,
+.unreader-feed-card-summary:empty {
+	display: none;
+}
+
+/* ---------- 笔记卡动作钮组（标注 / 复制 / 定位 / 置顶） ---------- */
 .unreader-note-actions {
 	display: flex;
 	align-items: center;
@@ -7723,7 +7962,7 @@ body.theme-dark {
 	margin: 0 -3px 0 0;
 }
 
-/* 三枚动作钮（复制路径 / 定位到文件夹 / 星标）+ 底栏最左的**字数**。
+/* 三枚动作钮（复制路径 / 定位到文件夹 / 置顶）+ 底栏最左的**字数**。
    「⋯ 菜单」与「已读 / 未读」两枚已退役（2026-10-13）：菜单里那几项现在各有自己的按钮，
    读态由「最近阅读」索引表达、不再需要手动切换 —— 用户定稿的按钮就是这三枚。 */
 .unreader-note-copy,
@@ -7768,7 +8007,7 @@ body.theme-dark {
 	cursor: default;
 }
 
-.unreader-note-star {
+.unreader-note-pin {
 	display: flex;
 	align-items: center;
 	justify-content: center;
@@ -7780,14 +8019,10 @@ body.theme-dark {
 	cursor: pointer;
 }
 
-.unreader-note-star:hover,
-.unreader-note-star.is-starred {
+.unreader-note-pin:hover,
+.unreader-note-pin.is-pinned {
 	color: var(--text-accent);
 	background: color-mix(in srgb, var(--interactive-accent) 12%, transparent);
-}
-
-.unreader-note-star.is-starred .svg-icon {
-	fill: currentColor;
 }
 
 /* ---------- 三类列表卡片统一外壳（书架 / RSS / 笔记） ----------
@@ -7820,7 +8055,15 @@ body.theme-dark {
 	   第 2 列塌成 `0px`（无图）时间隙照样占着 ⇒ 文字右侧白白少一条 10px 的死缝（实测
 	   `cols: ["258px","0px"]` 而内容盒是 268px）。`margin-left` 只在缩略图真存在时占位。 */
 	gap: 7px 0;
-	padding: 10px;
+	/* 2026-10-17 五调：两行模板 =「文字行吸掉多余高度 + 底栏贴底」。
+	   列表容器用 `grid-auto-rows: 1fr` 把所有卡拉到同一高度（= 最高那张）后，
+	   若这里仍是两条隐式 auto 行，网格的 `align-content: stretch` 会把多出来的高度
+	   **平分**给文字行和底栏行 ⇒ 底栏浮在半空、且高度不同的卡底栏位置各不相同。
+	   写成 `1fr auto` 后：多余高度全部进第 1 行（文字块在其中垂直居中，即用户要的
+	   「没内容的地方留空」），底栏永远咬在卡片底部。
+	   ⚠️ 第 2 行必须是 `auto` 不能是 `1fr`：底栏只有 24px 高的几枚按钮。 */
+	grid-template-rows: 1fr auto;
+	padding: 13px;
 	border: 0;
 	border-radius: 8px;
 	background: var(--background-primary);
@@ -7847,7 +8090,11 @@ body.theme-dark {
 .unreader-card-main,
 .unreader-note-body {
 	align-self: stretch;
-	justify-content: center;
+	/* 2026-10-17 五调：`center` → `flex-start`。卡片被列表拉到统一高度后，居中会让
+	   每张卡的标题起始位置各不相同（内容多的卡标题贴着上沿、内容少的卡标题悬在正中），
+	   看着反而**更不齐**；顶对齐才是「留白全部堆在内容下面」= 用户要的「没内容的地方
+	   留空」。三条选择器只有这一个共同声明，改一处三类同步。 */
+	justify-content: flex-start;
 }
 
 /* RSS 卡片的文字包裹层（书架 / 笔记沿用各自的 `-body`，DOM 结构不用动）。 */
@@ -7869,8 +8116,10 @@ body.theme-dark {
 	align-items: center;
 	gap: 8px;
 	min-width: 0;
-	padding-top: 7px;
-	border-top: 1px solid color-mix(in srgb, var(--background-modifier-border) 68%, transparent);
+	/* 2026-10-17：底栏与正文之间**不再有分隔线**（用户原话：「把按钮区域和内容标题
+	   区域之中的横线去掉」）。只留 4px 呼吸间距 —— 底栏是「进度 + 几个图标钮」，
+	   一条横线在这里只是把本来就矮的一条带子又切成两层。 */
+	padding-top: 4px;
 }
 
 /* 底栏只允许两个在流内的孩子：进度环（第 1 个）与动作钮（最后 1 个）。
@@ -8068,10 +8317,11 @@ body.theme-dark {
 .unreader-card-thumb {
 	grid-column: 2;
 	grid-row: 1;
-	/* **保持比例**是硬要求（2026-10-13 用户 wireframe）：固定 54×72，在第一行里垂直居中。
-	   随卡片拉高会把图拉成细长条、`cover` 裁得只剩中间一条；第一行高度由「标题+简介
-	   （各自钳 2 行）」决定，正常恰好 ≈72px 与图齐高，文字比图矮时由上面的居中规则兜住。 */
-	align-self: center;
+	/* **保持比例**是硬要求（2026-10-13 用户 wireframe）：固定 54×72。
+	   2026-10-17 五调：`center` → `start`。卡片被列表拉到统一高度后第 1 行会变高，
+	   图若仍居中就会比顶对齐的文字低十几像素、像往下坠；顶对齐后图顶与标题顶同在
+	   一条线上，多出来的高度全落在图的下方。图本身尺寸不变（不随行高拉伸）。 */
+	align-self: start;
 	/* 与文字之间的 10px 让位（不用容器的 column-gap，理由见统一外壳段）：它只在本列真的
 	   存在时才占位，塌成 0px 时文字能拿到完整的 padding 内宽度。 */
 	margin-left: 10px;
@@ -8445,3 +8695,799 @@ body:not(.is-phone) .unreader-md-root .unreader-anno-panel {
    现在「跟着页首走」的是进度条 + 灯绳两个元素，抽屉 / 搜索面板仍冻结。
    落点由 mdOverlay.syncProgressTop 写下的 --ur-progress-top 统一负责
    （跟随值：隐藏态 = 0；手机悬浮导航仍是 0），此处不再需要任何 CSS 兜底。 */
+
+/* ---------- Obsidian 原生侧栏：透明底、贴边列表 ----------
+   仅由 UNreaderSidebarView.contentEl 带这个作用域。阅读器正文抽屉、Markdown 叠加层、
+   弹窗和其它插件继续使用各自现有皮肤。这里把旧抽屉的卡片式布局还原成侧栏列表：
+   盒子与列表铺满宿主，文字和触控内容保留少量内距，背景透出 Obsidian 侧栏底色。 */
+.workspace-leaf-content .view-content.unreader-native-sidebar {
+	box-sizing: border-box;
+	width: 100%;
+	height: 100%;
+	min-width: 0;
+	min-height: 0;
+	margin: 0;
+	padding: 0;
+	background: transparent !important;
+	border: 0 !important;
+	box-shadow: none !important;
+	color: var(--text-normal);
+	overflow: hidden;
+}
+
+body.is-phone .mod-root .workspace-leaf-content .view-content.unreader-native-sidebar,
+body.is-tablet .mod-root .workspace-leaf-content .view-content.unreader-native-sidebar {
+	margin-top: 0;
+	padding: 0;
+}
+
+.unreader-native-sidebar > .unreader-anno-panel,
+.unreader-native-sidebar > .unreader-anno-panel.is-open {
+	position: relative;
+	inset: auto;
+	display: flex;
+	flex: 1 1 auto;
+	width: 100%;
+	max-width: none;
+	min-width: 0;
+	min-height: 0;
+	height: 100%;
+	margin: 0;
+	padding: 0;
+	border: 0;
+	border-radius: 0;
+	background: transparent !important;
+	box-shadow: none;
+	transform: none;
+	transition: none;
+	overflow: hidden;
+}
+
+/* 深色抽屉的全局 is-open 规则会重新加回浮层阴影；原生侧栏由 Obsidian 宿主承载，外层不抬起。 */
+body.theme-dark .unreader-native-sidebar > .unreader-anno-panel.is-open {
+	background: transparent;
+	border: 0 !important;
+	box-shadow: none !important;
+}
+
+.unreader-native-sidebar .unreader-toc-header {
+	position: relative;
+	top: auto;
+	flex: 0 0 auto;
+	min-width: 0;
+	margin: 0;
+	padding: 4px 0;
+	background: transparent;
+	color: var(--text-normal);
+	border-bottom: 1px solid var(--background-modifier-border);
+}
+
+.unreader-native-sidebar > .unreader-anno-panel > .unreader-toc-header {
+	background: transparent;
+}
+
+.unreader-native-sidebar .unreader-anno-title {
+	padding-inline: 8px;
+}
+
+.unreader-native-sidebar .unreader-toc-header-right {
+	gap: 0;
+}
+
+.unreader-native-sidebar .unreader-anno-mode-switch {
+	gap: 0;
+	padding: 0;
+	border-radius: 0;
+	background: transparent;
+}
+
+.unreader-native-sidebar .unreader-anno-mode-btn {
+	width: 32px;
+	height: 32px;
+	border-radius: var(--radius-s);
+	background: transparent;
+	box-shadow: none;
+	color: var(--icon-color, var(--text-muted));
+}
+
+.unreader-native-sidebar .unreader-anno-mode-btn:hover {
+	background: var(--background-modifier-hover);
+	color: var(--icon-color-hover, var(--text-normal));
+}
+
+.unreader-native-sidebar .unreader-anno-mode-btn.is-active,
+.unreader-native-sidebar .unreader-anno-mode-btn.is-active:hover {
+	background: var(--background-modifier-hover);
+	box-shadow: inset 0 -2px var(--interactive-accent);
+	color: var(--text-accent);
+}
+
+.unreader-native-sidebar .unreader-anno-back {
+	margin: 0;
+	color: var(--icon-color, var(--text-muted));
+}
+
+.unreader-native-sidebar .unreader-anno-back:hover {
+	background: var(--background-modifier-hover);
+	color: var(--icon-color-hover, var(--text-normal));
+}
+
+.unreader-native-sidebar .unreader-toc-scroll {
+	flex: 1 1 auto;
+	width: 100%;
+	min-width: 0;
+	min-height: 0;
+	margin: 0;
+	padding: 0;
+	background: transparent;
+	overflow-x: hidden;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+}
+
+/* 各页工具栏的外沿与侧栏边界对齐；文字与图标的点击盒仍保有自己的内距。 */
+.unreader-native-sidebar .unreader-shelf-toolbar {
+	min-width: 0;
+	margin: 4px 0;
+	padding: 0;
+}
+
+.unreader-native-sidebar .unreader-shelf-actions,
+.unreader-native-sidebar .unreader-feed-actions {
+	gap: 2px;
+}
+
+.unreader-native-sidebar .unreader-shelf-sort {
+	max-width: 112px;
+	border-color: var(--background-modifier-border);
+	border-radius: var(--radius-s);
+	background-color: transparent;
+	box-shadow: none;
+	color: var(--text-normal);
+}
+
+.unreader-native-sidebar .unreader-shelf-group-title,
+.unreader-native-sidebar .unreader-note-group-title {
+	margin: 0;
+	padding: 7px 8px 5px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	letter-spacing: 0;
+	text-transform: none;
+}
+
+.unreader-native-sidebar .unreader-shelf-group,
+.unreader-native-sidebar .unreader-note-group,
+.unreader-native-sidebar .unreader-feed-list {
+	gap: 0;
+	margin: 0;
+	padding: 0 0 6px;
+	background: transparent;
+}
+
+.unreader-native-sidebar .unreader-feed-toolbar {
+	gap: 6px;
+	margin: 0;
+	padding: 6px 0 4px;
+	background: transparent;
+}
+
+.unreader-native-sidebar .unreader-feed-source-btn {
+	min-width: 0;
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent !important;
+	box-shadow: none !important;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	color: var(--text-normal);
+}
+
+.unreader-native-sidebar .unreader-feed-source-btn:hover:not(:disabled) {
+	background: var(--background-modifier-hover) !important;
+	box-shadow: none !important;
+	color: var(--text-normal);
+}
+
+.unreader-native-sidebar .unreader-feed-filter {
+	gap: 2px;
+	margin: 0;
+	padding: 0;
+}
+
+.unreader-native-sidebar .unreader-feed-filter-btn,
+.unreader-native-sidebar .unreader-feed-filter-btn:hover,
+.unreader-native-sidebar .unreader-feed-filter-btn.is-active,
+.unreader-native-sidebar .unreader-feed-filter-btn.is-active:hover {
+	min-width: 0;
+	min-height: 32px;
+	padding: 0 6px;
+	border: 0 !important;
+	border-radius: var(--radius-s);
+	background: transparent !important;
+	box-shadow: none !important;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	color: var(--text-muted);
+	font-weight: 400;
+	text-overflow: ellipsis;
+	overflow: hidden;
+}
+
+.unreader-native-sidebar .unreader-feed-filter-btn:hover {
+	background: var(--background-modifier-hover) !important;
+	color: var(--text-normal);
+}
+
+.unreader-native-sidebar .unreader-feed-filter-btn.is-active,
+.unreader-native-sidebar .unreader-feed-filter-btn.is-active:hover {
+	background: var(--background-modifier-hover) !important;
+	box-shadow: inset 0 -2px var(--interactive-accent) !important;
+	color: var(--text-accent);
+	font-weight: 600;
+}
+
+.unreader-native-sidebar .unreader-feed-source-btn:focus-visible,
+.unreader-native-sidebar .unreader-feed-filter-btn:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus);
+	outline-offset: -2px;
+}
+
+/* 书架 / RSS / 笔记卡片仍保留独立边框和阴影；外围面板透明，卡片由 Obsidian
+   侧栏底色承载。卡片外沿贴齐列表，文字留 8px 内距；所有描边和投影都取宿主主题值。 */
+.unreader-native-sidebar .unreader-shelf-card,
+.unreader-native-sidebar .unreader-feed-card,
+.unreader-native-sidebar .unreader-note-card {
+	min-width: 0;
+	/* 左右各留 8px（2026-10-17 二调）：列表容器左右无内距，卡片描边原来直接压在
+	   侧栏左右边界线上，默认主题下两条线叠在一起（用户报「看起来不好看」）。
+	   首版给了 4px，用户反馈「太拥挤」⇒ 加到 8px。
+	   8px 是与标注行**视觉对齐**后的值，不是拍脑袋：`.unreader-anno-list` 自带
+	   `padding: 0 4px` + `.unreader-anno-row` 的 `margin: 4px 4px 8px` = 标注行描边
+	   离边线也是 8px。同一侧栏里两种缩进会看得出错位，所以以标注行为准。
+	   上下仍是 4px（用户只提左右）。 */
+	margin: 4px 8px;
+	/* 2026-10-17 三调：原 `8px 0` 左右内距是 **0** —— 标题 / 缩略图 / 底栏动作钮
+	   全部直接压在卡片描边上（用户报「内容和边框之间太拥挤」）。左右补到 10px，
+	   与上下同值；内容距侧栏边线 = margin 8 + padding 10 = 18px。 */
+	padding: 10px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 8px);
+	background: transparent;
+	box-shadow: none;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	transform: none;
+	transition: border-color 120ms ease, outline-color 120ms ease;
+}
+
+.unreader-native-sidebar .unreader-shelf-card:hover,
+.unreader-native-sidebar .unreader-feed-card:hover,
+.unreader-native-sidebar .unreader-note-card:hover,
+.unreader-native-sidebar .unreader-shelf-card:focus-visible,
+.unreader-native-sidebar .unreader-feed-card:focus-visible,
+.unreader-native-sidebar .unreader-note-card:focus-visible {
+	background: transparent;
+	border-color: var(--background-modifier-border-hover, var(--background-modifier-border));
+	box-shadow: none;
+	transform: none;
+}
+
+.unreader-native-sidebar .unreader-shelf-card:focus-visible,
+.unreader-native-sidebar .unreader-feed-card:focus-visible,
+.unreader-native-sidebar .unreader-note-card:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus, var(--interactive-accent));
+	outline-offset: 1px;
+}
+
+.unreader-native-sidebar .unreader-shelf-card.is-current,
+.unreader-native-sidebar .unreader-feed-card.is-current {
+	background: transparent;
+	border-color: var(--interactive-accent);
+	box-shadow: inset 2px 0 var(--interactive-accent);
+}
+
+.unreader-native-sidebar .unreader-shelf-body,
+.unreader-native-sidebar .unreader-card-main,
+.unreader-native-sidebar .unreader-note-body {
+	min-width: 0;
+	padding-left: 8px;
+}
+
+.unreader-native-sidebar .unreader-card-thumb {
+	margin-right: 8px;
+	border-radius: var(--radius-s);
+}
+
+.unreader-native-sidebar .unreader-card-foot {
+	min-width: 0;
+	margin-inline: 0;
+	/* 底栏压低（2026-10-17）：原 6px 上内距 + 一条边框让这一条带子占掉近 36px；
+	   现在 2px、无边框，整块只留按钮本身的高度。 */
+	padding: 2px 8px 0;
+	border-top: 0;
+	/* 侧栏动作组会清零自身 margin；用两端分布保证读数留左、动作组贴右。 */
+	justify-content: space-between;
+}
+
+.unreader-native-sidebar .unreader-shelf-card-actions,
+.unreader-native-sidebar .unreader-note-actions,
+.unreader-native-sidebar .unreader-feed-card-actions {
+	gap: 2px;
+	margin: 0;
+}
+
+.unreader-native-sidebar .unreader-shelf-more,
+.unreader-native-sidebar .unreader-shelf-pin,
+.unreader-native-sidebar .unreader-note-copy,
+.unreader-native-sidebar .unreader-note-reveal,
+.unreader-native-sidebar .unreader-note-pin {
+	/* 24px：与共享按钮 `.unreader-card-action` 同尺寸（2026-10-17 底栏压低，
+	   原来这条 28px 会盖过共享按钮，导致侧栏里整条底栏更厚）。 */
+	width: 24px;
+	height: 24px;
+	border-radius: var(--radius-s);
+	background: transparent;
+	box-shadow: none;
+	color: var(--icon-color, var(--text-muted));
+	opacity: 1;
+}
+
+.unreader-native-sidebar .unreader-shelf-more:hover,
+.unreader-native-sidebar .unreader-shelf-pin:hover,
+.unreader-native-sidebar .unreader-note-copy:hover,
+.unreader-native-sidebar .unreader-note-reveal:hover,
+.unreader-native-sidebar .unreader-note-pin:hover {
+	background: var(--background-modifier-hover);
+	color: var(--icon-color-hover, var(--text-normal));
+}
+
+.unreader-native-sidebar .unreader-shelf-pin.is-active,
+.unreader-native-sidebar .unreader-note-pin.is-pinned,
+.unreader-native-sidebar .unreader-feed-inline-action.is-starred,
+.unreader-native-sidebar .unreader-feed-inline-action.is-saved {
+	background: var(--background-modifier-hover) !important;
+	color: var(--text-accent);
+}
+
+.unreader-native-sidebar .unreader-feed-card .unreader-feed-inline-action {
+	border: 0;
+	border-radius: var(--radius-s);
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--icon-color, var(--text-muted));
+}
+
+.unreader-native-sidebar .unreader-feed-card .unreader-feed-inline-action:hover {
+	background: var(--background-modifier-hover) !important;
+	box-shadow: none !important;
+	color: var(--icon-color-hover, var(--text-normal));
+}
+
+/* 标注页同样使用行式列表，不保留旧抽屉里的白卡、渐变书签块和抬升阴影。 */
+.unreader-native-sidebar .unreader-anno-list {
+	margin: 0;
+	padding: 0 0 6px;
+	gap: 0;
+}
+
+.unreader-native-sidebar .unreader-anno-section {
+	margin: 0;
+	padding: 8px;
+	color: var(--text-muted);
+	font-size: var(--font-ui-smaller);
+	font-weight: 600;
+	letter-spacing: 0;
+	text-transform: none;
+}
+
+.unreader-native-sidebar .unreader-anno-row,
+.unreader-native-sidebar .unreader-anno-row--bookmark,
+.unreader-native-sidebar .unreader-anno-row--bookmark.is-audio-bookmark {
+	min-width: 0;
+	margin: 4px 4px 8px;
+	padding: 8px 8px 8px 22px;
+	border: 1px solid var(--background-modifier-border);
+	border-radius: var(--radius-m, 8px);
+	background: transparent;
+	box-shadow: none;
+	backdrop-filter: none;
+	-webkit-backdrop-filter: none;
+	transform: none;
+	color: var(--text-normal);
+}
+
+.unreader-native-sidebar .unreader-anno-row:hover,
+.unreader-native-sidebar .unreader-anno-row:focus-visible {
+	background: var(--background-modifier-hover);
+	box-shadow: none;
+	transform: none;
+}
+
+.unreader-native-sidebar .unreader-anno-row:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus, var(--interactive-accent));
+	outline-offset: 1px;
+}
+
+.unreader-native-sidebar .unreader-anno-row:active {
+	background: var(--background-modifier-hover);
+	box-shadow: none;
+	transform: none;
+}
+
+.unreader-native-sidebar .unreader-anno-row--bookmark,
+.unreader-native-sidebar .unreader-anno-row--bookmark.is-audio-bookmark {
+	border-color: var(--background-modifier-border);
+	background: transparent;
+}
+
+.unreader-native-sidebar .unreader-anno-row--bookmark:hover,
+.unreader-native-sidebar .unreader-anno-row--bookmark.is-audio-bookmark:hover {
+	background: var(--background-modifier-hover);
+}
+
+.unreader-native-sidebar .unreader-anno-row--highlight {
+	border-color: var(--background-modifier-border);
+	background: transparent;
+}
+
+/* 原生侧栏每条书签/高亮各自成卡，标题与页面操作区仍保持开放列表。 */
+.unreader-native-sidebar .unreader-anno-list {
+	padding: 0 4px 6px;
+}
+
+.unreader-native-sidebar .unreader-note-group {
+	overflow-y: auto;
+}
+
+.unreader-native-sidebar .unreader-shelf-card-actions,
+.unreader-native-sidebar .unreader-note-actions,
+.unreader-native-sidebar .unreader-feed-card-actions {
+	flex-wrap: wrap;
+	min-width: 0;
+}
+
+.unreader-native-sidebar .unreader-card-annotations {
+	/* `flex-basis` 负责「不许被窄侧栏压缩」；不再写 `min-width: … !important` ——
+	   它会盖掉 `@media (hover: none)` 那条 28px 触控目标（2026-10-17）。 */
+	flex: 0 0 24px !important;
+	white-space: nowrap;
+	line-height: 1;
+}
+
+.unreader-native-sidebar .unreader-anno-page {
+	border-radius: var(--radius-s);
+	background: var(--background-modifier-hover);
+	color: var(--text-muted);
+}
+
+/* ---------- 书籍 / RSS / Markdown 卡片共享动作按钮 ----------
+   固定盒尺寸、图标尺寸、状态和焦点语义走一个样式入口。!important 保留 RSS 在官方
+   手机/平板 button 皮肤下的盒尺寸防护，并避免窄侧栏收缩图标。 */
+.unreader-card-action {
+	box-sizing: border-box;
+	display: inline-flex;
+	flex: 0 0 24px;
+	align-items: center;
+	justify-content: center;
+	width: 24px !important;
+	min-width: 24px !important;
+	max-width: 24px !important;
+	height: 24px !important;
+	min-height: 24px;
+	padding: 0 !important;
+	border: 0 !important;
+	border-radius: 5px;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--icon-color, var(--text-faint));
+	opacity: 1;
+	font-size: var(--font-ui-smaller, 12px);
+	line-height: 1;
+	cursor: pointer;
+	appearance: none;
+	-webkit-appearance: none;
+	transition: color 120ms ease, background-color 120ms ease;
+}
+
+/* UNmemos 卡片图标钮的最终规格：桌面 22/14，移动 32/14；静息透明无框，
+   悬停与键盘聚焦只给语义 hover 底色。尺寸 !important 用于压住 Obsidian 的 button 皮肤。 */
+.unreader-card-action,
+.unreader-native-sidebar .unreader-card-action,
+.unreader-feed-card .unreader-card-action {
+	width: 22px !important;
+	min-width: 22px !important;
+	max-width: 22px !important;
+	height: 22px !important;
+	min-height: 22px !important;
+	flex: 0 0 22px;
+	border: 0 !important;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--icon-color, var(--text-muted));
+}
+
+.unreader-card-action .svg-icon {
+	width: 14px !important;
+	height: 14px !important;
+	min-width: 14px;
+	min-height: 14px;
+	flex: 0 0 14px;
+}
+
+.unreader-feed-card .unreader-card-action .svg-icon {
+	width: 14px !important;
+	height: 14px !important;
+	min-width: 14px !important;
+	min-height: 14px !important;
+}
+
+.unreader-card-action:hover:not(:disabled),
+.unreader-card-action:focus-visible:not(:disabled),
+.unreader-card-action[aria-pressed="true"],
+.unreader-card-action.is-starred,
+.unreader-card-action.is-pinned,
+.unreader-card-action.is-saved,
+.unreader-card-action.is-active {
+	background: var(--background-modifier-hover) !important;
+	border-color: transparent !important;
+	box-shadow: none !important;
+	color: var(--icon-color-hover, var(--text-normal));
+}
+
+.unreader-card-menu-open .unreader-shelf-card-actions,
+.unreader-card-menu-open .unreader-note-actions,
+.unreader-card-menu-open .unreader-feed-card-actions {
+	opacity: 1 !important;
+	pointer-events: auto !important;
+}
+
+body.is-mobile .unreader-card-action,
+body.is-phone .unreader-card-action,
+body.is-tablet .unreader-card-action {
+	width: 32px !important;
+	min-width: 32px !important;
+	max-width: 32px !important;
+	height: 32px !important;
+	min-height: 32px !important;
+	flex-basis: 32px;
+}
+
+.unreader-native-sidebar .unreader-shelf-card.is-current,
+.unreader-native-sidebar .unreader-feed-card.is-current {
+	background: var(--background-primary);
+	box-shadow: inset 2px 0 var(--interactive-accent),
+		inset 0 0 0 1px var(--background-modifier-border),
+		0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 8px rgba(15, 23, 42, 0.04);
+}
+
+/* 原生侧栏存在更具体且更靠后的透明卡片规则，故在文件末尾再次落最终卡片表面。 */
+.unreader-native-sidebar .unreader-shelf-card,
+.unreader-native-sidebar .unreader-feed-card,
+.unreader-native-sidebar .unreader-note-card {
+	background: var(--background-primary);
+	border: 0;
+	border-radius: 10px;
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border),
+		0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 8px rgba(15, 23, 42, 0.04);
+	transform: none;
+}
+
+.unreader-native-sidebar .unreader-shelf-card:hover,
+.unreader-native-sidebar .unreader-feed-card:hover,
+.unreader-native-sidebar .unreader-note-card:hover,
+.unreader-native-sidebar .unreader-shelf-card:focus-within,
+.unreader-native-sidebar .unreader-feed-card:focus-within,
+.unreader-native-sidebar .unreader-note-card:focus-within {
+	background: var(--background-primary);
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border-hover, var(--background-modifier-border)),
+		0 6px 18px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+	transform: none;
+}
+
+.unreader-card-action .svg-icon {
+	flex: 0 0 16px;
+	width: 16px !important;
+	height: 16px !important;
+	stroke-width: 1.75px;
+}
+
+.unreader-card-action:hover:not(:disabled),
+.unreader-card-action[aria-pressed="true"],
+.unreader-card-action.is-starred,
+.unreader-card-action.is-pinned,
+.unreader-card-action.is-saved,
+.unreader-card-action.is-active {
+	background: var(--background-modifier-hover) !important;
+	color: var(--text-accent);
+}
+
+.unreader-card-action:active:not(:disabled) {
+	transform: scale(0.94);
+}
+
+.unreader-card-action:focus-visible {
+	outline: 2px solid var(--background-modifier-border-focus, var(--interactive-accent));
+	outline-offset: 1px;
+}
+
+.unreader-card-action:disabled {
+	opacity: 0.42;
+	cursor: default;
+}
+
+.unreader-shelf-card-actions,
+.unreader-note-actions,
+.unreader-feed-card-actions {
+	display: flex;
+	flex: 0 1 auto;
+	flex-wrap: wrap;
+	align-items: center;
+	min-width: 0;
+	max-width: 100%;
+	gap: 2px;
+}
+
+.unreader-native-sidebar .unreader-anno-footer {
+	min-width: 0;
+	background: transparent;
+}
+
+.unreader-native-sidebar .unreader-anno-action,
+.unreader-native-sidebar .unreader-anno-expand,
+.unreader-native-sidebar .unreader-anno-comment-cancel,
+.unreader-native-sidebar .unreader-anno-comment-save {
+	border-radius: var(--radius-s);
+	box-shadow: none;
+}
+
+.unreader-native-sidebar .unreader-anno-action:hover,
+.unreader-native-sidebar .unreader-anno-expand:hover {
+	background: var(--background-modifier-hover);
+}
+
+.unreader-native-sidebar .unreader-anno-pin,
+.unreader-native-sidebar .unreader-anno-resize,
+.unreader-native-sidebar .unreader-anno-resize-w {
+	display: none;
+}
+
+@media (hover: none) {
+	/* 非卡片控件（工具栏 / 标注行的图标钮）仍按 32px 触控目标。 */
+	.unreader-native-sidebar .unreader-clickable-icon,
+	.unreader-native-sidebar .unreader-anno-action,
+	.unreader-native-sidebar .unreader-anno-expand {
+		min-width: 32px;
+		min-height: 32px;
+	}
+	/* 卡片动作钮：**触控档统一 28px**（2026-10-17）。原先只列了书架/笔记那几颗 32px，
+	   漏掉了 RSS 的 `.unreader-feed-inline-action` ⇒ 同一行里书卡按钮 32、RSS 按钮 24，
+	   而且 32px 会把刚压低的底栏重新撑高。`.unreader-card-action` 已覆盖三类卡的全部
+	   动作钮，一条规则即够。
+	   ⚠️ 必须带 `!important`：共享规则的 `min-width: 24px !important` 会赢掉这里无
+	   important 的 28px（同属性之间按 important 判）。至于 `max-width: 24px !important`，
+	   那是**另一个属性**，min 永远压过 max，不影响。 */
+	.unreader-native-sidebar .unreader-card-action {
+		min-width: 28px !important;
+		min-height: 28px !important;
+	}
+}
+
+/* 三类内容卡与 UNmemos 的卡片表面保持同一套语义：primary 面、主题描边、10px 圆角、
+   轻投影。变量仅在本插件卡片作用域内生效，不依赖 UNmemos 插件或其用户设置。 */
+.unreader-shelf-card,
+.unreader-feed-card,
+.unreader-note-card {
+	--unreader-card-surface: var(--background-primary);
+	--unreader-card-border: var(--background-modifier-border);
+	--unreader-card-radius: 10px;
+	--unreader-card-shadow: 0 1px 2px rgba(15, 23, 42, 0.05), 0 2px 8px rgba(15, 23, 42, 0.04);
+	background: var(--unreader-card-surface);
+	border: 0;
+	border-radius: var(--unreader-card-radius);
+	box-shadow: inset 0 0 0 1px var(--unreader-card-border), var(--unreader-card-shadow);
+}
+
+.unreader-shelf-card:hover,
+.unreader-feed-card:hover,
+.unreader-note-card:hover {
+	box-shadow: inset 0 0 0 1px var(--background-modifier-border-hover, var(--background-modifier-border)), 0 6px 18px rgba(15, 23, 42, 0.08), 0 2px 6px rgba(15, 23, 42, 0.05);
+}
+
+/* 鼠标桌面默认收起动作组但保留占位和可访问性；卡片悬停/键盘进入时显现。
+   opacity 而非 visibility，保证按钮仍可 Tab 到达；pointer-events 防止透明按钮截获卡片点击。
+   触屏及混合输入设备保持常显，避免依赖并不稳定的 hover 能力。 */
+@media (hover: hover) and (pointer: fine) and (any-pointer: fine) {
+	.unreader-shelf-card-actions,
+	.unreader-note-actions,
+	.unreader-feed-card-actions {
+		opacity: 0;
+		pointer-events: none;
+		transition: opacity 140ms ease;
+	}
+	.unreader-shelf-card:hover .unreader-shelf-card-actions,
+	.unreader-shelf-card:focus-within .unreader-shelf-card-actions,
+	.unreader-note-card:hover .unreader-note-actions,
+	.unreader-note-card:focus-within .unreader-note-actions,
+	.unreader-feed-card:hover .unreader-feed-card-actions,
+	.unreader-feed-card:focus-within .unreader-feed-card-actions {
+		opacity: 1;
+		pointer-events: auto;
+	}
+}
+
+@media (any-pointer: coarse) {
+	.unreader-shelf-card-actions,
+	.unreader-note-actions,
+	.unreader-feed-card-actions {
+		opacity: 1;
+		pointer-events: auto;
+	}
+}
+
+body.is-phone .unreader-shelf-card-actions,
+body.is-phone .unreader-note-actions,
+body.is-phone .unreader-feed-card-actions,
+body.is-tablet .unreader-shelf-card-actions,
+body.is-tablet .unreader-note-actions,
+body.is-tablet .unreader-feed-card-actions {
+	opacity: 1;
+	pointer-events: auto;
+}
+
+/* 终端覆盖：本块放在旧版 card-action 规则之后，保证 shared spec 真正成为最终计算值。 */
+.unreader-card-action,
+.unreader-native-sidebar .unreader-card-action,
+.unreader-feed-card .unreader-card-action {
+	width: 22px !important;
+	min-width: 22px !important;
+	max-width: 22px !important;
+	height: 22px !important;
+	min-height: 22px !important;
+	flex: 0 0 22px;
+	border-radius: 6px;
+	border: 0 !important;
+	background: transparent !important;
+	box-shadow: none !important;
+	color: var(--icon-color, var(--text-muted));
+}
+
+.unreader-card-action .svg-icon {
+	width: 14px !important;
+	height: 14px !important;
+	min-width: 14px !important;
+	min-height: 14px !important;
+	flex: 0 0 14px;
+}
+
+.unreader-feed-card .unreader-card-action .svg-icon {
+	width: 14px !important;
+	height: 14px !important;
+	min-width: 14px !important;
+	min-height: 14px !important;
+}
+
+.unreader-card-action:hover:not(:disabled),
+.unreader-card-action:focus-visible:not(:disabled),
+.unreader-card-action[aria-pressed="true"],
+.unreader-card-action.is-starred,
+.unreader-card-action.is-pinned,
+.unreader-card-action.is-saved,
+.unreader-card-action.is-active {
+	background: var(--background-modifier-hover) !important;
+	border-color: transparent !important;
+	box-shadow: none !important;
+	color: var(--icon-color-hover, var(--text-normal));
+}
+
+body.is-mobile .unreader-card-action,
+body.is-phone .unreader-card-action,
+body.is-tablet .unreader-card-action {
+	width: 32px !important;
+	min-width: 32px !important;
+	max-width: 32px !important;
+	height: 32px !important;
+	min-height: 32px !important;
+	flex-basis: 32px;
+}

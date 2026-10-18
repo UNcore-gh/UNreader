@@ -66,8 +66,18 @@ export function entryFeedContentQuality(entry: {
 	contentHtml: string
 	contentSource: "feed" | "fulltext"
 	contentQuality?: FeedContentQuality
+	pendingContentHtml?: string
+	pendingContentHash?: string
+	pendingContentSource?: "feed" | "fulltext"
+	pendingContentQuality?: FeedContentQuality
 	kind?: "article" | "audio"
 }): FeedContentQuality {
-	if (entry.contentSource === "fulltext") return "full";
-	return entry.contentQuality ?? evaluateFeedContentQuality(entry.contentHtml);
+	const pendingHtml = entry.pendingContentHtml ?? "";
+	const hasPending = !!pendingHtml.trim() && !!entry.pendingContentHash;
+	const html = hasPending ? pendingHtml : entry.contentHtml;
+	if (!html.trim()) return "empty";
+	const source = hasPending ? entry.pendingContentSource ?? entry.contentSource : entry.contentSource;
+	if (source === "fulltext") return "full";
+	const quality = hasPending ? entry.pendingContentQuality : entry.contentQuality;
+	return quality ?? evaluateFeedContentQuality(html);
 }

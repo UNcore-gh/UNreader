@@ -1,7 +1,7 @@
 /** markdown 阅读视图叠加层 —— 插件不接管 .md 文件，只在 Obsidian **原生**
  *  markdown 阅读视图（`MarkdownView.getMode() === "preview"`）上叠加四件东西：
  *  顶边章节进度条、右缘章节浮动目录条（复用阅读器的 `SideNav`）、沉浸模式会话，
- *  以及只承载插件自身组件的侧边工具栏（星标当前笔记 / 目录条 / 进度条 / 沉浸）。
+ *  以及只承载插件自身组件的侧边工具栏（置顶当前笔记 / 目录条 / 进度条 / 沉浸）。
  *
  *  ## 产品边界（2026-10-01 决策，见 AGENTS.md）
  *
@@ -48,9 +48,11 @@ import { MdAppearancePanel, type MdAppearanceState } from "./mdAppearancePanel";
 import { AIPanel } from "./aiPanel";
 import { TranslationCard } from "./translationCard";
 import { createSidePanel, toggleFeedStarState } from "./sidePanels";
+import type { NativeSidebarContext } from "./sidePanels";
 import { filterSidePanelModes } from "../core/readableFormats";
 import { isMarkdownNoteFile } from "../core/fileGate";
 import { saveFeedEntryAsMarkdown } from "../core/feedNoteSave";
+import { t } from "../core/i18n";
 import type { Bounds } from "./floatingPlacement";
 import { MdSelectionController } from "./mdSelection";
 import { MdAnnotationAdapter } from "./mdAnnotations";
@@ -63,6 +65,7 @@ import { NativeChromeGate } from "./nativeChromeGate";
 import { followHeaderMotion } from "./headerMotion";
 import { PLUGIN_NAV_HIDDEN_CLASS } from "./nativeNavGuard";
 import { bottomBarOverlap, floatingBottomInset, subscribeKeyboardGeometry, usableBottom } from "./keyboardInset";
+import { dispatchNativeContextMenu } from "./nativeContextMenu";
 import type UNreaderPlugin from "../main";
 
 /** 「滚动到多近算抵达本章」的余量（px）：比页首高略大，章标题刚被页首压住时
@@ -133,7 +136,7 @@ export class MdOverlaySession {
 	private sideNav: SideNav | null = null;
 	private railTocBtn: HTMLElement | null = null;
 	private railSideBtn: HTMLElement | null = null;
-	private railStarBtn: HTMLElement | null = null;
+	private railPinBtn: HTMLElement | null = null;
 	private railAppearanceBtn: HTMLElement | null = null;
 	private railAIBtn: HTMLElement | null = null;
 	private railHighlightsBtn: HTMLElement | null = null;
@@ -290,7 +293,7 @@ export class MdOverlaySession {
 		return this.immersed;
 	}
 
-	/** 同一 leaf 内换了文件后，只刷新工具栏状态（星标按钮跟的是当前 file.path），
+	/** 同一 leaf 内换了文件后，只刷新工具栏状态（置顶按钮跟的是当前 file.path），
 	 *  不做整轮设置重放与进度重算 —— 换文件的滚动复位由官方视图负责。 */
 	refreshToolbar(): void {
 		this.syncToolbarButtons();
@@ -498,6 +501,51 @@ export class MdOverlaySession {
 	private async refreshAnnotationList(): Promise<void> {
 		await this.mdAnnotations?.refresh();
 		this.sidePanel?.refreshAnnotations();
+		const context = this.getNativeSidebarContext();
+		if (context) this.plugin.refreshNativeSidebarAnnotations(context.key);
+	}
+
+	async refreshNativeSidebarAnnotations(key: string): Promise<NativeSidebarContext | null> {
+		const context = this.getNativeSidebarContext();
+		if (!context || context.key !== key) return null;
+		await this.mdAnnotations?.refresh();
+		const current = this.getNativeSidebarContext();
+		return current?.key === key ? current : null;
+	}
+
+	/** 当前 Markdown 文件 → 原生侧栏的标注上下文；适配器操作都绑定到这一路径。 */
+	getNativeSidebarContext(): NativeSidebarContext | null {
+		const view = this.view;
+		const file = view?.file;
+		const adapter = this.mdAnnotations;
+		if (!file || !adapter || !isMarkdownNoteFile(this.app, file)) return null;
+		const path = file.path;
+		const key = `markdown:${path}`;
+		const isCurrent = (): boolean => this.currentPath() === path && this.mdAnnotations === adapter;
+		return {
+			key,
+			kind: "markdown",
+			title: file.basename,
+			pickerMode: "notes",
+			markdownPath: path,
+			annotation: {
+				key,
+				data: () => isCurrent() ? adapter.data() : { highlights: [], bookmarks: [] },
+				onJump: (anchor, hint) => {
+					if (!isCurrent()) return;
+					adapter.onJump(anchor, hint);
+					void this.plugin.focusNativeSidebarContent(this.leaf);
+				},
+				onPreview: () => { if (isCurrent()) adapter.onPreview(); },
+				onComment: () => { if (isCurrent()) adapter.onComment(); },
+				onCopyReference: item => { if (isCurrent()) adapter.onCopyReference(item); },
+				onDeleteHighlight: id => { if (isCurrent()) void adapter.onDeleteHighlight(id); },
+				onDeleteBookmark: () => { if (isCurrent()) adapter.onDeleteBookmark(); },
+				onRenameBookmark: () => { if (isCurrent()) adapter.onRenameBookmark(); },
+				getPageForAnchor: () => isCurrent() ? adapter.getPageForAnchor() : null,
+				commentEnabled: () => false,
+			},
+		};
 	}
 
 	/** 滚动目标换人（`.markdown-preview-view` ↔ `.cm-scroller`）：摘旧监听、重探、
@@ -565,7 +613,7 @@ export class MdOverlaySession {
 		this.sideNav = null;
 		this.railTocBtn = null;
 		this.railSideBtn = null;
-		this.railStarBtn = null;
+		this.railPinBtn = null;
 		this.railAppearanceBtn = null;
 		this.railAIBtn = null;
 		this.railHighlightsBtn = null;
@@ -645,7 +693,7 @@ export class MdOverlaySession {
 		// 阅读外观（字体 / 字号 / 行距 / 字距）改了要同步进抽屉：与书 / RSS 抽屉共用
 		// 同一枚 syncAppearance，否则 md 侧高亮正文会停在 CSS 默认字号上。
 		try { this.sidePanel?.syncAppearance(s.appearance); } catch { /* ignore */ }
-		// 星标 / 最近阅读索引可能刚变过：抽屉开着就按当前页重绘（同页重绘保留滚动位置）。
+		// 置顶 / 最近阅读索引可能刚变过：抽屉开着就按当前页重绘（同页重绘保留滚动位置）。
 		if (this.sidePanel?.isOpen()) this.sidePanel.setMode(this.sidePanel.getMode());
 		// 分段粒度只影响计算不涉 DOM，现读即可；这里只触发一次立即重算
 		this.requestUpdate();
@@ -666,10 +714,16 @@ export class MdOverlaySession {
 		try { this.sidePanel?.syncAppearance(this.plugin.settings.appearance); } catch { /* ignore */ }
 	}
 
+	/** 界面语言切换后重画当前已打开的 Markdown 外观面板。 */
+	refreshLanguage(): void {
+		this.appearancePanel?.refresh();
+		this.syncToolbarButtons();
+	}
+
 	// ---------- 工具栏 + 面板（与阅读器同一套组件、同一套接线） ----------
 
 	/** 工具栏 = 阅读器那一条**适配后**的结果：能用的都留下，用不了的才去掉。
-	 *  留下：目录 / 侧边栏 / 星标 / 外观 / AI 助手 / 沉浸。
+	 *  留下：目录 / 侧边栏 / 置顶 / 外观 / AI 助手 / 沉浸。
 	 *  去掉：搜索正文（那是书内引擎的搜索，Markdown 用官方 Ctrl+F）、添加书签与阅读进度
 	 *  （单篇笔记很短，记位置没有意义 —— 用户 2026-10-09 的原话）、
 	 *  保存为笔记 / 阅读原文（Feed 专属）、阅读设备（HTML 专属）。
@@ -678,15 +732,15 @@ export class MdOverlaySession {
 		if (!this.sideNav) return;
 		this.railTocBtn = this.sideNav.addIconButton("list", "打开目录", () => this.sideNav?.togglePanel("actions"));
 		this.sideNav.setTocTrigger(this.railTocBtn);
-		this.railSideBtn = this.sideNav.addIconButton("panel-left", "打开侧边栏", () => this.toggleSidePanel());
+		this.railSideBtn = this.sideNav.addIconButton("panel-left", "显示内容列表", () => this.toggleSidePanel());
 		// 直达「本页高亮」：一键打开抽屉并落在标注页（再点且正停在标注页则收起）。
-		this.railHighlightsBtn = this.sideNav.addIconButton("highlighter", "打开本页高亮列表", () => this.toggleAnnotationsPanel());
+		this.railHighlightsBtn = this.sideNav.addIconButton("highlighter", "显示本页高亮列表", () => this.toggleAnnotationsPanel());
 		this.sideNav.addSeparator();
-		this.railStarBtn = this.sideNav.addIconButton("star", "星标当前笔记", () => {
+		this.railPinBtn = this.sideNav.addIconButton("pin", "置顶当前笔记", () => {
 			const path = this.currentPath();
-			if (path) this.plugin.toggleMarkdownNoteStar(path);
+			if (path) this.plugin.toggleMarkdownNotePin(path);
 		});
-		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", "打开阅读外观", () => {
+		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", t("apOpen"), () => {
 			this.appearancePanel?.toggle();
 		});
 		this.railAIBtn = this.sideNav.addIconButton("sparkles", "打开 AI 助手", () => {
@@ -697,7 +751,16 @@ export class MdOverlaySession {
 			if (this.plugin.settings.mdOverlayImmersive === false) return;
 			this.toggleImmersion();
 		});
+		this.sideNav.addIconButton("ellipsis", "打开 Obsidian 原生右键菜单", () => this.openNativeContextMenu());
 		this.syncToolbarButtons();
+	}
+
+	/** Markdown 阅读/编辑容器共用同一原生右键事件；有选区时菜单落在选区上。 */
+	private openNativeContextMenu(): void {
+		const content = this.view?.contentEl;
+		if (!content) return;
+		const target = content.querySelector<HTMLElement>(".markdown-preview-view, .cm-scroller") ?? content;
+		dispatchNativeContextMenu(target, content.ownerDocument.defaultView ?? window);
 	}
 
 	/** 自定义命令按钮同步到侧栏槽与划词条槽（空配置时两槽不进 DOM）。 */
@@ -731,7 +794,11 @@ export class MdOverlaySession {
 			view: () => this.view,
 			jumpTo: (offset, hint) => this.jumpToHighlight(offset, hint),
 			// 删除成功：面板若正开在标注页就按最新源码重算重绘（刷新内部已做开合/页签校验）。
-			onChanged: () => { this.sidePanel?.refreshAnnotations(); },
+			onChanged: () => {
+				this.sidePanel?.refreshAnnotations();
+				const context = this.getNativeSidebarContext();
+				if (context) this.plugin.refreshNativeSidebarAnnotations(context.key);
+			},
 		});
 
 		// 侧边抽屉：与阅读器**同一个组件、同一套接线**。标注页接当前笔记的官方 `==` 高亮
@@ -1245,18 +1312,19 @@ export class MdOverlaySession {
 	 *  · 开着且停在选内容页 → 整条关。
 	 *  与阅读器 `toggleSidePanelOpen` 同语义（用户 2026-10-11 定稿）。 */
 	private toggleSidePanel(): void {
+		if (typeof this.plugin.openSidePanel === "function") {
+			void this.plugin.openSidePanel(undefined, this.getNativeSidebarContext()).then(() => this.syncToolbarButtons());
+			return;
+		}
+		// 旧探针与较早插件宿主的兼容出口；正式插件实例始终走上面的原生侧栏入口。
 		const panel = this.sidePanel;
 		if (!panel) return;
 		const switchToPicker = !panel.isOpen() || panel.getMode() === "annotations";
 		if (switchToPicker) {
-			// 打开前先实测一遍两条让位量，别依赖「此前滚动过 update 已写过」——
-			// 挂载后没滚动就开抽屉，旧 inset 可能缺失或过期，头部/尾部又会被压。
 			this.syncProgressTop();
 			panel.setMode(this.defaultPickerMode());
 			panel.show();
-		} else {
-			panel.hide();
-		}
+		} else panel.hide();
 		this.syncToolbarButtons();
 	}
 
@@ -1272,23 +1340,13 @@ export class MdOverlaySession {
 		return this.lastSideMode;
 	}
 
-	/** 直达当前笔记的「高亮」页：开着且正停在标注页 → 收起；否则打开并切到标注页。
-	 *  数据由 provideAnnotationData 在 setMode/show 时现算，这里不必先喂。 */
+	/** 直达当前笔记的「高亮」页；重复点击不负责收起原生侧栏。 */
 	private async toggleAnnotationsPanel(): Promise<void> {
-		const panel = this.sidePanel;
-		if (!panel) return;
-		if (panel.isOpen() && panel.getMode() === "annotations") {
-			panel.hide();
-		} else {
-			this.syncProgressTop();
-			// 打开前先按文件重读一次权威源码：真机阅读模式下幽灵 editor 不跟随写盘，
-			// 少了这一步，阅读模式里刚划的新高亮进不了列表（见 mdAnnotations.sourceOf）。
-			await this.mdAnnotations?.refresh();
-			panel.setMode("annotations");
-			panel.show();
-		}
+		await this.plugin.openSidePanel("annotations", this.getNativeSidebarContext());
 		this.syncToolbarButtons();
 	}
+
+	syncNativeSidebarToolbarButtons(): void { this.syncToolbarButtons(); }
 
 	/** 图标与无障碍名跟随当前状态；不改变正文/主题样式。 */
 	private syncToolbarButtons(): void {
@@ -1300,10 +1358,10 @@ export class MdOverlaySession {
 		this.railTocBtn?.setAttribute("aria-label", tocLabel);
 		this.railTocBtn?.setAttribute("title", tocLabel);
 
-		const sideOpen = !!this.sidePanel?.isOpen();
-		const sideOnAnnotations = sideOpen && this.sidePanel?.getMode() === "annotations";
-		// 无障碍名读「点下去会发生什么」：高亮页上点它 = 切到内容列表（保留当前笔记）。
-		const sideLabel = !sideOpen ? "打开侧边栏" : (sideOnAnnotations ? "切换到内容列表" : "关闭侧边栏");
+		const nativeMode = typeof this.plugin.getNativeSidebarMode === "function" ? this.plugin.getNativeSidebarMode() : null;
+		const sideOpen = nativeMode !== null;
+		const sideOnAnnotations = nativeMode === "annotations";
+		const sideLabel = "显示内容列表";
 		this.paintToolbarIcon(this.railSideBtn, "panel-left", "侧栏");
 		this.railSideBtn?.toggleClass("is-active", sideOpen);
 		this.railSideBtn?.setAttribute("aria-label", sideLabel);
@@ -1312,22 +1370,22 @@ export class MdOverlaySession {
 		const annoActive = sideOnAnnotations;
 		this.paintToolbarIcon(this.railHighlightsBtn, "highlighter", "高亮");
 		this.railHighlightsBtn?.toggleClass("is-active", annoActive);
-		const highlightsLabel = annoActive ? "关闭本页高亮列表" : "打开当前笔记的高亮列表";
+		const highlightsLabel = "显示当前笔记的高亮列表";
 		this.railHighlightsBtn?.setAttribute("aria-label", highlightsLabel);
 		this.railHighlightsBtn?.setAttribute("title", highlightsLabel);
 
 		const path = this.currentPath();
-		const starred = !!path && this.plugin.isMarkdownNoteStarred(path);
-		this.paintToolbarIcon(this.railStarBtn, "star", "星");
-		this.railStarBtn?.toggleClass("is-active", starred);
-		this.railStarBtn?.toggleClass("is-starred", starred);
-		this.railStarBtn?.setAttribute("aria-label", starred ? "取消星标当前笔记" : "星标当前笔记");
-		this.railStarBtn?.setAttribute("title", starred ? "取消星标当前笔记" : "星标当前笔记");
+		const pinned = !!path && this.plugin.isMarkdownNotePinned(path);
+		this.paintToolbarIcon(this.railPinBtn, pinned ? "pin-off" : "pin", "置顶");
+		this.railPinBtn?.toggleClass("is-active", pinned);
+		this.railPinBtn?.setAttribute("aria-label", pinned ? "取消置顶当前笔记" : "置顶当前笔记");
+		this.railPinBtn?.setAttribute("title", pinned ? "取消置顶当前笔记" : "置顶当前笔记");
+		this.railPinBtn?.setAttribute("aria-pressed", String(pinned));
 
 		const appearanceOpen = !!this.appearancePanel?.isOpen();
 		this.paintToolbarIcon(this.railAppearanceBtn, "sliders-horizontal", "外观");
 		this.railAppearanceBtn?.toggleClass("is-active", appearanceOpen);
-		const appearanceLabel = appearanceOpen ? "关闭阅读外观" : "打开阅读外观";
+		const appearanceLabel = appearanceOpen ? t("apClose") : t("apOpen");
 		this.railAppearanceBtn?.setAttribute("aria-label", appearanceLabel);
 		this.railAppearanceBtn?.setAttribute("title", appearanceLabel);
 
@@ -2459,8 +2517,9 @@ export class MdOverlayManager {
 					&& view.file?.path === file.path) {
 					// 「最近阅读」只在阅读模式记录（编辑 / 源码下是在写，不是在读）
 					if (modeOf(view) === "preview") this.plugin.recordMarkdownNoteOpened(file.path);
-					// 同一 leaf 换文件时 host 不会重建；星标按钮要按新 file.path 重算。
+					// 同一 leaf 换文件时 host 不会重建；置顶按钮要按新 file.path 重算。
 					this.sessions.get(current)?.refreshToolbar();
+					this.plugin.updateNativeSidebarContext(this.sessions.get(current)?.getNativeSidebarContext() ?? null, current);
 				}
 			}, 0);
 		}));
@@ -2493,6 +2552,23 @@ export class MdOverlayManager {
 		for (const session of this.sessions.values()) session.applySettings();
 	}
 
+	getNativeSidebarContext(leaf?: WorkspaceLeaf | null): NativeSidebarContext | null {
+		const target = leaf ?? tryGetActiveLeaf(this.app.workspace);
+		return target ? this.sessions.get(target)?.getNativeSidebarContext() ?? null : null;
+	}
+
+	async refreshNativeSidebarContext(key: string): Promise<NativeSidebarContext | null> {
+		for (const session of this.sessions.values()) {
+			const context = session.getNativeSidebarContext();
+			if (context?.key === key) return session.refreshNativeSidebarAnnotations(key);
+		}
+		return null;
+	}
+
+	syncNativeSidebarToolbarButtons(): void {
+		for (const session of this.sessions.values()) session.syncNativeSidebarToolbarButtons();
+	}
+
 	/** 阅读外观（字体 / 字号 / 行距 / 字距）变化后调用：全部 md 会话即时重刷抽屉排版。
 	 *
 	 *  只有这一处专门给「外观」用（`applySettingsAll` 是设置页三开关的全量重算）。
@@ -2501,6 +2577,11 @@ export class MdOverlayManager {
 	 *  （用户 2026-10-12 报障）。与阅读器那针一样落在同一次刷新漏斗里。 */
 	refreshAppearanceAll(): void {
 		for (const session of this.sessions.values()) session.refreshAppearance();
+	}
+
+	/** 界面语言切换后刷新所有已挂载 Markdown 会话中仍打开的外观面板。 */
+	refreshLanguageAll(): void {
+		for (const session of this.sessions.values()) session.refreshLanguage();
 	}
 
 	/** 自定义按钮配置变更后：全部会话的侧栏槽与划词条槽即时重推。 */
@@ -2539,6 +2620,7 @@ export class MdOverlayManager {
 			if (!leaves.includes(leaf) || !leaf.view) {
 				session.unmount();
 				this.sessions.delete(leaf);
+				this.plugin.forgetNativeSidebarContext(leaf);
 			}
 		}
 		for (const leaf of leaves) {
@@ -2559,7 +2641,12 @@ export class MdOverlayManager {
 				// 叠加层整体退场（含未退出的沉浸会话）
 				session.unmount();
 				this.sessions.delete(leaf);
+				this.plugin.forgetNativeSidebarContext(leaf);
 			}
+		}
+		const contextLeaf = activeLeaf ?? tryGetActiveLeaf(this.app.workspace);
+		if (contextLeaf && this.isOverlayLeaf(contextLeaf)) {
+			this.plugin.updateNativeSidebarContext(this.sessions.get(contextLeaf)?.getNativeSidebarContext() ?? null, contextLeaf);
 		}
 		// layout-change 也会覆盖官方导航形态变化：已挂载会话重跑一次几何同步。
 		if (!activeLeaf) this.refreshAllLayouts();

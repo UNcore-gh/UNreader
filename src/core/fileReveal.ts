@@ -8,45 +8,40 @@
  *  ① **应用内文件浏览器**（`internalPlugins.getPluginById("file-explorer").revealInFolder`）——
  *     官方右键菜单里的「在文件浏览器中显示」走的就是它；**桌面与移动端都有**，展开侧栏
  *     并把那一行滚进视野，用户在应用里就能看到「这篇在哪个文件夹」。
- *  ② **系统文件管理器**（`App.showInFolder`）—— 桌面端在 Finder / 资源管理器里选中该文件；
- *     移动端该方法是 no-op（运行期第一句就是 `if (isDesktopApp)`）。
- *
- *  所以顺序是「先在文件浏览器里定位、再退到系统」，而 ① 取不到（老版本 / 内部插件停用 /
- *  探查抛错）才走 ②；两条都拿不到就**什么都不做** —— 这是「定位」，失败没有可执行的动作，
- *  弹一条报错只会打扰（与笔记卡的复制路径同一姿态）。 */
+ *  只走应用内文件浏览器。运行期入口不可用、文件不存在或调用失败时，明确告知用户；
+ *  不把打开系统文件管理器伪装成应用内定位成功。 */
 
-import { TFile, type App } from "obsidian";
+import { Notice, TFile, type App } from "obsidian";
 
 /** 运行期才有、公开 typings 里没有的那两块（见文件头）。全部按可选能力探测。 */
 interface FileExplorerBridge {
 	revealInFolder?: (file: TFile) => void
+	instance?: {
+		revealInFolder?: (file: TFile) => void
+	}
 }
 interface InternalPluginsBridge {
 	getPluginById?: (id: string) => FileExplorerBridge | null
 }
 interface AppWithReveal extends App {
 	internalPlugins?: InternalPluginsBridge
-	showInFolder?: (path: string) => unknown
 }
 
-export function revealFileInFolder(app: App, path: string): void {
+export function revealFileInFolder(app: App, path: string): boolean {
 	const file = app.vault.getFileByPath(path);
-	if (!(file instanceof TFile)) return;
+	if (!(file instanceof TFile)) { new Notice("文件已移动或删除，请刷新侧栏"); return false; }
 	const bridge = app as AppWithReveal;
 	// ① 应用内文件浏览器（桌面 + 移动端）。
 	try {
 		const explorer = bridge.internalPlugins?.getPluginById?.("file-explorer");
-		if (explorer?.revealInFolder) {
-			explorer.revealInFolder(file);
-			return;
+		const revealInFolder = explorer?.revealInFolder ?? explorer?.instance?.revealInFolder;
+		if (revealInFolder) {
+			revealInFolder.call(explorer?.instance ?? explorer, file);
+			return true;
 		}
 	} catch {
-		/* 内部结构变了 → 退到下一条，不打断调用方 */
+		/* 内部结构变化会由下方的明确失败提示接住 */
 	}
-	// ② 系统文件管理器（仅桌面；移动端静默无操作）。
-	try {
-		bridge.showInFolder?.(file.path);
-	} catch {
-		/* 两条都没有：什么都不做 */
-	}
+	new Notice("当前 Obsidian 文件浏览器无法定位此文件；请检查文件浏览器是否启用");
+	return false;
 }

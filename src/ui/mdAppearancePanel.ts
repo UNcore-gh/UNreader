@@ -14,6 +14,8 @@
  *  回调），点面板外关闭。这里**不做**鼠标移开自动关 —— Markdown 阅读时鼠标常在正文里移动，
  *  跟着关会一直闪；触屏本来也只靠「点按钮开、点外面关」。 */
 
+import { t, type StrKey } from "../core/i18n";
+
 export interface MdAppearanceState {
 	/** 右缘浮动目录条显隐（`mdOverlayShowTocRail`） */
 	showTocRail: boolean
@@ -38,14 +40,14 @@ export interface MdAppearancePanelOptions {
 	onOpenChange?: (open: boolean) => void
 }
 
-const SCOPE_OPTIONS: Array<{ value: number; label: string }> = [
-	{ value: 0, label: "全文一根进度条" },
-	{ value: 1, label: "按一级标题分段" },
-	{ value: 2, label: "按二级标题分段" },
-	{ value: 3, label: "按三级标题分段" },
-	{ value: 4, label: "按四级标题分段" },
-	{ value: 5, label: "按五级标题分段" },
-	{ value: 6, label: "按六级标题分段" },
+const SCOPE_OPTION_KEYS: Array<{ value: number; labelKey: StrKey }> = [
+	{ value: 0, labelKey: "mdApWhole" },
+	{ value: 1, labelKey: "mdApHeading1" },
+	{ value: 2, labelKey: "mdApHeading2" },
+	{ value: 3, labelKey: "mdApHeading3" },
+	{ value: 4, labelKey: "mdApHeading4" },
+	{ value: 5, labelKey: "mdApHeading5" },
+	{ value: 6, labelKey: "mdApHeading6" },
 ];
 
 export class MdAppearancePanel {
@@ -110,23 +112,26 @@ export class MdAppearancePanel {
 		const prevScroll = this.containerEl.querySelector(".unreader-appearance-scroll")?.scrollTop ?? 0;
 		this.containerEl.empty();
 		const scrollEl = this.containerEl.createDiv({ cls: "unreader-appearance-scroll" });
-		scrollEl.createDiv({ cls: "unreader-appearance-header" }).createSpan({ text: "阅读外观" });
+		scrollEl.createDiv({ cls: "unreader-appearance-header" }).createSpan({ text: t("apTitle") });
 
 		// 说明为什么这里比阅读器那块面板短：正文排版归 Obsidian，插件只管自己的组件。
 		scrollEl.createDiv({
 			cls: "unreader-appearance-hint",
-			text: "Markdown 的字体 / 行距 / 页宽 / 背景由 Obsidian 与主题控制，这里只放插件自己的阅读组件。",
+			text: t("mdApDescription"),
 		});
 
 		const s = this.options.read();
-		scrollEl.appendChild(this.toggleRow("浮动目录条", s.showTocRail, v => this.options.write({ showTocRail: v })));
-		scrollEl.appendChild(this.toggleRow("章节进度条", s.showProgress, v => this.options.write({ showProgress: v })));
-		scrollEl.appendChild(this.selectRow("进度分段", SCOPE_OPTIONS, s.progressScope, v => this.options.write({ progressScope: v })));
+		scrollEl.appendChild(this.toggleRow(t("apFloatingToc"), s.showTocRail, v => this.options.write({ showTocRail: v })));
+		scrollEl.appendChild(this.toggleRow(t("apChapterProgress"), s.showProgress, v => this.options.write({ showProgress: v })));
+		scrollEl.appendChild(this.selectRow(t("mdApProgressScope"), SCOPE_OPTION_KEYS.map(option => ({
+			value: option.value,
+			label: t(option.labelKey),
+		})), s.progressScope, v => this.options.write({ progressScope: v })));
 
-		scrollEl.createDiv({ cls: "unreader-appearance-header" }).createSpan({ text: "沉浸阅读" });
-		scrollEl.appendChild(this.toggleRow("提供沉浸阅读命令", s.immersive, v => this.options.write({ immersive: v })));
-		scrollEl.appendChild(this.toggleRow("沉浸时保留浮动目录条", s.immersionKeepToc, v => this.options.write({ immersionKeepToc: v })));
-		scrollEl.appendChild(this.toggleRow("沉浸时保留章节进度条", s.immersionKeepProgress, v => this.options.write({ immersionKeepProgress: v })));
+		scrollEl.createDiv({ cls: "unreader-appearance-header" }).createSpan({ text: t("apFullImmersion") });
+		scrollEl.appendChild(this.toggleRow(t("mdApImmersionCommand"), s.immersive, v => this.options.write({ immersive: v })));
+		scrollEl.appendChild(this.toggleRow(t("mdApKeepToc"), s.immersionKeepToc, v => this.options.write({ immersionKeepToc: v })));
+		scrollEl.appendChild(this.toggleRow(t("mdApKeepProgress"), s.immersionKeepProgress, v => this.options.write({ immersionKeepProgress: v })));
 
 		if (prevScroll) scrollEl.scrollTop = prevScroll;
 	}

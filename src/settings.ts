@@ -168,6 +168,7 @@ export class UNreaderSettingTab extends PluginSettingTab {
 
 		// 界面语言放最前面：它是「其余所有文案」的开关，用户改语言后本页要整页
 		// 重画，放在页首才不会让人误以为下半页没跟着变。
+		heading(t("secGeneral"));
 		blocks.push({
 			kind: "custom",
 			name: t("langLabel"),
@@ -198,32 +199,6 @@ export class UNreaderSettingTab extends PluginSettingTab {
 						button.setButtonText(t("dataFolderUseDefault")).onClick(() => void this.chooseDataFolder(null)),
 					);
 				}
-			},
-		);
-
-		heading(t("secReading"));
-
-		row(
-			t("pinThresholdName"),
-			t("pinThresholdDesc"),
-			setting => {
-				setting
-					.addSlider(sl =>
-						keepSliderValueTooltip(sl
-							.setLimits(400, 1200, 10)
-							.setValue(this.plugin.settings.pinThreshold))
-							.onChange(v => {
-								this.plugin.settings.pinThreshold = v;
-								this.plugin.scheduleSave();
-							}),
-					)
-					.addButton(btn =>
-						btn.setIcon("rotate-ccw").setTooltip(t("pinThresholdReset")).onClick(() => {
-							this.plugin.settings.pinThreshold = 720;
-							void this.plugin.persistData();
-							this.renderSettings();
-						}),
-					);
 			},
 		);
 

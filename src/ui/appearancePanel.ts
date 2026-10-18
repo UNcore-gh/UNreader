@@ -1,6 +1,7 @@
 import { Notice } from "obsidian";
 import { AppearanceSettings, AppearancePreset, DEFAULT_APPEARANCE, normalizeHexColor, activeBackground, activeTextColor, activeTheme, activeBackgroundImage } from "../types";
 import { resolveAppearance } from "../core/engineAdapter";
+import { t, tf } from "../core/i18n";
 
 /** 内置 lucide 图标（不依赖 Obsidian 图标注册表，保证全平台渲染）。
  *  用结构化 path/polyline 定义 + createElementNS 逐个建节点——不能用 svg.innerHTML：
@@ -262,7 +263,7 @@ export class AppearancePanel {
 		const scrollEl = this.containerEl.createDiv({ cls: "unreader-appearance-scroll" });
 
 		const header = scrollEl.createDiv({ cls: "unreader-appearance-header" });
-		header.createSpan({ text: "阅读外观" });
+		header.createSpan({ text: t("apTitle") });
 
 		// 预设：多套样式一键切换
 		scrollEl.appendChild(this.buildPresetRow());
@@ -277,21 +278,21 @@ export class AppearancePanel {
 
 		const resolved = resolveAppearance(this.current);
 		scrollEl.appendChild(
-			this.buildSlider("字号", 12, 28, 0.5, resolved.fontSize, v => this.emit({ fontSize: v }), x => `${x}px`, () => {
+			this.buildSlider(t("apFontSize"), 12, 28, 0.5, resolved.fontSize, v => this.emit({ fontSize: v }), x => `${x}px`, () => {
 				this.emit({ fontSize: null });
 				this.current.fontSize = null;
 				this.render();
 			}),
 		);
 		scrollEl.appendChild(
-			this.buildSlider("左边距", 0, 120, 2, resolved.marginLeft, v => this.emit({ marginLeft: v }), x => `${Math.round(x)}px`, () => {
+			this.buildSlider(t("apMarginLeft"), 0, 120, 2, resolved.marginLeft, v => this.emit({ marginLeft: v }), x => `${Math.round(x)}px`, () => {
 				this.emit({ marginLeft: DEFAULT_APPEARANCE.marginLeft });
 				this.current.marginLeft = null;
 				this.render();
 			}),
 		);
 		scrollEl.appendChild(
-			this.buildSlider("右边距", 0, 120, 2, resolved.marginRight, v => this.emit({ marginRight: v }), x => `${Math.round(x)}px`, () => {
+			this.buildSlider(t("apMarginRight"), 0, 120, 2, resolved.marginRight, v => this.emit({ marginRight: v }), x => `${Math.round(x)}px`, () => {
 				this.emit({ marginRight: DEFAULT_APPEARANCE.marginRight });
 				this.current.marginRight = null;
 				this.render();
@@ -303,18 +304,18 @@ export class AppearancePanel {
 			// 940px 以上的窗口里滑杆从 0 拖到 120 都不改变正文位置 —— 用户读到的是
 			// 「这两个滑杆没用」。实际上边距是**下限**（窄窗口/手机上就完全生效）。
 			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
-			hint.setText("左右边距是下限：窗口够宽时正文列会居中（留白按阅读宽度算），边距要超过那份留白才推得动；窄窗口与手机上完全生效。");
+			hint.setText(t("apMarginHint"));
 		}
 
 		scrollEl.appendChild(
-			this.buildSlider("行距", 1.2, 2.4, 0.05, resolved.lineHeight, v => this.emit({ lineHeight: v }), x => x.toFixed(2), () => {
+			this.buildSlider(t("apLineHeight"), 1.2, 2.4, 0.05, resolved.lineHeight, v => this.emit({ lineHeight: v }), x => x.toFixed(2), () => {
 				this.emit({ lineHeight: null });
 				this.current.lineHeight = null;
 				this.render();
 			}),
 		);
 		scrollEl.appendChild(
-		this.buildSlider("段间距", 0, 3, 0.05, resolved.paragraphSpacing, v => this.emit({ paragraphSpacing: v }), x => `${x.toFixed(2)}em`, () => {
+		this.buildSlider(t("apParagraphSpacing"), 0, 3, 0.05, resolved.paragraphSpacing, v => this.emit({ paragraphSpacing: v }), x => `${x.toFixed(2)}em`, () => {
 			this.emit({ paragraphSpacing: null });
 			this.current.paragraphSpacing = null;
 			this.render();
@@ -322,14 +323,14 @@ export class AppearancePanel {
 		);
 		// 首行缩进按 em 落在各段落元素上，随字号自动缩放；0 = 不缩进
 		scrollEl.appendChild(
-			this.buildSlider("首行缩进", 0, 8, 1, resolved.paragraphIndent, v => this.emit({ paragraphIndent: Math.round(v) }), x => `${Math.round(x)} 字符`, () => {
+			this.buildSlider(t("apFirstLineIndent"), 0, 8, 1, resolved.paragraphIndent, v => this.emit({ paragraphIndent: Math.round(v) }), x => tf("apCharacterUnit", { count: Math.round(x) }), () => {
 				this.emit({ paragraphIndent: DEFAULT_APPEARANCE.paragraphIndent });
 				this.current.paragraphIndent = DEFAULT_APPEARANCE.paragraphIndent;
 				this.render();
 			}),
 		);
 		scrollEl.appendChild(
-			this.buildSlider("字间距", -0.05, 0.3, 0.01, resolved.letterSpacing, v => this.emit({ letterSpacing: v }), x => `${x.toFixed(2)}em`, () => {
+			this.buildSlider(t("apLetterSpacing"), -0.05, 0.3, 0.01, resolved.letterSpacing, v => this.emit({ letterSpacing: v }), x => `${x.toFixed(2)}em`, () => {
 				this.emit({ letterSpacing: DEFAULT_APPEARANCE.letterSpacing });
 				(this.current as unknown as Record<string, unknown>).letterSpacing = DEFAULT_APPEARANCE.letterSpacing;
 				this.render();
@@ -338,33 +339,33 @@ export class AppearancePanel {
 
 		// ---------- 界面颜色 ----------
 		const colorHeader = scrollEl.createDiv({ cls: "unreader-appearance-color-header" });
-		colorHeader.createSpan({ text: "界面颜色" });
+		colorHeader.createSpan({ text: t("apColorsHeading") });
 		scrollEl.appendChild(colorHeader);
 
 		// 配色来源：跟随 Obsidian 主题（背景/文字与 Obsidian 界面同色）或自定义色值
-		scrollEl.appendChild(this.buildSelectRow("配色来源", [
-			{ value: "obsidian" as const, label: "跟随 Obsidian" },
-			{ value: "custom" as const, label: "自定义" },
+		scrollEl.appendChild(this.buildSelectRow(t("apColorSource"), [
+			{ value: "obsidian" as const, label: t("apFollowObsidian") },
+			{ value: "custom" as const, label: t("apCustom") },
 		], this.current.colorMode ?? "obsidian", v => {
 			this.current.colorMode = v;
 			this.emit({ colorMode: v });
 			this.render();
-		}, "恢复默认：跟随 Obsidian", () => {
+		}, t("apResetFollowObsidian"), () => {
 			this.emit({ colorMode: DEFAULT_APPEARANCE.colorMode });
 			this.current.colorMode = DEFAULT_APPEARANCE.colorMode;
 			this.render();
 		}));
 
 		// 深浅主题切换：分别保存浅色/深色配色
-		scrollEl.appendChild(this.buildSelectRow("主题", [
-			{ value: "auto" as const, label: "自动" },
-			{ value: "light" as const, label: "浅色" },
-			{ value: "dark" as const, label: "深色" },
+		scrollEl.appendChild(this.buildSelectRow(t("apTheme"), [
+			{ value: "auto" as const, label: t("apAuto") },
+			{ value: "light" as const, label: t("apLight") },
+			{ value: "dark" as const, label: t("apDark") },
 		], this.current.theme ?? "auto", v => {
 			this.current.theme = v;
 			this.emit({ theme: v });
 			this.render();
-		}, "恢复默认：自动", () => {
+		}, t("apResetAuto"), () => {
 			this.emit({ theme: DEFAULT_APPEARANCE.theme });
 			this.current.theme = DEFAULT_APPEARANCE.theme;
 			this.render();
@@ -377,11 +378,11 @@ export class AppearancePanel {
 		const fgValue = isDark ? activeTextColor(this.current) : activeTextColor(this.current);
 		// 跟随 Obsidian 模式：不显示自定义色行，给一句说明
 		if ((this.current.colorMode ?? "obsidian") !== "custom") {
-			scrollEl.createDiv({ cls: "unreader-tag-desc unreader-color-follow-hint", text: "背景与文字颜色跟随 Obsidian 当前主题（明暗切换自动同步）。切换「配色来源」为「自定义」可单独设置颜色。" });
+			scrollEl.createDiv({ cls: "unreader-tag-desc unreader-color-follow-hint", text: t("apColorFollowHint") });
 		} else {
 		// 用 activeBackground/activeTextColor 已自动取对应主题
 		scrollEl.appendChild(
-			this.buildColorRow("背景色", bgValue, v => {
+			this.buildColorRow(t("apBackgroundColor"), bgValue, v => {
 				if (isDark) this.emit({ darkBackgroundColor: v });
 				else this.emit({ backgroundColor: v });
 			}, bgFallback, () => {
@@ -396,7 +397,7 @@ export class AppearancePanel {
 			}),
 		);
 		scrollEl.appendChild(
-			this.buildColorRow("文字颜色", fgValue, v => {
+			this.buildColorRow(t("apTextColor"), fgValue, v => {
 				if (isDark) this.emit({ darkTextColor: v });
 				else this.emit({ textColor: v });
 			}, fgFallback, () => {
@@ -414,13 +415,13 @@ export class AppearancePanel {
 
 		// ---------- 背景图片（收纳进深浅主题板块） ----------
 		const imgHeader = scrollEl.createDiv({ cls: "unreader-appearance-color-header" });
-		imgHeader.createSpan({ text: "背景图片" });
+		imgHeader.createSpan({ text: t("apBackgroundImagesHeading") });
 		scrollEl.appendChild(imgHeader);
 
 		// 作用范围：深浅共用一张，或深浅分别设置
-		scrollEl.appendChild(this.buildSelectRow("作用范围", [
-			{ value: "shared" as const, label: "深浅共用" },
-			{ value: "separate" as const, label: "深浅分别" },
+		scrollEl.appendChild(this.buildSelectRow(t("apImageScope"), [
+			{ value: "shared" as const, label: t("apSharedLightDark") },
+			{ value: "separate" as const, label: t("apSeparateLightDark") },
 		], this.current.bgImageMode ?? "shared", v => {
 			const patch: Partial<AppearanceSettings> = { bgImageMode: v };
 			// 首次切到分别设置：用当前共用图填充两侧，避免视觉突变
@@ -436,7 +437,7 @@ export class AppearancePanel {
 			this.current.bgImageMode = v;
 			this.emit(patch);
 			this.render();
-		}, "恢复默认：深浅共用", () => {
+		}, t("apResetShared"), () => {
 			this.emit({ bgImageMode: DEFAULT_APPEARANCE.bgImageMode });
 			this.current.bgImageMode = DEFAULT_APPEARANCE.bgImageMode;
 			this.render();
@@ -444,13 +445,13 @@ export class AppearancePanel {
 
 		const separate = (this.current.bgImageMode ?? "shared") === "separate";
 		if (separate) {
-			scrollEl.appendChild(this.buildBackgroundImageRow("backgroundImageLight", "浅色图片"));
-			scrollEl.appendChild(this.buildBackgroundImageRow("backgroundImageDark", "深色图片"));
+			scrollEl.appendChild(this.buildBackgroundImageRow("backgroundImageLight", t("apLightImage")));
+			scrollEl.appendChild(this.buildBackgroundImageRow("backgroundImageDark", t("apDarkImage")));
 		} else {
-			scrollEl.appendChild(this.buildBackgroundImageRow("backgroundImage", "图片"));
+			scrollEl.appendChild(this.buildBackgroundImageRow("backgroundImage", t("apImage")));
 		}
 		const hasImage = !!activeBackgroundImage(this.current);
-		const blurRow = this.buildSlider("图片模糊", 0, 30, 1, this.current.imageBlur ?? 0, v => this.emit({ imageBlur: v }), x => `${Math.round(x)}px`, () => {
+		const blurRow = this.buildSlider(t("apImageBlur"), 0, 30, 1, this.current.imageBlur ?? 0, v => this.emit({ imageBlur: v }), x => `${Math.round(x)}px`, () => {
 			this.emit({ imageBlur: DEFAULT_APPEARANCE.imageBlur });
 			this.current.imageBlur = DEFAULT_APPEARANCE.imageBlur;
 			this.render();
@@ -460,7 +461,7 @@ export class AppearancePanel {
 		scrollEl.appendChild(blurRow);
 		// 玻璃效果开关：选中态只反映 glassEnabled；无图片时整行禁用，
 		// 否则复选框永远选不上、点了也没变化（玻璃本就只在有图时生效）
-		const glassRow = this.buildToggleRow("玻璃效果", this.current.glassEnabled, v => {
+		const glassRow = this.buildToggleRow(t("apGlassEffect"), this.current.glassEnabled, v => {
 			this.current.glassEnabled = v;
 			this.emit({ glassEnabled: v });
 			this.render();
@@ -474,14 +475,14 @@ export class AppearancePanel {
 		// 玻璃模糊与不透明度（仅在启用玻璃且有图片时显示）
 		if (hasImage && this.current.glassEnabled) {
 			scrollEl.appendChild(
-				this.buildSlider("玻璃模糊", 0, 40, 1, this.current.glassBlur ?? 12, v => this.emit({ glassBlur: v }), x => `${Math.round(x)}px`, () => {
+				this.buildSlider(t("apGlassBlur"), 0, 40, 1, this.current.glassBlur ?? 12, v => this.emit({ glassBlur: v }), x => `${Math.round(x)}px`, () => {
 					this.emit({ glassBlur: DEFAULT_APPEARANCE.glassBlur });
 					this.current.glassBlur = DEFAULT_APPEARANCE.glassBlur;
 					this.render();
 				}),
 			);
 			scrollEl.appendChild(
-				this.buildSlider("玻璃不透明", 0, 1, 0.05, this.current.glassOpacity ?? 0.55, v => this.emit({ glassOpacity: v }), x => x.toFixed(2), () => {
+				this.buildSlider(t("apGlassOpacity"), 0, 1, 0.05, this.current.glassOpacity ?? 0.55, v => this.emit({ glassOpacity: v }), x => x.toFixed(2), () => {
 					this.emit({ glassOpacity: DEFAULT_APPEARANCE.glassOpacity });
 					this.current.glassOpacity = DEFAULT_APPEARANCE.glassOpacity;
 					this.render();
@@ -491,15 +492,15 @@ export class AppearancePanel {
 		// 背景色/文字色在玻璃下仍生效，提示
 		if (hasImage) {
 			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
-			hint.setText(this.current.glassEnabled ? "已启用玻璃效果，文字浮于图片之上，可通过“玻璃不透明”调节可读性。" : "建议开启玻璃效果或提高图片模糊，避免文字与图片对比不足。");
+			hint.setText(this.current.glassEnabled ? t("apGlassEnabledHint") : t("apGlassHint"));
 			scrollEl.appendChild(hint);
 		}
 
 		// 常态模式：工具栏、目录轨、进度条与滚动行为都在这一组里，语义不再混用
 		// “沉浸模式”。移动端/平板与桌面只影响加载时的初始默认，不锁死用户选择。
-		const normalSection = this.buildSectionRow("常态模式", "normal");
+		const normalSection = this.buildSectionRow(t("apNormalMode"), "normal");
 		scrollEl.appendChild(normalSection);
-		scrollEl.appendChild(this.buildToggleRow("显示工具栏", this.current.normalModeShowToolbar !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apShowToolbar"), this.current.normalModeShowToolbar !== false, v => {
 			this.current.normalModeShowToolbar = v;
 			this.emit({ normalModeShowToolbar: v });
 		}, () => {
@@ -507,7 +508,7 @@ export class AppearancePanel {
 			this.current.normalModeShowToolbar = DEFAULT_APPEARANCE.normalModeShowToolbar;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("滑动自动隐藏", this.current.normalModeScrollHide !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apScrollAutoHide"), this.current.normalModeScrollHide !== false, v => {
 			this.current.normalModeScrollHide = v;
 			this.emit({ normalModeScrollHide: v });
 		}, () => {
@@ -515,7 +516,7 @@ export class AppearancePanel {
 			this.current.normalModeScrollHide = DEFAULT_APPEARANCE.normalModeScrollHide;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("浮动目录条", this.current.showTocRail === true, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apFloatingToc"), this.current.showTocRail === true, v => {
 			this.current.showTocRail = v;
 			this.emit({ showTocRail: v });
 			this.render();
@@ -524,7 +525,7 @@ export class AppearancePanel {
 			this.current.showTocRail = DEFAULT_APPEARANCE.showTocRail;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("章节进度条", this.current.chapterProgress !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apChapterProgress"), this.current.chapterProgress !== false, v => {
 			this.current.chapterProgress = v;
 			this.emit({ chapterProgress: v });
 			this.render();
@@ -533,7 +534,7 @@ export class AppearancePanel {
 			this.current.chapterProgress = DEFAULT_APPEARANCE.chapterProgress;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("接管原生界面", this.current.normalModeHideNativeChrome === true, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apTakeOverNativeUi"), this.current.normalModeHideNativeChrome === true, v => {
 			this.current.normalModeHideNativeChrome = v;
 			this.emit({ normalModeHideNativeChrome: v });
 		}, () => {
@@ -541,7 +542,7 @@ export class AppearancePanel {
 			this.current.normalModeHideNativeChrome = DEFAULT_APPEARANCE.normalModeHideNativeChrome;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("显示页首", this.current.normalModeShowHeader !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apShowHeader"), this.current.normalModeShowHeader !== false, v => {
 			this.current.normalModeShowHeader = v;
 			this.emit({ normalModeShowHeader: v });
 		}, () => {
@@ -549,7 +550,7 @@ export class AppearancePanel {
 			this.current.normalModeShowHeader = DEFAULT_APPEARANCE.normalModeShowHeader;
 			this.render();
 		}));
-		scrollEl.appendChild(this.buildToggleRow("显示底部工具栏", this.current.normalModeShowBottomBar !== false, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apShowBottomToolbar"), this.current.normalModeShowBottomBar !== false, v => {
 			this.current.normalModeShowBottomBar = v;
 			this.emit({ normalModeShowBottomBar: v });
 		}, () => {
@@ -558,7 +559,7 @@ export class AppearancePanel {
 			this.render();
 		}));
 		scrollEl.appendChild(
-			this.buildSlider("按钮/目录条大小", 0.8, 1.6, 0.05, this.current.railScale ?? 1, v => this.emit({ railScale: v }), x => `${Math.round(x * 100)}%`, () => {
+			this.buildSlider(t("apToolbarSize"), 0.8, 1.6, 0.05, this.current.railScale ?? 1, v => this.emit({ railScale: v }), x => `${Math.round(x * 100)}%`, () => {
 				this.emit({ railScale: DEFAULT_APPEARANCE.railScale });
 				this.current.railScale = DEFAULT_APPEARANCE.railScale;
 				this.render();
@@ -566,13 +567,13 @@ export class AppearancePanel {
 		);
 		{
 			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
-			hint.setText("点击正文空白始终可临时唤出工具栏；「滑动自动隐藏」只管插件工具层（下滑收起按钮，左缘仍留 6px 把手；上滑/悬停/点把手可唤出），「接管原生界面」让 Obsidian 的页首/底栏向下滚动时收起、向上滚动不再自动出现（点按正文空白才唤出；关掉后完全不碰原生界面）。浮动目录与章节进度按各自开关显示，不受工具栏显隐影响。");
+			hint.setText(t("apNormalModeHint"));
 		}
 
 		// 全沉浸：默认只留退出按钮，这里的两个开关只控制明确例外。
-		const fullSection = this.buildSectionRow("全沉浸模式", "full");
+		const fullSection = this.buildSectionRow(t("apFullImmersion"), "full");
 		scrollEl.appendChild(fullSection);
-		const fullTocRow = this.buildToggleRow("显示浮动目录", this.current.fullImmersionShowTocRail === true, v => {
+		const fullTocRow = this.buildToggleRow(t("apShowFloatingToc"), this.current.fullImmersionShowTocRail === true, v => {
 			this.current.fullImmersionShowTocRail = v;
 			this.emit({ fullImmersionShowTocRail: v });
 		}, () => {
@@ -583,7 +584,7 @@ export class AppearancePanel {
 		if (this.current.showTocRail !== true) fullTocRow.setAttr("data-disabled", "true");
 		(fullTocRow.querySelector("input[type=checkbox]"))?.toggleAttribute("disabled", this.current.showTocRail !== true);
 		scrollEl.appendChild(fullTocRow);
-		const fullProgressRow = this.buildToggleRow("显示章节进度条", this.current.fullImmersionShowChapterProgress === true, v => {
+		const fullProgressRow = this.buildToggleRow(t("apShowProgress"), this.current.fullImmersionShowChapterProgress === true, v => {
 			this.current.fullImmersionShowChapterProgress = v;
 			this.emit({ fullImmersionShowChapterProgress: v });
 		}, () => {
@@ -594,7 +595,7 @@ export class AppearancePanel {
 		if (this.current.chapterProgress !== true) fullProgressRow.setAttr("data-disabled", "true");
 		(fullProgressRow.querySelector("input[type=checkbox]"))?.toggleAttribute("disabled", this.current.chapterProgress !== true);
 		scrollEl.appendChild(fullProgressRow);
-		scrollEl.appendChild(this.buildToggleRow("点击屏幕显示界面", this.current.fullImmersionTapReveal === true, v => {
+		scrollEl.appendChild(this.buildToggleRow(t("apTapScreenReveal"), this.current.fullImmersionTapReveal === true, v => {
 			this.current.fullImmersionTapReveal = v;
 			this.emit({ fullImmersionTapReveal: v });
 		}, () => {
@@ -604,11 +605,11 @@ export class AppearancePanel {
 		}));
 		{
 			const hint = scrollEl.createDiv({ cls: "unreader-appearance-hint" });
-			hint.setText("全沉浸默认隐藏所有界面，仅保留左上角半透明退出图标；开启“点击屏幕显示界面”后，点击正文可临时唤出常态工具层与原生界面。目录与进度只有在上方全局开关开启时才可作为例外保留。");
+			hint.setText(t("apImmersionHint"));
 		}
 
 		const footer = this.containerEl.createDiv({ cls: "unreader-appearance-footer" });
-		const resetAllBtn = footer.createEl("button", { text: "重置全部为默认" });
+		const resetAllBtn = footer.createEl("button", { text: t("apResetAll") });
 		resetAllBtn.addEventListener("click", () => {
 			const patch: AppearanceSettings = { ...DEFAULT_APPEARANCE };
 			this.current = { ...patch };
@@ -636,8 +637,8 @@ export class AppearancePanel {
 			const select = row?.querySelector<HTMLSelectElement>("select");
 			if (select) select.value = value;
 		};
-		syncSelect("主题", this.current.theme ?? "auto");
-		syncSelect("作用范围", this.current.bgImageMode ?? "shared");
+		syncSelect(t("apTheme"), this.current.theme ?? "auto");
+		syncSelect(t("apImageScope"), this.current.bgImageMode ?? "shared");
 	}
 
 	/** 生成「标签 + 下拉选择 + 重置」行（阅读模式/栏数/主题统一用选择框收纳，紧凑） */
@@ -669,15 +670,15 @@ export class AppearancePanel {
 	private buildFontSelect(currentId: string | null): HTMLElement {
 		const row = createDiv();
 		row.className = "unreader-appearance-row";
-		row.createSpan({ cls: "unreader-appearance-label", text: "字体" });
+		row.createSpan({ cls: "unreader-appearance-label", text: t("apFont") });
 		const control = row.createDiv({ cls: "unreader-appearance-control" });
 		const select = control.createEl("select", { cls: "dropdown" });
-		select.createEl("option", { value: "", text: "跟随 Obsidian" });
+		select.createEl("option", { value: "", text: t("apFollowObsidian") });
 		// 仅自定义字体（库内字体文件夹扫描结果）：要么跟随 Obsidian，要么用导入的字体
 		const customs = this.getCustomFonts();
 		if (customs.length) {
 			const group = createEl("optgroup");
-			group.label = "自定义字体";
+			group.label = t("apCustomFonts");
 			// 同名消歧：label 是去扩展名的 basename，所以 A.ttf 与 A.otf 会得到同一个
 			// 显示名（而它们的 id / 字形都不同）——出现重名时补扩展名区分
 			const labelCount = new Map<string, number>();
@@ -686,7 +687,7 @@ export class AppearancePanel {
 				const opt = createEl("option");
 				opt.value = f.id;
 				const dup = (labelCount.get(f.label) ?? 0) > 1;
-				opt.text = dup ? `${f.label}（${f.id.split(".").pop() ?? ""}）` : f.label;
+				opt.text = dup ? tf("apFontWithExtension", { name: f.label, ext: f.id.split(".").pop() ?? "" }) : f.label;
 				group.appendChild(opt);
 			}
 			select.appendChild(group);
@@ -700,7 +701,7 @@ export class AppearancePanel {
 				: currentId;
 			const opt = createEl("option");
 			opt.value = currentId;
-			opt.text = `字体已停用或丢失：${base.replace(/\.[^.]+$/, "")}`;
+			opt.text = tf("apFontMissing", { name: base.replace(/\.[^.]+$/, "") });
 			select.appendChild(opt);
 		}
 		select.value = currentId ?? "";
@@ -711,18 +712,18 @@ export class AppearancePanel {
 		// 字体从此在外观面板里「自管理」：库内挑一个 / 从系统导入一个，
 		// 两者都复制进插件的字体文件夹（设置页不再有字体文件夹配置项）
 		const libBtn = control.createEl("button", {
-			text: "库",
+			text: t("apVault"),
 			cls: "unreader-appearance-preset-btn",
-			attr: { title: "从库中选择字体文件导入" },
+			attr: { title: t("apPickFontVault") },
 		});
 		libBtn.addEventListener("click", e => {
 			e.stopPropagation();
 			this.onPickFont();
 		});
 		const sysBtn = control.createEl("button", {
-			text: "系统",
+			text: t("apSystem"),
 			cls: "unreader-appearance-preset-btn",
-			attr: { title: "从系统选择本地字体文件导入" },
+			attr: { title: t("apPickFontSystem") },
 		});
 		sysBtn.addEventListener("click", e => {
 			e.stopPropagation();
@@ -732,7 +733,7 @@ export class AppearancePanel {
 			this.emit({ fontFamily: null });
 			this.current.fontFamily = null;
 			this.render();
-		}, "恢复默认：跟随 Obsidian"));
+		}, t("apResetFollowObsidian")));
 		return row;
 	}
 
@@ -765,7 +766,7 @@ export class AppearancePanel {
 		return row;
 	}
 
-	private createResetButton(onReset: () => void, tooltip = "恢复默认"): HTMLElement {
+	private createResetButton(onReset: () => void, tooltip = t("apResetDefault")): HTMLElement {
 		const btn = createEl("button");
 		btn.className = "unreader-appearance-reset";
 		btn.setAttr("aria-label", tooltip);
@@ -784,11 +785,11 @@ export class AppearancePanel {
 	private buildPresetRow(): HTMLElement {
 		const row = createDiv();
 		row.className = "unreader-appearance-row unreader-appearance-preset-row";
-		row.createSpan({ cls: "unreader-appearance-label", text: "预设" });
+		row.createSpan({ cls: "unreader-appearance-label", text: t("apPreset") });
 		const control = row.createDiv({ cls: "unreader-appearance-control unreader-appearance-preset-control" });
 		const presets = this.getPresets();
 		const select = control.createEl("select", { cls: "dropdown unreader-appearance-preset-select" });
-		select.createEl("option", { value: "", text: presets.length ? "选择预设…" : "暂无预设" });
+		select.createEl("option", { value: "", text: presets.length ? t("apChoosePreset") : t("apNoPresets") });
 		for (const p of presets) select.createEl("option", { value: p.id, text: p.name });
 		// 回显当前生效预设名；无生效预设（手动调整）时停在占位符
 		if (this.activePresetId && presets.some(p => p.id === this.activePresetId)) {
@@ -822,27 +823,27 @@ export class AppearancePanel {
 		const requireSelected = (): string | null => {
 			const id = select.value;
 			if (!id) {
-				new Notice("请先在下拉框选择一个预设");
+				new Notice(t("apSelectPresetFirst"));
 				return null;
 			}
 			return id;
 		};
 		// 保存：下拉框选中预设 → 用当前外观更新该预设；未选中 → 存为新预设（命名由宿主弹窗处理）。
 		// 图标按钮，不占文字宽度
-		const saveBtn = iconBtn("save", "已选中预设时更新该预设，未选中时存为新预设", () => {
+		const saveBtn = iconBtn("save", t("apSavePresetTooltip"), () => {
 			const id = select.value;
 			if (id) this.onUpdatePreset(id);
 			else this.onSavePreset();
 		});
 		control.appendChild(saveBtn);
 		// 重命名选中预设（命名由宿主弹窗处理）
-		control.appendChild(iconBtn("pencil", "重命名选中预设", () => {
+		control.appendChild(iconBtn("pencil", t("apRenamePresetTooltip"), () => {
 			const id = requireSelected();
 			if (!id) return;
 			this.onRenamePreset(id);
 		}));
 		// 删除选中预设
-		control.appendChild(iconBtn("trash", "删除选中预设", () => {
+		control.appendChild(iconBtn("trash", t("apDeletePresetTooltip"), () => {
 			const id = requireSelected();
 			if (!id) return;
 			this.onDeletePreset(id);
@@ -861,7 +862,7 @@ export class AppearancePanel {
 		const text = control.createEl("input", {
 			type: "text",
 			cls: "unreader-appearance-color-text",
-			attr: { spellcheck: "false", placeholder: "图片地址（手动输入）" },
+			attr: { spellcheck: "false", placeholder: t("apImageManualInput") },
 		});
 		const raw = ((this.current as unknown as Record<string, unknown>)[field] as string | null) ?? "";
 		// 显示名字而非原始引用（data URI 太长、路径无意义）；手动输入 URL 仍然支持
@@ -869,8 +870,8 @@ export class AppearancePanel {
 		let display = raw;
 		if (raw) {
 			if (picked) display = picked;
-			else if (raw.startsWith("data:image/")) display = "已设置图片";
-			else if (raw.startsWith("preset:")) display = "预设内图片";
+			else if (raw.startsWith("data:image/")) display = t("apImageSet");
+			else if (raw.startsWith("preset:")) display = t("apPresetImage");
 		}
 		text.value = display;
 		const apply = (v: string) => {
@@ -894,19 +895,19 @@ export class AppearancePanel {
 		});
 		// 「库」走库内列表弹窗，「系统」直接调系统文件选择器；
 		// 两条路径统一进宿主的同一应用流程（复制进预设文件夹后引用）
-		const pickBtn = control.createEl("button", { text: "库", cls: "unreader-appearance-preset-btn", attr: { title: "从库中选择图片" } });
+		const pickBtn = control.createEl("button", { text: t("apVault"), cls: "unreader-appearance-preset-btn", attr: { title: t("apPickImageVault") } });
 		pickBtn.addEventListener("click", e => {
 			e.stopPropagation();
 			this.onPickImage(field);
 		});
-		const sysBtn = control.createEl("button", { text: "系统", cls: "unreader-appearance-preset-btn", attr: { title: "从系统选择本地图片" } });
+		const sysBtn = control.createEl("button", { text: t("apSystem"), cls: "unreader-appearance-preset-btn", attr: { title: t("apPickImageSystem") } });
 		sysBtn.addEventListener("click", e => {
 			e.stopPropagation();
 			this.onPickImageSystem(field);
 		});
 		const clearBtn = createEl("button");
 		clearBtn.className = "unreader-appearance-reset";
-		clearBtn.title = "移除背景图片";
+		clearBtn.title = t("apRemoveBackgroundImage");
 		clearBtn.appendChild(createInlineIcon("trash"));
 		clearBtn.addEventListener("click", e => {
 			e.stopPropagation();
@@ -940,7 +941,7 @@ export class AppearancePanel {
 		const row = createDiv();
 		row.className = "unreader-appearance-row";
 		const labelEl = row.createSpan({ cls: "unreader-appearance-label", text: label });
-		// label 文字较长（"显示底部工具栏"7 字 > 72px）会溢出截断 → 覆盖默认
+		// label 文字较长（t("apShowBottomToolbar")7 字 > 72px）会溢出截断 → 覆盖默认
 		// 固定宽，让 label 自适应内容宽度并 flex:1 1 auto 撑开中间空白，
 		// toggle 和 reset 始终被推至 row 最右紧挨；slider/select 行不受影响
 		labelEl.addClass("is-label-wide");

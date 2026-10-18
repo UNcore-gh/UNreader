@@ -381,12 +381,13 @@ export interface NoteMetaSummary {
 	extra?: Array<{ key: string; value: string }>
 }
 
-/** 「笔记」侧边页的一项；由当前 vault 文件与最近/星标索引在渲染时合并。 */
+/** 「笔记」侧边页的一项；由当前 vault 文件与最近/置顶索引在渲染时合并。 */
 export interface MarkdownNoteListItem {
 	path: string
 	title: string
 	mtime: number
 	openedAt?: number
+	/** 历史字段名；Markdown 界面将它作为置顶时间显示。 */
 	starredAt?: number
 	/** frontmatter 摘要（读不到就没有这一项，看板相应少一段） */
 	meta?: NoteMetaSummary
@@ -425,14 +426,21 @@ export interface UNreaderSettings {
 	 *  切换时由 `core/libraryMigration.ts` 把这五个数据目录整树搬到新根；
 	 *  **书籍不受影响**（书在库里任何位置都能读，永远留在各自原来的文件夹）。 */
 	dataFolder: string | null
-	/** 高亮侧边栏是否钉住（常驻左侧，不再悬浮） */
-	annoPinned: boolean
-	/** 高亮侧边栏手动调节后的高度（px）；未设置 = 跟随默认全高 */
+	/** @deprecated 旧抽屉代码迁移期兼容字段；loadSettingsData 会立即删除，不会保留到配置。 */
+	annoPinned?: boolean
 	annoPanelHeight?: number
-	/** 高亮侧边栏手动调节后的宽度（px）；未设置 = 默认 330px */
 	annoPanelWidth?: number
-	/** 触发钉住按钮显示的最小宽度阈值（px），高于此值才显示“钉住” */
-	pinThreshold: number
+	pinThreshold?: number
+	/** 最近一次选择的原生面板分页。 */
+	lastSidebarMode: "bookshelf" | "feeds" | "notes"
+	/** 是否由用户或显式命令选过列表页；否则首次按当前内容类型决定落点。 */
+	lastSidebarModeExplicit: boolean
+	/** 旧版原生侧栏分区只迁入文件列表标签组一次；之后尊重用户自己的拖动布局。 */
+	nativeSidebarPlacementMigrated: boolean
+	/** 原生侧栏**默认落在哪一侧**（用户 2026-10-17：「默认使用那个命令在左侧打开」）。
+	 *  打开类命令（书架 / 订阅 / 标注）与卡片跳转都读它；「侧栏位置：左/右切换」命令翻转它。
+	 *  缺省 = `left`（与旧版行为一致）。 */
+	nativeSidebarSide: "left" | "right"
 	/** 调试日志（诊断用，可开关的可选内存环形缓冲，设置页导出） */
 	debugLog: boolean
 	/** 把标注笔记登记进 Obsidian 的「排除文件」：高亮/书签旁车笔记不再出现在搜索、
@@ -467,7 +475,7 @@ export interface UNreaderSettings {
 	/** 最近在 Obsidian 原生阅读模式打开过的 Markdown 笔记（MRU，最多 12 条）。
 	 *  只影响「笔记」侧边页的最近列表；不接管 .md 文件、不持久化正文。 */
 	markdownNoteRecent: MarkdownNoteRecentEntry[]
-	/** 用户星标的 Markdown 笔记路径 → 星标时间（升序时间戳只在排序时使用）。 */
+	/** 兼容旧设置名：Markdown 置顶的笔记路径 → 置顶时间（升序时间戳只在排序时使用）。 */
 	markdownNoteStarred: Record<string, number>
 	/** 自定义按钮：把任意 Obsidian 命令绑成按钮，放到侧边浮动工具栏 / 划词工具条。
 	 *  **无数量上限**；默认空数组 —— 空时两处按钮槽不进 DOM，既有布局零影响。 */
@@ -562,8 +570,10 @@ export const DEFAULT_SETTINGS: UNreaderSettings = {
 	appearance: { ...DEFAULT_APPEARANCE },
 	appearancePresets: [],
 	dataFolder: null,
-	annoPinned: false,
-	pinThreshold: 720,
+	lastSidebarMode: "bookshelf",
+	lastSidebarModeExplicit: false,
+	nativeSidebarPlacementMigrated: false,
+	nativeSidebarSide: "left",
 	debugLog: false,
 	excludeNotesFromSearch: true,
 	webDeviceMode: "auto",

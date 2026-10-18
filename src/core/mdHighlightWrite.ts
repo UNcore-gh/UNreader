@@ -10,7 +10,7 @@
  *  **不写**——错写一处 `==` 会污染用户的笔记，比什么都不做严重得多。
  */
 
-import type { App, Editor, MarkdownView } from "obsidian";
+import { TFile, type App, type Editor, type MarkdownView } from "obsidian";
 import type { EditPlan } from "./mdSelectionMap";
 
 export interface WriteResult {
@@ -47,9 +47,14 @@ export async function applyEditPlan(
 	plan: EditPlan,
 	expected: string,
 	channel: "auto" | "vault" = "auto",
+	expectedPath?: string,
 ): Promise<WriteResult> {
+	const targetFile = view.file;
+	const targetPath = expectedPath ?? targetFile?.path;
+	if (!targetFile || !targetPath || targetFile.path !== targetPath) return { ok: false, via: "none" };
 	// ① 编辑器通道（保留撤销栈）
 	if (channel !== "vault") try {
+		if (view.file?.path !== targetPath) return { ok: false, via: "none" };
 		const ed = (view as unknown as { editor?: Editor }).editor;
 		if (ed && typeof ed.replaceRange === "function" && typeof ed.getValue === "function") {
 			const fresh = ed.getValue();
@@ -63,11 +68,10 @@ export async function applyEditPlan(
 	}
 
 	// ② 文件通道（兜底，无撤销栈）
-	const file = view.file;
-	if (!file) return { ok: false, via: "none" };
+	if (view.file?.path !== targetPath) return { ok: false, via: "none" };
 	let wrote = false;
 	try {
-		await app.vault.process(file, (data: string) => {
+		await app.vault.process(targetFile, (data: string) => {
 			const ok = verify(data, plan, expected);
 			if (!ok) return data;
 			wrote = true;
@@ -75,6 +79,31 @@ export async function applyEditPlan(
 		});
 	} catch (e) {
 		console.error("[UNreader] vault write failed", e);
+		return { ok: false, via: "none" };
+	}
+	return { ok: wrote, via: wrote ? "vault" : "none" };
+}
+
+/** 不依赖已打开 MarkdownView 的文件通道；供侧栏独立标注目标按路径安全编辑。 */
+export async function applyVaultEditPlan(
+	app: App,
+	path: string,
+	plan: EditPlan,
+	expected: string,
+): Promise<WriteResult> {
+	const file = app.vault.getFileByPath(path);
+	if (!(file instanceof TFile) || file.path !== path) return { ok: false, via: "none" };
+	let wrote = false;
+	try {
+		await app.vault.process(file, (fresh: string) => {
+			if (file.path !== path) return fresh;
+			const verified = verify(fresh, plan, expected);
+			if (!verified) return fresh;
+			wrote = true;
+			return fresh.slice(0, verified.from) + verified.replacement + fresh.slice(verified.to);
+		});
+	} catch (error) {
+		console.error("[UNreader] Markdown annotation write failed", error);
 		return { ok: false, via: "none" };
 	}
 	return { ok: wrote, via: wrote ? "vault" : "none" };
