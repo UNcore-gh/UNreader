@@ -1,66 +1,58 @@
 # UNreader
 
-A beautiful local-first reader for Obsidian — **EPUB first**, plus MOBI/AZW3, TXT, local HTML, RSS/Atom/JSON Feed articles and podcast enclosures. Reflowable layout, a floating table of contents, an on-edge chapter rail, highlights / bookmarks / comments, and a fully customisable appearance system (fonts, backgrounds, presets).
+**Read your books inside Obsidian. Pick up where you left off, and keep your highlights and comments close to your notes.**
 
-> Part of the **UN series** by [UNcore](https://github.com/UNcore-gh).
+UNreader is for people who want to read EPUBs and other books alongside the notes they already keep in Obsidian. It brings continuous reading, a table of contents, highlights, bookmarks, and comments into your vault. It also includes RSS/Atom/JSON Feed reading.
 
-This is the **source repository** (`UNcore-gh/UNreader-src`, private). The plugin's binary releases live in the public mirror [`UNcore-gh/UNreader`](https://github.com/UNcore-gh/UNreader).
+<p align="center">
+  <img src="./assets/readme/reading-flow.svg" width="100%" alt="Conceptual diagram, not a screenshot: book files and feed articles open in UNreader. A passage you choose can be saved as a Markdown annotation note in the vault. Books use bookmarks; feed articles use stars.">
+</p>
 
-## Features
+Selected passages and comments are saved as Markdown notes in the vault. Books use bookmarks; feed articles use stars.
 
-- **Formats** — EPUB (reflowable, full TOC/nav support), MOBI / AZW3 (KF8), TXT (encoding detection + automatic chapter splitting), and local HTML/HTM. HTML renders **the way the web page looks**: the document stays in one piece (no splitting into book chapters), the author's CSS is kept, and relative assets (images, `srcset`, stylesheets, CSS `url()`/`@import`) are resolved against the vault — reading is continuous and full-width, so the page's own layout wins. A **reading device** button on the action rail re-renders the page at a phone (390px), tablet (834px) or desktop (1280px) viewport and scales it down to the reading area — so a fixed-width desktop page is fully readable on a phone instead of overflowing past the right edge (the default *Auto* mode just follows the reading area). Scripts, event handlers, form controls and `<meta http-equiv=refresh>` are always stripped. PDF is deliberately **not** supported: Obsidian's core viewer owns the `.pdf` extension and is already better at it. The bookshelf and the *Open book* picker list **exactly these formats** — PDF, Markdown, FB2 and anything else stay in the vault (and open normally from the file explorer) but are not treated as books.
-- **Shelf filters** — hide folders from the bookshelf and the *Open book* picker. By default it follows Obsidian's own **Excluded files** (Settings → Files & links), so a folder you already marked as "not my reading material" disappears from the shelf too; extra folders can be added per-vault in Settings → UNreader → Shelf. Filtering only affects the lists: the files keep working, and reading progress, pinned books and annotations are untouched.
-- **Feeds** — RSS 2.0, Atom, RDF/RSS 1.0 and JSON Feed subscriptions in the same sidebar as annotations and the bookshelf. Import/export OPML, discover feeds from ordinary web pages, fetch full article text, cache article snapshots for offline reading, play or download podcast enclosures, and **star articles** — the reading toolbar's star button (which takes the bookmark button's place while a feed article is open) toggles the same 收藏 state as the star on each card, filterable from the `收藏` tab. A footer link at the very end of each article opens the original in your system browser (the same entry as the toolbar's external-link button).
-- **Continuous reading** — every chapter renders as its own same-origin frame, stacked into one seamless scroll. Links, footnotes, page keys and text selection are all handled by the reader.
-- **Navigation** — floating TOC panel, plus a chapter rail on the right edge whose dash length encodes outline depth; hover to preview a chapter, click to jump. Distant jumps settle in one pass (no intermediate flicker).
-- **Annotations** — highlights, bookmarks and comments, with a dedicated annotations sidebar and an in-text selection toolbar. Bookmarks mark a position inside a book; feed articles are starred instead of bookmarked.
-- **Appearance** — built-in and user-imported fonts, size / line-height / letter-spacing / paragraph-spacing / indent / margins, light-dark themes with custom colours, background images with a glass (blur) layer, and named presets you can export and reuse.
-- **Reading progress** — per-book position and percentage are stored and restored, with an optional chapter progress bar and page numbers.
-- **Immersive mode** — auto-hiding chrome with tap-to-reveal; on mobile it coordinates with Obsidian's native status/nav bars.
-- **Mobile** — swipe from the text area to open Obsidian's side drawer, touch-friendly rail interaction, soft-keyboard aware layout.
+[Install from the Obsidian Community directory](https://community.obsidian.md/plugins/unreader) · [Read release notes](https://github.com/UNcore-gh/UNreader/releases) · [Open the public repository](https://github.com/UNcore-gh/UNreader)
 
-## Development
+Part of the UN series: [UNmemos](https://github.com/UNcore-gh/UNmemos) 记 · **UNreader 读** · [UNagent](https://github.com/UNcore-gh/UNagent) 用.
 
-```bash
-npm install
-npm run dev        # esbuild watch mode → main.js + styles.css
-npm run build      # tsc -noEmit -skipLibCheck + production bundle
-npm run typecheck  # types only
-```
+## Start reading
 
-Build outputs (`main.js`, `styles.css`) land at the repository root and are gitignored — edit `src/styles.css`, never the root `styles.css`.
+1. In Obsidian, open **Settings → Community plugins → Browse**, search for **UNreader**, then install and enable it.
+2. Add an EPUB, MOBI, AZW3, or TXT file to your vault.
+3. Open the Command Palette (`Cmd/Ctrl + P`) and choose **UNreader: Vault: choose and open a book** (or **UNreader: 全库：选择并打开书籍** in Chinese). You can also open a supported book from Obsidian's file list.
 
-Regression probes (`npm run test:tocjump`, `test:focusgate`, `test:swipe`, `test:startup-layout`, `test:html`, …) drive a real Chromium engine via CDP; the full list and the invariants each one protects are documented in [`AGENTS.md`](AGENTS.md).
+The bookshelf and book picker list EPUB, MOBI, AZW3, and TXT files. Local HTML/HTM files can be opened from the file list, but do not appear on the bookshelf. PDF is not supported; Obsidian opens PDFs with its own viewer.
 
-### Release
+## What you can do
 
-```bash
-npm run release        # patch bump + build + sync binaries into ../UNreader-github
-npm run release:minor  # minor / major variants: release:minor, release:major
-npm run release:sync   # rebuild + sync without a version bump
-```
+- **Read comfortably:** keep chapters in one continuous scroll, jump from the floating table of contents or chapter rail, and restore your place when you return.
+- **Keep your reading notes:** highlight text, add bookmarks and comments, then find them in the annotations sidebar.
+- **Make the page yours:** adjust fonts, spacing, margins, colours, backgrounds, and reusable appearance presets.
+- **Read feeds too:** subscribe to RSS, Atom, RDF/RSS 1.0, or JSON Feed; import and export OPML; save article snapshots for offline reading; and play or download podcast audio.
+- **Use it on desktop or mobile:** UNreader follows Obsidian's reading surface and includes touch-friendly navigation and an immersive reading mode.
 
-`scripts/release-sync.mjs` builds **first** (a type error aborts before any version bump), then updates `manifest.json` / `package.json` / `package-lock.json` / `versions.json` and copies the release artifacts plus a source snapshot (`src/`, `vendor/`, build configs) into the public mirror. Obsidian's review bot requires source files to be present in the submitted repository. The script intentionally does not commit or push.
+## Updates
 
-## Layout
-
-```
-UNreader-src/      ← this repo: source of truth (private)
-  src/             TypeScript sources (main.ts, core/, ui/)
-  vendor/foliate-js/  vendored foliate engine — do not modify
-  test/ .perf/     CDP regression probes and the startup benchmark harness
-UNreader-github/   ← public release mirror: binaries + reviewable source snapshot
-                     (main.js / manifest.json / styles.css / versions.json / src / vendor / builds)
-                     + README + LICENCEs; 内部材料（AGENTS.md / CLAUDE.md / test / .perf）不镜像
-_notes/            ← human decision logs, not tracked by either repo
-```
+The [GitHub Releases page](https://github.com/UNcore-gh/UNreader/releases) lists published versions and their changes. Features described above refer to the public release; work that has not shipped is not included here.
 
 ## Network and privacy
 
-UNreader is **offline by default**. It collects **no telemetry**. Books, annotations and cached feed snapshots stay in your vault; podcast/image media caches are local IndexedDB data and are not part of vault sync.
+UNreader does not send telemetry. Reading books and annotations works offline. Feed and podcast features use the network to add or refresh subscriptions, fetch article text, and play or download podcast media. UNreader does not run periodic background feed polling. If enabled in settings, opening the Feeds sidebar can trigger one refresh.
 
-Network access happens only after an explicit user action: adding or refreshing a subscription, resolving a website into a feed, fetching an article's full text, or downloading a podcast. Opening a cached article, restoring the workspace, and reading ordinary books do not start feed polling. The first time the Feeds sidebar is opened, UNreader may perform one controlled refresh when the setting is enabled. There is no background periodic polling, no paywall/login bypass, and video podcasts are not supported.
+Books, annotations, and cached feed snapshots are stored in your vault. Podcast and image media caches are kept in a local IndexedDB database and are not part of vault sync. UNreader does not bypass paywalls or logins, and video podcasts are not supported.
 
-## License
+## Compatibility and license
 
-Source Available License — 商用需授权。详见 [LICENSE](LICENSE)。
+- Requires Obsidian **1.7.2 or later**.
+- The plugin is available on desktop and mobile.
+- Source Available License — commercial use requires permission. See [LICENSE](LICENSE).
+
+## Development
+
+This repository contains UNreader's source code. To install dependencies and build the plugin:
+
+```bash
+npm install
+npm run build
+```
+
+For a live development build, use `npm run dev`. Build outputs are generated at the repository root; edit `src/styles.css` for style changes. The public release repository is [UNcore-gh/UNreader](https://github.com/UNcore-gh/UNreader).

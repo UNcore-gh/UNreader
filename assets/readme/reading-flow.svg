@@ -1,0 +1,68 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="1040" viewBox="0 0 1200 1040" role="img" aria-labelledby="title desc">
+  <title id="title">UNreader reading flow: books and feed articles become annotated reading notes</title>
+  <desc id="desc">Conceptual illustration, not a screenshot. Books and feed articles in Obsidian enter UNreader's continuous reading view. When a reader selects a passage, highlights and comments are saved as Markdown annotation notes in the vault. Books use bookmarks; feed articles use stars.</desc>
+
+  <rect width="1200" height="1040" rx="28" fill="#F4F0E8"/>
+
+  <text x="72" y="78" fill="#41655D" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="24" font-weight="700" letter-spacing="3">HOW READING FLOWS</text>
+  <text x="72" y="142" fill="#282E2B" font-family="Georgia, 'Songti SC', serif" font-size="58" font-weight="700">From page to note</text>
+  <text x="74" y="190" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="36">Books and articles share one reading space in Obsidian.</text>
+
+  <g id="book-source">
+    <rect x="72" y="228" width="500" height="154" rx="20" fill="#FFFCF7" stroke="#CFC7B9" stroke-width="2"/>
+    <path d="M112 267c22-12 43-12 63 0v72c-20-12-41-12-63 0z" fill="#F4F0E8" stroke="#41655D" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M175 267c20-12 41-12 63 0v72c-20-12-41-12-63 0z" fill="#FFFCF7" stroke="#41655D" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M127 286h30M127 302h31M189 286h30M189 302h27" stroke="#A9A194" stroke-width="3" stroke-linecap="round"/>
+    <path d="M223 262v31l-9-7-9 7v-31" fill="#C36D4C"/>
+    <text x="276" y="292" fill="#282E2B" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="44" font-weight="700">BOOK FILES</text>
+    <text x="276" y="340" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="34">Kept in your vault</text>
+  </g>
+
+  <g id="feed-source">
+    <rect x="628" y="228" width="500" height="154" rx="20" fill="#FFFCF7" stroke="#CFC7B9" stroke-width="2"/>
+    <path d="M676 260h69v94h-69z" fill="#F4F0E8" stroke="#41655D" stroke-width="3" stroke-linejoin="round"/>
+    <path d="M690 280h35M690 298h41M690 316h31" stroke="#A9A194" stroke-width="3" stroke-linecap="round"/>
+    <path d="m735 249 6 12 14 2-10 9 3 14-13-7-12 7 3-14-10-9 14-2z" fill="#C36D4C"/>
+    <text x="774" y="290" fill="#282E2B" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="38" font-weight="700">FEED ARTICLES</text>
+    <text x="774" y="336" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="28">RSS · Atom · JSON Feed</text>
+  </g>
+
+  <path d="M322 383v30c0 24 42 24 96 24" fill="none" stroke="#8D9A91" stroke-width="4" stroke-linecap="round"/>
+  <path d="m406 426 14 11-14 11" fill="none" stroke="#41655D" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+  <path d="M878 383v30c0 24-42 24-96 24" fill="none" stroke="#8D9A91" stroke-width="4" stroke-linecap="round"/>
+  <path d="m794 426-14 11 14 11" fill="none" stroke="#41655D" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g id="reader">
+    <rect x="138" y="452" width="924" height="246" rx="22" fill="#FFFCF7" stroke="#41655D" stroke-width="3"/>
+    <text x="188" y="516" fill="#282E2B" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="58" font-weight="700">UNreader</text>
+    <text x="190" y="562" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="36">Continuous reading</text>
+    <path d="M190 603h14M190 625h22M190 647h14" stroke="#41655D" stroke-width="5" stroke-linecap="round"/>
+    <rect x="230" y="589" width="320" height="17" rx="8" fill="#D8D2C7"/>
+    <rect x="230" y="622" width="276" height="17" rx="8" fill="#E3DED4"/>
+    <rect x="222" y="652" width="314" height="22" rx="4" fill="#F0C9A9"/>
+    <rect x="230" y="655" width="282" height="16" rx="8" fill="#C36D4C" opacity="0.82"/>
+    <rect x="600" y="486" width="414" height="182" rx="13" fill="#F8F5EF" stroke="#D7D0C4" stroke-width="2"/>
+    <text x="632" y="527" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="26" font-weight="700" letter-spacing="1.5">A READING PAGE</text>
+    <path d="M632 550h328M632 574h286" stroke="#B9B2A7" stroke-width="4" stroke-linecap="round"/>
+    <rect x="624" y="589" width="335" height="27" rx="5" fill="#F0C9A9"/>
+    <path d="M632 603h310M632 637h296" stroke="#8F897F" stroke-width="4" stroke-linecap="round"/>
+    <path d="M984 515h10M984 538h20M984 561h10M984 584h20M984 607h10M984 630h20" stroke="#41655D" stroke-width="5" stroke-linecap="round"/>
+  </g>
+
+  <text x="72" y="753" fill="#41655D" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="30" font-weight="700" letter-spacing="1.3">YOU CHOOSE A PASSAGE TO KEEP</text>
+  <path d="M790 622v70c0 30-27 35-70 35" fill="none" stroke="#C36D4C" stroke-width="4" stroke-linecap="round"/>
+  <path d="m731 716-13 11 13 11" fill="none" stroke="#C36D4C" stroke-width="4" stroke-linecap="round" stroke-linejoin="round"/>
+
+  <g id="annotation-note">
+    <rect x="190" y="778" width="820" height="174" rx="20" fill="#FFFCF7" stroke="#CFC7B9" stroke-width="2"/>
+    <path d="M292 807h62M292 826h49" stroke="#A9A194" stroke-width="3" stroke-linecap="round"/>
+    <path d="M292 846h62" stroke="#C36D4C" stroke-width="7" stroke-linecap="round"/>
+    <path d="M292 869h137" stroke="#A9A194" stroke-width="3" stroke-linecap="round"/>
+    <path d="M292 893h18l8 8 8-8h18v31h-52z" fill="#E7ECE7" stroke="#41655D" stroke-width="2" stroke-linejoin="round"/>
+    <text x="384" y="835" fill="#282E2B" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="44" font-weight="700">ANNOTATION NOTE</text>
+    <text x="384" y="882" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="36">Highlights and comments in your vault</text>
+    <text x="384" y="927" fill="#41655D" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="34" font-weight="600">Book: bookmark · Feed: star</text>
+  </g>
+
+  <text x="72" y="1004" fill="#736E65" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif" font-size="25" letter-spacing="1.4">CONCEPTUAL FLOW · NOT AN APP SCREENSHOT</text>
+</svg>
