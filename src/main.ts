@@ -715,6 +715,13 @@ export default class UNreaderPlugin extends Plugin {
 		this.registerView(VIEW_TYPE_UNREADER, leaf => new UNreaderView(leaf, this));
 		this.registerView(VIEW_TYPE_UNREADER_SIDEBAR, leaf => new UNreaderSidebarView(leaf, this));
 		this.addSettingTab(new UNreaderSettingTab(this.app, this));
+		// 固定入口复用已有侧栏打开路径，沿用位置偏好和页面记忆。
+		const sidebarRibbon = this.addRibbonIcon("book-open", t("cmdOpenReader"), () => {
+			void this.openReader();
+		});
+		this.register(onLangChange(() => {
+			sidebarRibbon.setAttribute("aria-label", t("cmdOpenReader"));
+		}));
 
 		// 跟踪最近活动的阅读视图（命令解析兜底的数据源之一）
 		this.registerEvent(this.app.workspace.on("active-leaf-change", leaf => {
