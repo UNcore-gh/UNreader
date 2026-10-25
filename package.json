@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "1.0.2",
+  "version": "1.0.3",
   "description": "UNreader - A beautiful local-first reader. EPUB first, plus MOBI/AZW3, TXT, HTML and RSS feeds.",
   "main": "main.js",
   "type": "module",
@@ -70,6 +70,7 @@
     "test:appearance-i18n": "esbuild test/appearance-i18n-probe.ts --bundle --outfile=test/appearance-i18n-bundle.js --format=iife --global-name=AppearanceI18nProbe --target=es2022 --alias:obsidian=./test/obsidian-stub-mdoverlay.mjs --external:./pdf.js --log-level=warning && node test/run-appearance-i18n.mjs",
     "test:shelf-dark": "node test/run-shelf-dark.mjs",
     "test:cardshell": "node test/run-cardshell.mjs",
+    "test:note-preview-layout": "esbuild test/note-preview-layout-probe.ts --bundle --outfile=test/note-preview-layout-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-note-preview-layout.mjs",
     "test:menu-anchor": "esbuild test/menu-anchor-probe.ts --bundle --outfile=test/menu-anchor-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-menu-anchor.mjs",
     "test:note-excerpt": "esbuild src/core/noteExcerpt.ts --bundle --outfile=test/note-excerpt-bundle.mjs --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub.mjs --log-level=warning && node test/run-note-excerpt.mjs",
     "test:preview": "esbuild test/preview-prune-probe.ts --bundle --outfile=test/preview-prune-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-preview-prune.mjs",

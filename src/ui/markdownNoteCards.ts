@@ -121,8 +121,8 @@ export function renderMarkdownNotes(
 		for (const item of starred) appendCard(group, item, "starred", actions);
 		group.toggleClass("is-scrollable", starred.length > STARRED_NOTE_VISIBLE_LIMIT);
 		// 超过露出上限才限高：用前 N 张卡片的实测高度（含组内 gap），rAF 里量 ——
-		// 此刻卡片刚插入、宽度已由打开的面板决定，offsetHeight 可用；字体/图片异步撑高
-		// 不影响笔记卡（只有文字单行省略）。
+		// 此刻卡片刚插入、宽度已由打开的面板决定，offsetHeight 可用；预览和缩略图异步落定后
+		// 由 ResizeObserver 再量一次，避免滚动区仍沿用加载前的旧高度。
 		if (starred.length > STARRED_NOTE_VISIBLE_LIMIT) refreshMarkdownNotesLayout(container);
 	}
 	if (recent.length) {
@@ -184,15 +184,21 @@ function appendCard(
 	// 要渲染 markdown 格式」—— 与 RSS 卡「订阅名 + 简介」占的是**同一格**（第 1 行第 1 列），
 	// 三张卡扫下来行数才齐。渲染走宿主注入的 `MarkdownRenderer`（这里只建容器），
 	// 所以 `**粗体**` / 列表 / `==高亮==` 在卡片上就是真的粗体和列表，不是语法符号。
-	// 默认 `is-hidden`：读盘是异步的，先占位再摘 —— 空盒子会把卡片撑高一截。
-	const excerpt = body.createDiv({ cls: "unreader-note-excerpt is-hidden" });
+	// 有正文供给时先预留最终两行预览的高度，避免读盘 / Markdown 渲染完成后
+	// 突然把整组等高卡片一起撑高。还不知道结果时保持不可见；空笔记和失败会撤掉预留。
+	const excerpt = body.createDiv({ cls: `unreader-note-excerpt ${actions.resolveExcerpt ? "is-pending" : "is-hidden"}` });
 	if (actions.resolveExcerpt) {
 		void actions.resolveExcerpt(item.path).then(markdown => {
 			const text = (markdown ?? "").trim();
 			// 卡片可能已被重绘移除（切页 / 星标都整体重绘一次）：先确认还挂在文档里再写。
-			if (!excerpt.isConnected || !text) return;
+			if (!excerpt.isConnected) return;
+			if (!text) {
+				excerpt.removeClass("is-pending");
+				excerpt.addClass("is-hidden");
+				resettleStarredGroupHeight(card);
+				return;
+			}
 			excerpt.empty();
-			excerpt.removeClass("is-hidden");
 			const render = actions.renderMarkdown;
 			// 先显形再渲染：渲染器（MathJax / mermaid）在 `display:none` 里可能量不到宽。
 			const done = render ? render(excerpt, text, item.path) : undefined;
@@ -204,12 +210,23 @@ function appendCard(
 				// 渲染完再清一遍：剩下的每个节点都必须真的有字，否则整块藏起来（卡片不留空行）。
 				if (!pruneNotePreview(excerpt)) {
 					excerpt.empty();
+					excerpt.removeClass("is-pending");
 					excerpt.addClass("is-hidden");
+					resettleStarredGroupHeight(card);
 					return;
 				}
+				excerpt.removeClass("is-pending");
+				excerpt.addClass("has-preview");
 				resettleStarredGroupHeight(card);
 			});
-		}).catch(() => { /* 读不出来就保持无预览：空行比一条错误横幅更不打扰 */ });
+		}).catch(() => {
+			// 读盘或渲染失败都撤掉加载占位，避免留一块空白或半截预览。
+			if (!excerpt.isConnected) return;
+			excerpt.empty();
+			excerpt.removeClass("is-pending");
+			excerpt.addClass("is-hidden");
+			resettleStarredGroupHeight(card);
+		});
 	}
 
 	// 底栏最左**不再是进度环**（用户 2026-10-13：「markdown 格式不需要阅读进度环，

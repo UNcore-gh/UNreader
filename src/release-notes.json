@@ -44,5 +44,27 @@
 				"Settings, reading appearance panels, and resource dialogs now have English copy. The interface can follow Obsidian's language or be switched manually."
 			]
 		}
+	},
+	"1.0.3": {
+		"title": {
+			"zh": "笔记卡片预览更稳定",
+			"en": "Stable Markdown note previews"
+		},
+		"summary": {
+			"zh": "Markdown 笔记卡的正文预览和图片缩略图异步加载后，不再把同组卡片和底部按钮一起撑高。",
+			"en": "Asynchronous Markdown previews and image thumbnails no longer resize a group of note cards or move their action bars."
+		},
+		"items": {
+			"zh": [
+				"笔记卡在读取和渲染正文预览时先保留稳定的两行空间，加载完成后不会突然撑高卡片或移动底部按钮。",
+				"空笔记、读取失败以及渲染后没有有效内容时，预览占位会自动收起，不会留下空白行。",
+				"在桌面、手机和平板的自动化布局回归中验证了长标题卡、正文预览和缩略图加载前后的高度与底栏位置。"
+			],
+			"en": [
+				"Note cards reserve a stable two-line area while previews load, so a completed preview no longer grows the card or moves its action bar.",
+				"Empty notes, read failures, and previews with no renderable content collapse the reserved space instead of leaving a blank row.",
+				"Automated desktop, phone, and tablet layout checks cover card height and action-bar position before and after preview and thumbnail loading."
+			]
+		}
 	}
 }

@@ -7953,6 +7953,19 @@ body.theme-dark {
 	display: none;
 }
 
+/* 笔记预览加载中先占住两行的最终空间；有内容后保留同一最小高度，避免异步回填
+   改变卡片组的等高行。真正空白的加载态只保留尺寸、不显示短横，失败/空内容会撤掉此类。 */
+.unreader-note-excerpt.is-pending:empty {
+	display: block;
+	min-height: calc(2.9em + 9px);
+	visibility: hidden;
+}
+
+.unreader-note-excerpt.is-pending,
+.unreader-note-excerpt.has-preview {
+	min-height: calc(2.9em + 9px);
+}
+
 /* ---------- 笔记卡动作钮组（标注 / 复制 / 定位 / 置顶） ---------- */
 .unreader-note-actions {
 	display: flex;
