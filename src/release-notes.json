@@ -66,5 +66,25 @@
 				"Automated desktop, phone, and tablet layout checks cover card height and action-bar position before and after preview and thumbnail loading."
 			]
 		}
+	},
+	"1.0.4": {
+		"title": {
+			"zh": "安全依赖更新",
+			"en": "Security dependency update"
+		},
+		"summary": {
+			"zh": "把网页与文章内容清洗所用的 DOMPurify 更新到 3.4.17，避开 3.4.16 及以前版本报告的潜在漏洞范围。",
+			"en": "Updated DOMPurify, used to sanitize web and article HTML, to 3.4.17 outside the reported vulnerable range through 3.4.16."
+		},
+		"items": {
+			"zh": [
+				"DOMPurify 从 3.4.16 更新到 3.4.17；现有正文清洗、RSS 阅读与笔记卡功能保持不变。",
+				"生产构建、类型检查、Markdown 笔记卡布局和 RSS 回归会随本次小版本重新验证。"
+			],
+			"en": [
+				"Updated DOMPurify from 3.4.16 to 3.4.17 without changing content sanitization, RSS reading, or Markdown note-card behavior.",
+				"The patch release re-runs the production build, type check, Markdown note-card layout, and RSS regressions."
+			]
+		}
 	}
 }
