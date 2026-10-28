@@ -23,15 +23,34 @@ const MAX_MSG = 2000
 
 const entries: LogEntry[] = []
 let enabled = false
+let selectionProvider: (() => unknown[]) | null = null
+let clearSelection: (() => void) | null = null
+const clearListeners = new Set<() => void>()
+
+export function onDiagnosticClear(fn: () => void): () => void {
+	clearListeners.add(fn)
+	return () => clearListeners.delete(fn)
+}
+
+function clearDiagnostics(): void {
+	entries.length = 0
+	clearSelection?.()
+	for (const fn of clearListeners) fn()
+}
 let envProvider: (() => Record<string, string>) | null = null
+
+export function setSelectionDiagProvider(read: () => unknown[], clear: () => void): void {
+	selectionProvider = read
+	clearSelection = clear
+}
 
 export function isDebugEnabled(): boolean {
 	return enabled
 }
 
-/** 当前缓冲条数（设置页计数用） */
+/** 可导出的全部记录数；划词现场独立缓冲，清空后也可能先于普通日志出现。 */
 export function entryCount(): number {
-	return entries.length
+	return entries.length + (enabled ? selectionProvider?.().length ?? 0 : 0)
 }
 
 /** 缓冲快照（拷贝，调用方可安全渲染） */
@@ -56,7 +75,7 @@ export function setDebugEnabled(value: boolean): void {
 			}
 		}
 	} else {
-		entries.length = 0
+		clearDiagnostics()
 	}
 }
 
@@ -81,7 +100,7 @@ export function error(...parts: unknown[]): void {
 }
 
 export function clear(): void {
-	entries.length = 0
+	clearDiagnostics()
 }
 
 /** console 劫持桥接入口（main.ts）：本插件带 [UNreader] 前缀的
@@ -132,6 +151,13 @@ export function buildReport(): string {
 	lines.push("--------------------------------------")
 	for (const e of entries) {
 		lines.push(`[${new Date(e.t).toISOString()}] [${e.level}] ${e.msg}`)
+	}
+	if (enabled && selectionProvider) {
+		const snapshots = selectionProvider()
+		if (snapshots.length) {
+			lines.push("\n=== Selection toolbar snapshots ===")
+			lines.push(JSON.stringify(snapshots, null, 2))
+		}
 	}
 	return lines.join("\n")
 }

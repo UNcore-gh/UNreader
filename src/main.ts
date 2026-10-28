@@ -27,7 +27,7 @@ import { setLang, getLang, resolveLang, normalizeLangPref, onLangChange, t, tf, 
 import { VIEW_TYPE_UNREADER, UNreaderView, ReaderSelectionInfo } from "./ui/readerView";
 import { ResourceManagerModal, type ManagedResource } from "./ui/resourceManagerModal";
 import { collectNeighborFacts } from "./ui/explorerDiag";
-import { readSelectionDiag, setSelectionDiagSink } from "./ui/selectionDiag";
+import { readSelectionDiag, clearSelectionDiag } from "./ui/selectionDiag";
 import { ExplorerHeal } from "./ui/explorerHeal";
 import { MdOverlayManager } from "./ui/mdOverlay";
 import { AddFeedModal, DeleteFeedModal, FeedManagerModal, ImportOpmlModal, RenameFeedModal } from "./ui/feedModals";
@@ -209,13 +209,6 @@ export default class UNreaderPlugin extends Plugin {
 	private hasExistingPluginData = false;
 	private releaseNotesPromptTimer: number | null = null;
 	private activeReleaseNotesModal: ReleaseNotesModal | null = null;
-	/** 划词工具条取证**自动落盘的冷却表**：文件名 → 上次写盘时间戳。
-	 *
-	 *  为什么要按名字分别冷却（2026-10-12）：取证有**两条彼此独立**的通道 ——
-	 *  `avoid`（工具条已落位、仍与可见原生栏相交）与 `capture`（选到字、工具条却
-	 *  压根没出现，见 `selectionDiag.recordCaptureDiag`）。共用一枚时间戳会让
-	 *  **先发生的那条把后发生的挤掉**，而用户这一轮报的恰恰是后者 ⇒ 又要空手而归。 */
-	private readonly selbarDiagAt = new Map<string, number>();
 	// 最近一次存活的阅读视图：阅读器为 iframe 架构，焦点进入书页后
 	// Obsidian 的 getActiveViewOfType 可能解析不到活动视图（表现为命令面板
 	// 首次回车不执行、点过书页后又失效），用自跟踪视图做兜底
@@ -290,6 +283,7 @@ export default class UNreaderPlugin extends Plugin {
 		// 诊断日志（src/core/debugLog.ts）：设置开关关闭时零捕获零存储；
 		// 环境快照喂进开启记录与导出报告（版本/平台/关键设置）
 		debugLog.setEnvProvider(() => this.collectLogEnv());
+		debugLog.setSelectionDiagProvider(readSelectionDiag, clearSelectionDiag);
 		debugLog.setDebugEnabled(this.settings.debugLog);
 
 		// 全局错误捕获钩子（仅调试开关开启时落缓冲，不改动控制台行为）：
@@ -747,30 +741,6 @@ export default class UNreaderPlugin extends Plugin {
 
 this.registerCommands();
 		this.scheduleReleaseNotesReminder();
-
-		// 划词工具条「被官方快速编辑栏遮挡」的**自动落盘出口**（见 selectionDiag）。
-		//
-		// 为什么必须自动落（2026-10-12 定稿，第三次真机报障后）：工具条是**边沿触发的
-		// 瞬时物** —— 用户要执行的「快照相邻界面」命令得先开命令面板，而命令面板一点屏
-		// 就把工具条收掉。于是「复现 → 手动执行命令」这条路径天然脆弱：用户很可能复现了
-		// 故障却拿不到证据（夹具已证明复现不出来，真机数据是唯一出路）。
-		// 改成**故障发生那一刻自动写盘**：只要 `selectionDiag` 在最终落点测到「工具条仍与
-		// 可见原生栏相交」，就把这一条现场写到库根 `unreader-selbar-overlap-*.txt`。
-		// 节流放在这里（同一串位置只留第一份），拖动选词的连续采样不会反复写盘。
-		setSelectionDiagSink(rec => {
-			// 冷却：一次「故障现场」只需一份证据。拖动选词时本函数可达 ~1 次/秒
-			// （`selectionDiag` 的指纹去重是 1s 窗口），若不限流会在库根刷出一串文件。
-			// 4s 窗口足够把「同一次复现」压成一份，又不至于吞掉用户随后的第二次复现。
-			//
-			// **按证据种类各自冷却、各自命名**（2026-10-12）：两条通道的现场必须都能留下
-			// —— 工具条「压根没出现」与「出现了但被压住」是**不同的故障**，前者发生时
-			// 后者那条通道**永不触发**；共用一个冷却只会让现场互相覆盖。
-			const name = rec.kind === "capture" ? "unreader-selbar-noshow" : "unreader-selbar-overlap";
-			const now = Date.now();
-			if (now - (this.selbarDiagAt.get(name) ?? 0) < 4000) return;
-			this.selbarDiagAt.set(name, now);
-			void writeReport(this.app, name, JSON.stringify(rec, null, 2)).catch(() => undefined);
-		});
 	}
 
 	/**
@@ -1022,7 +992,7 @@ this.registerCommands();
 			// 46/46 全绿），只能靠真机落盘的原始几何定位；而工具条是**边沿触发的瞬时物**
 			// ——命令面板一点屏就收起它，现场快照类诊断「永远拍到健康的病人」。
 			// `selectionDiag` 是**被动记录**的环形缓冲（最后一次划词的几何留在里面），
-			// 与调试日志开关无关，所以这条命令能安全地把那一刻带出来。
+			// 开启调试后记录的现场可由这条手动命令一并导出。
 			facts.selectionToolbar = readSelectionDiag();
 			debugLog.info("[neighbor-ui]", facts);
 			const text = JSON.stringify(facts, null, 2);
@@ -1052,6 +1022,7 @@ this.registerCommands();
 	}
 
 	onunload(): void {
+		debugLog.setDebugEnabled(false);
 		this.unloaded = true;
 		this.flushSave();
 		// 退出/禁用/重载插件时先把阅读视图的当前位置交出来：视图层的去抖（800ms）
@@ -3235,7 +3206,7 @@ this.registerCommands();
 
 	async persistData(): Promise<void> {
 		// 设置保存即同步诊断开关（设置页切开关后立刻生效/清缓冲）
-		debugLog.setDebugEnabled(this.settings.debugLog);
+		debugLog.setDebugEnabled(!this.unloaded && this.settings.debugLog);
 		try {
 			this.saving = true;
 			// 外观是设备本地状态（各设备可各自选择预设/各自微调），不写入随库

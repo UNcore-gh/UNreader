@@ -2755,7 +2755,7 @@ export class EngineAdapter {
 	/** 章节(iframe)高度变化时保持视觉位置稳定：
 	 *  视口上方内容增删会平移当前阅读位置，按变化区域相对视口的位置比例补偿
 	 *  scrollTop；若补偿打断了进行中的平滑滑动，则以平移后的目标重新起滑 */
-	private compensateHeightShift(wrap: HTMLElement, oldWrapH: number, newWrapH: number, firstRender = false): void {
+	private compensateHeightShift(wrap: HTMLElement, oldWrapH: number, newWrapH: number, firstRender = false, scrollTopBefore?: number): void {
 		const cont = this.continuousEl
 		if (!cont || newWrapH === oldWrapH) return
 		// 程序化跳转在途：视口正被驱动到目标，此时的补偿会与落地滚动打架（跳转抖动的主因）；
@@ -2763,7 +2763,9 @@ export class EngineAdapter {
 		// （翻页滑动不设 jumpPending，仍走补偿保稳定）。
 		if (this.jumpPending) return
 		const delta = newWrapH - oldWrapH
-		const vpTop = cont.scrollTop
+		// 收缩可能使浏览器先把 scrollTop 夹到新的书末；必须从写入前的位置算，
+		// 否则在已自动收回的位置上再减一次高度差，正文会被重复向下推。
+		const vpTop = scrollTopBefore ?? cont.scrollTop
 		const wrapTop = wrap.offsetTop
 		const wrapBottom = wrapTop + oldWrapH
 		let shift: number
@@ -4621,6 +4623,7 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 		// offsetHeight 取两者较大者，即当前真实占位高）。
 		const w0 = this.contSectionEls.get(f.idx)
 		const prevVis = w0 ? w0.offsetHeight : 0
+		const prevScrollTop = this.continuousEl?.scrollTop
 		const st = f.iframe.style
 		if (!w) {
 			// 摘掉覆盖值 ⇒ 基础 CSS 的 `var(--ur-frame-w,100%)` 落回 100%（跟随阅读区）。
@@ -4639,12 +4642,11 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 		}
 		// 章节占位高度活在**宿主视觉空间**（见 frameVisualHeight）。缩放比一变，旧占位值
 		// 立刻失真（auto→手机差 3 倍），文档总高会按旧比例撑住、切换瞬间画面整体跳掉。
-		// 这里就地换算一次并做视口补偿；随后那次重测只负责「内容重排本身的增量」，
-		// 它的 deltaWrap 基准（frameVisualHeight(lastHeight)）与这里写入的值正好对齐。
+		// 这里就地换算一次并按真实盒高做视口补偿；随后那次重测只负责内容重排的增量。
 		if (w0 && f.lastHeight > 0) {
 			const newVis = this.frameVisualHeight(f.lastHeight)
 			w0.style.minHeight = newVis + "px"
-			this.compensateHeightShift(w0, prevVis, newVis)
+			this.compensateHeightShift(w0, prevVis, w0.offsetHeight, false, prevScrollTop)
 		}
 		return true
 	}
@@ -4662,17 +4664,17 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 	private writeFrameHeight(idx: number, f: ContFrame, h: number): void {
 		const w0 = this.contSectionEls.get(idx)
 		const oldWrapH = w0 ? w0.offsetHeight : 0
+		const scrollTopBefore = this.continuousEl?.scrollTop
 		const prevH = f.lastHeight
 		const hVis = this.frameVisualHeight(h)
-		// 首次渲染时 wrap 高度是占位（12vh / iframe 默认高），
-		// 实际增量 = 真实高度 − 占位高度，而非 h − 0
-		const deltaWrap = prevH > 0 ? hVis - this.frameVisualHeight(prevH) : hVis - oldWrapH
 		f.lastHeight = h
 		f.iframe.style.height = h + "px"
 		if (w0) {
 			w0.style.minHeight = hVis + "px"
-			// 视口上方内容高度变化时稳住阅读位置（否则表现为翻页第一步多滚一页）
-			this.compensateHeightShift(w0, oldWrapH, oldWrapH + deltaWrap, prevH === 0)
+			// 必须比较宿主章节写入前后的真实盒高，不能用 iframe 内容高推算：
+			// 相邻章节还有 padding/border，border-box 的 minHeight 又包含它们。
+			// 首次补载时漏掉这部分，会让已显示的正文每章下移约 25px，再被恢复校正拉回。
+			this.compensateHeightShift(w0, oldWrapH, w0.offsetHeight, prevH === 0, scrollTopBefore)
 		}
 		// 本章真实高度到手 = 一次可靠的比例样本：校准其余未载章的占位高度，
 		// 让文档总高尽早贴近真实（远距离跳转能否一次直达取决于此）

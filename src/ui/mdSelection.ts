@@ -19,6 +19,7 @@ import type { AiToolEntry } from "../types";
 import type { Bounds } from "./floatingPlacement";
 import { NativeChromeGate } from "./nativeChromeGate";
 import { nodeChain, recordCaptureDiag } from "./selectionDiag";
+import { isDebugEnabled, onDiagnosticClear } from "../core/debugLog";
 import { SelectionToolbar } from "./selectionToolbar";
 import {
 	analyzeHighlight, demark, demarkWindow, lineOffsetAt, planHighlight,
@@ -232,7 +233,8 @@ export class MdSelectionController {
 	 *  `null` = 成功走到 `showFor`；否则 = 早退原因（`view-null` / `no-text` / `scope-miss`…）。
 	 *  真机报「选中了文字但工具条不出现」时，这一个字段就指认了断在哪一环。 */
 	private lastCaptureNote: string | null = null;
-	/** 伴随 `lastCaptureNote` 的关键事实（选区落在哪一层、正文容器找没找到…），落盘时带走。 */
+	private stopDiagClear: (() => void) | null = null;
+	/** 伴随 `lastCaptureNote` 的关键事实（选区落在哪一层、正文容器找没找到…），手动导出时带走。 */
 	private lastCaptureFacts: Record<string, unknown> = {};
 	/** 「采集跑完但工具条最终不可见」的裁决定时器（见 armNoShowWatch）。 */
 	private noShowTimer = 0;
@@ -539,6 +541,7 @@ export class MdSelectionController {
 	 *  （视图形态取不到 / 选区为空 / 选区落在自家浮层 / 正文容器判据没命中 / range 取不到 /
 	 *  采集根本没被调到 / 采集成功但随后被收掉）。没有这一串自述，只能靠猜。 */
 	private narrate(note: string, facts: Record<string, unknown> = {}): void {
+		if (!isDebugEnabled()) return;
 		this.lastCaptureNote = note;
 		this.lastCaptureFacts = facts;
 	}
@@ -546,19 +549,21 @@ export class MdSelectionController {
 	/** 采集成功（走到了 `showFor`）：自述清空 = 「这次没有早退」。
 	 *  此时若裁决仍发现工具条不可见，那就是「显示了又被收掉」，另记一类（见 `verdictNoShow`）。 */
 	private narrateShown(facts: Record<string, unknown>): void {
+		if (!isDebugEnabled()) return;
 		this.lastCaptureNote = null;
 		this.lastCaptureFacts = facts;
 	}
 
 	/** 每次采集都挂一次「工具条最终出现了吗」的裁决（见 `NO_SHOW_VERDICT_MS`）。
 	 *
-	 *  为什么不能只在**早退**时落盘：另一种同样常见的形态是「采集成功、工具条也显示了，
+	 *  为什么不能只在**早退**时记录：另一种同样常见的形态是「采集成功、工具条也显示了，
 	 *  但随后被某条出口收掉」—— 用户看到的就是「闪一下 / 完全不出现」，只挂在早退上会漏掉。
 	 *  所以这里统一回看**最终状态**。
 	 *
 	 *  同一次拖动里的多次采集共用同一个定时器：采集 ~120ms 一次，若每次都重新计时，
 	 *  拖动期间永远等不到裁决。 */
 	private armNoShowWatch(): void {
+		if (!isDebugEnabled()) return;
 		if (this.noShowTimer) return;
 		this.noShowTimer = window.setTimeout(() => {
 			this.noShowTimer = 0;
@@ -566,7 +571,7 @@ export class MdSelectionController {
 		}, NO_SHOW_VERDICT_MS);
 	}
 
-	/** 裁决「跑完采集链、工具条仍不可见」是不是故障，是则落盘（被 `armNoShowWatch` 调）。 */
+	/** 裁决「跑完采集链、工具条仍不可见」是不是故障，是则记录现场（被 `armNoShowWatch` 调）。 */
 	private verdictNoShow(): void {
 		try {
 			if (!this.attached) return;
@@ -596,7 +601,6 @@ export class MdSelectionController {
 				scopeContaining: typeof facts.scopeContaining === "number" ? facts.scopeContaining : -1,
 				scopePick: typeof facts.scopePick === "string" ? facts.scopePick : null,
 				inOwnHost: facts.inOwnHost === true,
-				selPreview: typeof facts.selPreview === "string" ? facts.selPreview : "",
 				// 闸门是**全局** patch：这张注册表能直接指认「是不是某个 owner 判据恒真，
 				// 把官方快速编辑栏在所有视图里一起屏蔽掉了」（见 NativeChromeGate.debugState）
 				gate: NativeChromeGate.debugState(),
@@ -617,6 +621,12 @@ export class MdSelectionController {
 		const host = this.deps.host();
 		if (!host || this.attached) return;
 		this.attached = true;
+		this.stopDiagClear = onDiagnosticClear(() => {
+			this.lastCaptureNote = null;
+			this.lastCaptureFacts = {};
+			if (this.noShowTimer) window.clearTimeout(this.noShowTimer);
+			this.noShowTimer = 0;
+		});
 		host.appendChild(this.toolbar.containerEl);
 
 		const doc = this.ownerDoc();
@@ -650,6 +660,10 @@ export class MdSelectionController {
 	detach(): void {
 		if (!this.attached) return;
 		this.attached = false;
+		this.stopDiagClear?.();
+		this.stopDiagClear = null;
+		this.lastCaptureNote = null;
+		this.lastCaptureFacts = {};
 		const doc = this.ownerDoc();
 		doc.removeEventListener("selectionchange", this.onSelectionChange);
 		doc.removeEventListener("pointerup", this.onPointerUp);
@@ -796,8 +810,7 @@ export class MdSelectionController {
 			rangeCount: sel?.rangeCount ?? 0,
 			selLength: text.length,
 			selCollapsed: sel ? sel.isCollapsed : null,
-			selPreview: text.slice(0, 24),
-			anchorChain: range ? nodeChain(range.commonAncestorContainer) : null,
+			anchorChain: isDebugEnabled() && range ? nodeChain(range.commonAncestorContainer) : null,
 		};
 		if (!text || !range || sel?.isCollapsed) {
 			this.narrate("no-text", baseFacts);

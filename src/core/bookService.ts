@@ -107,7 +107,7 @@ export function createVaultResourceResolver(app: App, sourcePath: string): (raw:
 
 /** 插件自己写在库根的诊断产物（见 core/debugReport.ts 与 ui/explorerDiag.ts）。
  *  它们也是 .txt，但显然不是书——不加白名单会把「保存到库」生成的日志混进打开列表。 */
-const DIAG_TXT = /^unreader-(?:debug-log|neighbor)-/;
+const DIAG_TXT = /^(?:unreader-(?:debug-log|neighbor)-|unreader-selbar-(?:noshow|overlap)-\d{14}(?:-\d+)?$)/i;
 
 /** 书籍路径集合；手动移除 / 分类只针对真实存在的书。 */
 function hiddenBookPaths(plugin: UNreaderPlugin): Set<string> {

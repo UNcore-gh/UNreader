@@ -1,9 +1,10 @@
-import { ItemView, type WorkspaceLeaf } from "obsidian";
+import { ItemView, TFile, TFolder, type TAbstractFile, type WorkspaceLeaf } from "obsidian";
 import type UNreaderPlugin from "../main";
 import { createSidePanel, toggleFeedStarState, type NativeSidebarContext, type SidePanelMode } from "./sidePanels";
 import { isRssFormatEnabled } from "../core/readableFormats";
 import { normalizeNativeSidebarMode } from "../core/nativeSidebarState";
 import { saveFeedEntryAsMarkdown } from "../core/feedNoteSave";
+import { isSupportedBookExt } from "../core/bookService";
 
 export const VIEW_TYPE_UNREADER_SIDEBAR = "unreader-sidebar";
 
@@ -27,6 +28,24 @@ export class UNreaderSidebarView extends ItemView {
 	getIcon(): string { return "book-open"; }
 
 	async onOpen(): Promise<void> {
+		// 书架是按需扫描的快照；库内文件变化后，当前打开的书架也要重新扫描。
+		// 合并一批同步事件，避免移动整个文件夹时反复重画。
+		let shelfRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+		const scheduleShelfRefresh = () => {
+			if (shelfRefreshTimer !== null) clearTimeout(shelfRefreshTimer);
+			shelfRefreshTimer = setTimeout(() => {
+				shelfRefreshTimer = null;
+				this.refreshBookshelf();
+			}, 100);
+		};
+		const relevant = (file: TAbstractFile, oldPath?: string): boolean =>
+			file instanceof TFolder || (file instanceof TFile && (isSupportedBookExt(file.extension)
+				|| (oldPath != null && isSupportedBookExt(oldPath.split(".").pop() ?? ""))));
+		this.registerEvent(this.app.vault.on("create", file => { if (relevant(file)) scheduleShelfRefresh(); }));
+		this.registerEvent(this.app.vault.on("modify", file => { if (relevant(file)) scheduleShelfRefresh(); }));
+		this.registerEvent(this.app.vault.on("delete", file => { if (relevant(file)) scheduleShelfRefresh(); }));
+		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => { if (relevant(file, oldPath)) scheduleShelfRefresh(); }));
+		this.register(() => { if (shelfRefreshTimer !== null) clearTimeout(shelfRefreshTimer); });
 		this.contentEl.addClass("unreader-native-sidebar");
 		this.context = this.plugin.getNativeSidebarContext();
 		const modes: SidePanelMode[] = isRssFormatEnabled(this.plugin.settings.disabledFormats)

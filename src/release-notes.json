@@ -86,5 +86,29 @@
 				"The patch release re-runs the production build, type check, Markdown note-card layout, and RSS regressions."
 			]
 		}
+	},
+	"1.0.5": {
+		"title": {
+			"zh": "诊断日志与阅读稳定性修复",
+			"en": "Diagnostic logging and reading stability fixes"
+		},
+		"summary": {
+			"zh": "停止自动生成划词诊断文件，改为按需在内存中记录并手动导出；修复连续阅读中章节补载造成的正文跳动。",
+			"en": "Selection diagnostics now stay in memory only when enabled and are exported manually. Chapter loading no longer shifts visible text in continuous reading."
+		},
+		"items": {
+			"zh": [
+				"划词诊断统一受默认关闭的调试日志开关控制，不再自动向库中写文件，也不记录选中文字预览；关闭、清空或卸载时清除记录。",
+				"清空日志后新产生的划词现场也可以正常复制或保存，完整现场不会被普通日志的长度限制截断。",
+				"书架排除原有命名的划词诊断文件，文件创建、删除和移动后自动更新当前书架。",
+				"按章节实际占用高度保持阅读位置，修复首次补载、章节重新加载和书末收缩等情况下的正文跳动。"
+			],
+			"en": [
+				"Selection diagnostics follow the diagnostic log toggle, which is off by default. They never write files automatically or retain selected-text previews; disabling, clearing, or unloading clears the records.",
+				"Selection snapshots recorded after clearing the log can still be copied or saved, and full snapshots are not truncated by the ordinary log message limit.",
+				"The bookshelf excludes recognized legacy selection diagnostic files and refreshes after file creation, deletion, or movement.",
+				"Visible text stays in place using actual chapter dimensions during initial loading, reloading, and shrinking near the end of a book."
+			]
+		}
 	}
 }

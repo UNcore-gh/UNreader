@@ -1,35 +1,5 @@
-/**
- * 划词工具条「被官方快速编辑栏遮挡」的**现场取证**。
- *
- * ## 为什么必须有它（2026-10-12 第三次真机报障「仍然重叠」后定稿）
- *
- * 这个故障在夹具里**测不出来**。本轮按项目铁律「夹具全绿而真机红 = 夹具漏了真机结构」
- * 已经把 `test/md-kb.html` 按 obsidian.asar 的**真结构**重建 ——
- *   · 补回 `body > .app-container > .horizontal-main-container > .workspace`
- *     （asar app.js 逐字：`this.appContainerEl=e.createDiv("app-container");
- *      this.horizontalMainContainerEl=this.appContainerEl.createDiv("horizontal-main-container");
- *      this.workspaceEl=this.horizontalMainContainerEl.createDiv("workspace")`）；
- *   · 补回 `.workspace-split → .workspace-tabs → .workspace-tab-container → leaf` 整条链；
- *   · 去掉夹具自己杜撰的 `.app-container{position:relative}`（官方只对 `body:not(.is-mobile)` 写）；
- *   · 换回官方的尺寸口径（`.workspace-tabs > *{flex:1 0 0}`、`.workspace-tabs .workspace-leaf
- *     {height:100%}`、`.workspace-tabs .workspace-leaf .view-content{height:100%}`）。
- * 结果 `test:md-kb` **仍然 46/46 全绿** ⇒ 差异**不在夹具骨架**，而在**真机才有的信号**
- * （android adjustResize 下 `innerHeight`/`100vh`/`--keyboard-height` 的取值组合、原生栏的
- * 实际几何、`visualViewport` 是否收缩、`.mobile-toolbar` 的入场时序……）。
- * 真机又没有 devtools，唯一的出路是**把那一刻的原始几何落盘**，由开发者读盘定位。
- *
- * ## 采集口径（与 `explorerDiag` 同源的三条约束）
- *
- * 1. **只读，不写**：不改类、不动布局、不触发重排（否则快照本身改变现场）。
- * 2. **不假设「我猜对了选择器」**：每个关心的地方都记「在不在 + 实测 rect + 关键计算样式」，
- *    让开发者能用这份数据**推翻**我们的模型，而不是只看到模型自证。
- * 3. **低开销**：只在「工具条落到最终位置」记一条；环形缓冲上限 8 条；相邻的重复记录按
- *    「指纹相同且距今 <1s」丢弃。
- *
- * ⚠️ **故意不依赖调试日志开关**：这条排查路径上用户往往把日志关着，而证据必须落盘
- * （与 `snapshotNeighborUi` 同款理由）。落盘出口 = 既有命令「快照相邻界面」。
- * 缓冲区**只存在内存里**，从不自动写盘。
- */
+import { isDebugEnabled } from "../core/debugLog";
+/** 划词现场只在调试日志开启时留在有限内存中，供用户手动导出。 */
 import { floatingBottomInset, keyboardBandCeiling, nativeBarOverlapTop, nativeBarTop, usableBottom, viewportFloor } from "./keyboardInset";
 
 /** 关键祖先链：从工具条往外一直到 `body`，覆盖「谁给谁定高」的每一层 */
@@ -74,25 +44,6 @@ const records: SelectionDiagRecord[] = [];
 let seq = 0;
 let lastSig = "";
 let lastSigAt = 0;
-
-/**
- * 自动落盘出口：**只在「确认被遮挡」那一次**触发（`avoid.stillOverlapping === true`）。
- *
- * 为什么要自动落（2026-10-12 定稿）：工具条是**边沿触发的瞬时物** —— 用户要执行的
- * 「快照相邻界面」命令本身要先开命令面板，而**命令面板一点屏就把工具条收掉**。
- * 于是「复现后手动执行命令」这条路径天然脆弱：用户很可能复现了故障、却拿不到证据。
- * 交给出错那一刻**自动**写一份，复现即取证，不依赖任何后续操作。
- *
- * 落盘由 `main.ts` 在 onload 时注册（本模块不依赖 `App`，只暴露 sink）；
- * 节流由 sink 自己负责（同一串位置只留第一份，避免拖动选词时反复写盘）。
- */
-type DiagSink = (rec: SelectionDiagRecord) => void;
-let sink: DiagSink | null = null;
-
-/** 注册自动落盘出口（`main.ts` onload 调一次；传 null 撤销）。 */
-export function setSelectionDiagSink(fn: DiagSink | null): void {
-	sink = fn;
-}
 
 function r1(v: number): number {
 	return Math.round(v * 10) / 10;
@@ -252,6 +203,7 @@ export function recordSelectionDiag(
 	containerEl: HTMLElement,
 	avoid?: Record<string, unknown>,
 ): void {
+	if (!isDebugEnabled()) return;
 	try {
 		const doc = containerEl.ownerDocument ?? document;
 
@@ -302,7 +254,7 @@ export function recordSelectionDiag(
 		// ★ 决定性信号：**最终落点**上，工具条与「当前可见的原生栏」是否仍相交。
 		// 这是「用户看到的重叠」与「我们以为算对了」之间的唯一判据 ——
 		// 不看模型、不看命中测试，只看两条带在不在同一片像素上。
-		// 相交 ⇒ 这一次就是故障现场 ⇒ 立刻自动落盘（见 setSelectionDiagSink）。
+		// 相交表示这一帧可能是故障现场。
 		const overlapTop = nativeBarOverlapTop(tRect, doc);
 		rec.stillOverlapping = overlapTop != null;
 		rec.overlapTop = overlapTop == null ? null : r1(overlapTop);
@@ -315,7 +267,7 @@ export function recordSelectionDiag(
 		// `visibleNativeBars`，那里除了 rect 还过一遍 computed style（display / visibility /
 		// opacity 与 `top > 0`）。**真机键盘动画期间**那条栏完全可能 `opacity:0` 淡入
 		// 或 `top` 短暂 ≤0 —— 于是判据 ② 判它「不可见」⇒ `stillOverlapping` 恒 false
-		// ⇒ 自动落盘永不触发 ⇒ 又要空手而归（正是这一轮要避免的事）。
+		// ⇒ 常规判据可能遗漏这次故障。
 		// 这里只问「元素在不在 + display 是不是 none」，与产品那两套判据**不共享任何门控**。
 		const rawBar = doc.querySelector<HTMLElement>(".mobile-toolbar");
 		const rawBarPresent = !!rawBar && (() => {
@@ -334,7 +286,7 @@ export function recordSelectionDiag(
 		lastSig = sig;
 		lastSigAt = now;
 
-		// 故障现场自动落盘：**两条信号取并集**（见上），任一条成立即写。
+		// 故障标记取两条信号的并集，供手动导出的报告分析。
 		//   · `stillOverlapping`：判据 ② 认定相交（我们**确信**重叠）。
 		//   · 无门控兜底：栏确实在场（非 display:none）且工具条底边越过栏顶边
 		//     （判据 ② 可能因 opacity/瞬态 top 而漏判，但几何关系客观存在）。
@@ -342,13 +294,7 @@ export function recordSelectionDiag(
 		const failure = overlapTop != null
 			|| (rawBarPresent && rawBarTop != null && tRect.bottom > rawBarTop);
 		rec.failure = failure;
-		if (failure && sink) {
-			try {
-				sink(rec);
-			} catch {
-				/* 落盘失败绝不能影响插件 */
-			}
-		}
+
 	} catch {
 		/* 取证绝不能弄垮插件 */
 	}
@@ -402,7 +348,7 @@ export function nodeChain(node: Node | null): string {
  *
  * ## 为什么必须补这一条通道（2026-10-12 真机报障）
  *
- * `recordSelectionDiag`（上面那条）只在「工具条已落到最终位置、且与原生栏相交」时才写盘。
+ * `recordSelectionDiag`（上面那条）记录工具条落到最终位置时的现场。
  * 用户报的是**上游故障**：`「现在 obsidian 原生工具栏不出现了，但是即便如此，那个选中
  * 文字工具栏还是没有出现」` —— 工具条根本不出现时，那条通道**永不触发**，
  * 复现再多次也是空手而归。
@@ -416,7 +362,7 @@ export function nodeChain(node: Node | null): string {
  *    判据恒真都会让官方快速编辑栏在所有视图里消失，这张表能直接指认是谁。
  *
  * 沿用与 `recordSelectionDiag` 相同的三条约束：**只读、不假设选择器、低开销**。
- * 落盘出口同一条 sink（`main.ts` 按 `kind` 分文件与各自冷却）。
+ * 两条通道均受调试开关控制，记录只保存在有限内存中，由用户手动导出。
  */
 export interface CaptureDiagInput {
 	/** 早退原因 / 裁决结论（调用点见 `mdSelection.capture` 的 `narrate()`） */
@@ -444,8 +390,6 @@ export interface CaptureDiagInput {
 	scopePick?: string | null;
 	/** 选区是否落在我们自己的叠加根里（命中的话采集会主动放弃） */
 	inOwnHost: boolean;
-	/** 选中文字预览（前 24 字，用来确认「用户确实选到了字」） */
-	selPreview?: string;
 	/** 闸门注册表快照：`NativeChromeGate.debugState()` */
 	gate?: unknown;
 	/** 划词工具条容器（可能为 null） */
@@ -455,6 +399,7 @@ export interface CaptureDiagInput {
 }
 
 export function recordCaptureDiag(input: CaptureDiagInput): void {
+	if (!isDebugEnabled()) return;
 	try {
 		const containerEl = input.containerEl ?? null;
 		const doc = containerEl?.ownerDocument ?? document;
@@ -478,7 +423,6 @@ export function recordCaptureDiag(input: CaptureDiagInput): void {
 			scopeContaining: input.scopeContaining ?? -1,
 			scopePick: input.scopePick ?? null,
 			inOwnHost: input.inOwnHost,
-			selPreview: input.selPreview ?? "",
 			// 选区端点的祖先链：scope 判据没命中时，这一行直接说明它落在哪
 			anchorChain: input.facts?.anchorChain ?? null,
 			...(input.facts ?? {}),
@@ -515,13 +459,6 @@ export function recordCaptureDiag(input: CaptureDiagInput): void {
 		lastSig = "";
 		lastSigAt = now;
 
-		if (sink) {
-			try {
-				sink(rec);
-			} catch {
-				/* 落盘失败绝不能影响插件 */
-			}
-		}
 	} catch {
 		/* 取证绝不能弄垮插件 */
 	}

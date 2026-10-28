@@ -543,7 +543,7 @@ const STRINGS = {
 		diagSecTitle: "诊断",
 		diagLogName: "调试日志",
 		diagLogDesc:
-			"插件异常需要排查时开启：捕获插件报错与关键事件到内存（关闭时零捕获零存储，重启即清空）。开启后复现问题，再导出发给开发者。",
+			"插件异常需要排查时开启：捕获插件报错、关键事件和划词工具条现场到内存，不记录选中文字，也不会自动写文件。关闭或重启后清空；开启后复现问题，再手动导出。",
 		diagExportName: "导出日志",
 		diagExportDesc: "当前已记录 {count} 条。复制到剪贴板或保存为库内文件后发给开发者。",
 		diagCopyLog: "复制日志",
@@ -1042,7 +1042,7 @@ const STRINGS = {
 		diagSecTitle: "Diagnostics",
 		diagLogName: "Diagnostic log",
 		diagLogDesc:
-			"Turn this on when a plugin error needs investigating: it captures plugin errors and key events in memory (zero capture and zero storage while off, and it is cleared on restart). Reproduce the problem, then export and send it to the developer.",
+			"Turn this on when a plugin error needs investigating: it captures errors, key events, and selection toolbar snapshots in memory without selected text or automatic file writes. Turning it off or restarting clears them. Reproduce the problem, then export manually.",
 		diagExportName: "Export the log",
 		diagExportDesc:
 			"{count} entries recorded so far. Copy it to the clipboard or save it as a vault file and send it to the developer.",
