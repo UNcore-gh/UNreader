@@ -7979,5 +7979,5 @@ function eventElement(e: Event): Element | null {
 	const target = e.target as Node | null;
 	if (!target) return null;
 	if (target.nodeType === 1) return target as Element;
-	return (target as Node).parentElement ?? null;
+	return (target).parentElement ?? null;
 }

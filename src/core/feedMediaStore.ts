@@ -163,7 +163,7 @@ export class FeedMediaStore {
 		for (let attempt = 0; attempt <= NET_RETRY; attempt++) {
 			const blob = await withNetworkSlot(() => this.fetchOnce(url, limit, referer));
 			if (blob) return blob;
-			if (attempt < NET_RETRY) await new Promise(r => setTimeout(r, NET_RETRY_DELAY));
+			if (attempt < NET_RETRY) await new Promise(r => window.setTimeout(r, NET_RETRY_DELAY));
 		}
 		return null;
 	}

@@ -134,7 +134,7 @@ export function renderMarkdownNotes(
 
 /** 把置顶组的 max-height 钉在「前 N 张卡片 + 间隙」的实测高度上，超出由组内滚动呈现。 */
 function capStarredGroupHeight(group: HTMLElement): void {
-	const cards = Array.from(group.children).filter(el => el instanceof HTMLElement) as HTMLElement[];
+	const cards = Array.from(group.children).filter(el => el.instanceOf(HTMLElement));
 	const isScrollable = cards.length > STARRED_NOTE_VISIBLE_LIMIT;
 	group.toggleClass("is-scrollable", isScrollable);
 	if (!isScrollable) {

@@ -484,7 +484,7 @@ function renderTypographyMarkdown(markdown: string, doc: Document): { els: HTMLE
 		if (heading?.[1] && heading[1].trim()) {
 			flushPara();
 			flushList();
-			const h = doc.createElement(`h${(heading[0].match(/^#+/) ?? ["#"])[0]!.length}`);
+			const h = doc.createElement(`h${(heading[0].match(/^#+/) ?? ["#"])[0].length}`);
 			fillTypographyInline(h, heading[1].trim(), doc);
 			els.push(h);
 			continue;

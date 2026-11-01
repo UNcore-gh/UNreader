@@ -73,7 +73,7 @@ function panelVisible(): boolean {
 
 function ensurePanel(): HTMLElement {
 	if (panelEl && panelEl.isConnected) return panelEl
-	const el = document.createElement("div")
+	const el = createDiv()
 	el.className = "unreader-card-details"
 	el.setAttribute("role", "tooltip")
 	// ⚠️ **刻意不挂** mouseenter/mouseleave：看板不吃指针（挪开卡片就立即消失，见文件头）。

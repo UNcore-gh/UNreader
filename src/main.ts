@@ -1,6 +1,6 @@
-import { Plugin, TFile, Notice, FuzzySuggestModal, MarkdownView, WorkspaceLeaf, Platform, normalizePath, MarkdownRenderer, Component } from "obsidian";
+import { Plugin, TFile, Notice, FuzzySuggestModal, MarkdownView, WorkspaceLeaf, Platform, normalizePath, MarkdownRenderer, Component, View } from "obsidian";
 import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance, platformAppearanceDefaults, HIGHLIGHT_COLORS } from "./types";
-import type { AiToolOverride, FeedEntryKind, MarkdownNoteListItem, MarkdownNoteRecentEntry, NoteMetaSummary } from "./types";
+import type { AiToolOverride, FeedEntryKind, MarkdownNoteListItem, NoteMetaSummary } from "./types";
 import { UNreaderSettingTab } from "./settings";
 import { getBookFiles, getRemovedBookshelfEntries, SUPPORTED_BOOK_FORMATS, READER_BOOK_EXT_ORDER, isReaderBookFile } from "./core/bookService";
 import { isBookExtEnabled, isMdFormatEnabled, isRssFormatEnabled, normalizeDisabledFormats } from "./core/readableFormats";
@@ -23,7 +23,7 @@ import * as debugLog from "./core/debugLog";
 import { saveDebugReportToVault, writeReport } from "./core/debugReport";
 import { setCustomFonts, clearCustomFonts } from "./core/engineAdapter";
 import { idleYield } from "./core/idle";
-import { setLang, getLang, resolveLang, normalizeLangPref, onLangChange, t, tf, highlightColorLabel, type LangPref } from "./core/i18n";
+import { setLang, resolveLang, normalizeLangPref, onLangChange, t, tf, highlightColorLabel, type LangPref } from "./core/i18n";
 import { VIEW_TYPE_UNREADER, UNreaderView, ReaderSelectionInfo } from "./ui/readerView";
 import { ResourceManagerModal, type ManagedResource } from "./ui/resourceManagerModal";
 import { collectNeighborFacts } from "./ui/explorerDiag";
@@ -39,7 +39,7 @@ import { BookshelfCategoryManagerModal } from "./ui/bookshelfModals";
 import type { BookshelfCategory } from "./types";
 import { FeedMediaStore } from "./core/feedMediaStore";
 import { countWords } from "./core/wordCount";
-import { annotationFileFor, annotationFileForFeed, loadAnnotations, sanitizeBookmarkLabel, writeAnnotations, type AnnotationFileData, type StoredBookmark, type StoredHighlight } from "./core/annotationStore";
+import { annotationFileFor, annotationFileForFeed, loadAnnotations, sanitizeBookmarkLabel, writeAnnotations, type AnnotationFileData, type StoredHighlight } from "./core/annotationStore";
 import { collectHighlights } from "./core/mdSelectionMap";
 import { applyEditPlan, applyVaultEditPlan } from "./core/mdHighlightWrite";
 import { normalizeNativeSidebarMode, resolveNativeSidebarCardIntent, resolveNativeSidebarPickerMode, selectNativeSidebarKeeperIndex, selectPreferredReaderIndex, shouldMigrateNativeSidebarGroup } from "./core/nativeSidebarState";
@@ -92,9 +92,9 @@ function normalizeMetaValue(value: unknown): string {
 /** frontmatter 的 tags / aliases：数组或「逗号/空格分隔的字符串」两种写法都归一为数组。 */
 function normalizeMetaList(value: unknown): string[] {
 	if (value == null) return [];
-	const raw = Array.isArray(value) ? value : String(value).split(/[,\s]+/);
+	const raw: unknown[] = Array.isArray(value) ? value : typeof value === "string" ? value.split(/[,\s]+/) : [];
 	return raw
-		.map(item => String(item).trim().replace(/^#/, ""))
+		.map(item => (typeof item === "string" || typeof item === "number" ? String(item) : "").trim().replace(/^#/, ""))
 		.filter(item => item.length > 0)
 		.slice(0, 8);
 }
@@ -1057,7 +1057,7 @@ this.registerCommands();
 	/** 记录/清除存活阅读视图（由 readerView 在加载完成、获得焦点与关闭时调用） */
 	noteActiveReader(view: UNreaderView): void {
 		this.lastReader = view;
-		const active = this.app.workspace.activeLeaf;
+		const active = this.app.workspace.getActiveViewOfType(View)?.leaf;
 		if (active === view.leaf || active?.view instanceof UNreaderSidebarView) {
 			this.updateNativeSidebarContext(view.getNativeSidebarContext(), view.leaf);
 		}
@@ -1932,9 +1932,9 @@ this.registerCommands();
 
 	updateNativeSidebarContext(context: NativeSidebarContext | null, owner?: object): void {
 		if (owner && this.nativeSidebarContextOwner && this.nativeSidebarContextOwner !== owner
-			&& this.app.workspace.activeLeaf !== owner) return;
+			&& this.app.workspace.getActiveViewOfType(View)?.leaf !== owner) return;
 		this.nativeSidebarContext = context;
-		this.nativeSidebarContextOwner = owner ?? (context ? this.app.workspace.activeLeaf ?? null : null);
+		this.nativeSidebarContextOwner = owner ?? (context ? this.app.workspace.getActiveViewOfType(View)?.leaf ?? null : null);
 		const leaf = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER_SIDEBAR)[0];
 		if (leaf?.view instanceof UNreaderSidebarView) leaf.view.setContext(context);
 	}
@@ -1945,7 +1945,7 @@ this.registerCommands();
 	}
 
 	private activeNativeSidebarContext(): NativeSidebarContext | null {
-		const leaf = this.app.workspace.activeLeaf;
+		const leaf = this.app.workspace.getActiveViewOfType(View)?.leaf;
 		if (!leaf) return this.nativeSidebarContext;
 		if (leaf.view instanceof UNreaderSidebarView) return this.nativeSidebarContext ?? this.getActiveReader()?.getNativeSidebarContext() ?? null;
 		if (leaf.view instanceof UNreaderView) return leaf.view.getNativeSidebarContext();
@@ -2357,7 +2357,7 @@ this.registerCommands();
 
 	private preferredReaderLeaf(targetKey?: string): WorkspaceLeaf | null {
 		const leaves = this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER);
-		const active = this.app.workspace.activeLeaf;
+		const active = this.app.workspace.getActiveViewOfType(View)?.leaf;
 		const activeIndex = active?.view instanceof UNreaderView ? leaves.indexOf(active) : -1;
 		const lastIndex = this.lastReader?.containerEl?.isConnected
 			? leaves.findIndex(leaf => leaf.view === this.lastReader)
@@ -3419,7 +3419,7 @@ this.registerCommands();
 				this.settings.markdownNoteStarred,
 				MARKDOWN_NOTE_RECENT_LIMIT,
 			);
-			this.settings.markdownNoteRecent = normalized.recent as MarkdownNoteRecentEntry[];
+			this.settings.markdownNoteRecent = normalized.recent;
 			this.settings.markdownNoteStarred = normalized.starred;
 		}
 		// 分类 / 手动移除是书架的轻量元数据；旧 data.json 没有这些键时用默认值兜底。

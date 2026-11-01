@@ -187,7 +187,7 @@ function showFileMenu(
 	const workspace = app.workspace;
 	const nativeTrigger = workspace.trigger.bind(workspace);
 	workspace.trigger = ((name: string, ...args: unknown[]) => {
-		const result = nativeTrigger(name as never, ...args as never[]);
+		const result = nativeTrigger(name, ...args as never[]);
 		if (name === "file-menu" && args[1] === file && args[2] === "file-explorer-context-menu") {
 			// 这里拿到的 `args[0]` 就是原生刚建好的那个 Menu 实例 —— 原生紧接着才会
 			// `setParentElement(...)` 并 `showAtMouseEvent(...)`，所以在这一刻拆锚有效。
@@ -197,7 +197,7 @@ function showFileMenu(
 			addPluginItems?.(args[0] as Menu);
 		}
 		return result;
-	}) as typeof workspace.trigger;
+	});
 	try {
 		view.onFileContextMenu.call(view, event, file);
 	} catch (error) {
@@ -503,7 +503,7 @@ export function showFeedEntryMenu(
 	if (entry.url) menu.addItem(item => item
 		.setTitle("在系统浏览器打开原文")
 		.setIcon("external-link")
-		.onClick(() => openExternalLink(entry.url!)));
+		.onClick(() => openExternalLink(entry.url)));
 	menu.addItem(item => item
 		.setTitle("保存为 Markdown")
 		.setIcon("file-down")

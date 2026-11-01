@@ -283,7 +283,7 @@ async function savePodcastAudio(
 		// 下载中途出错了，把已经写了一半的文件删掉，别留个坏文件在 vault 里
 		const existing = app.vault.getAbstractFileByPath(target);
 		if (existing) {
-			try { await app.vault.delete(existing); } catch { /* ignore */ }
+			try { await app.fileManager.trashFile(existing); } catch { /* ignore */ }
 		}
 		return null;
 	}

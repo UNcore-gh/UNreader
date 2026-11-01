@@ -368,7 +368,7 @@ export class MdSelectionController {
 		if (on) {
 			NativeChromeGate.sync(
 				this,
-				this.deps.app as unknown as object,
+				this.deps.app,
 				// ⚠️ 判据必须是**实测**（手指是否按在正文上 / 正文里选区刚刚活没活过），
 				// 不能只是闩住的意图布尔量（2026-10-12 加固）：`chromeGateOn` 依赖「每一次变化
 				// 都上报」这条不变量，而驱动它的出口有十几条（工具条各收口按钮 / Esc / 点空白 /

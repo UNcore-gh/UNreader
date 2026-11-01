@@ -91,21 +91,8 @@
 	   @media (hover:none) 里抬到 0.4，那里没有 hover 恢复路径）。
 	   用法见下方「工具栏半隐藏 → 浮动目录条同步加深淡化」段。 */
 	--ur-nav-cluster-idle: 0.3;
-	/* 当前章短横的两段配色（轨道 = 本章剩余 / 填充 = 章内已读）。
-	   轨道必须是**纯 accent**（旧实现是 45% 半透明）。
-	   为什么「只把颜色加深不够」，以及为什么还要动粗细（--ur-active-h）：
-	   普通一级短横是「不透明灰 × opacity 0.95 × 轨 0.55」，对背景的对比度实测
-	   **4.06（深色）/ 3.38（浅色）**；当前章即使把 accent 顶到 100%，也只有
-	   **2.04 / 2.11** —— 只有普通短横的一半。因为 accent 蓝的**相对亮度天生
-	   低于中性灰**，而灰短横在亮度上是占优的。这条差距在浅色主题下同样成立
-	   （蓝 2.11 vs 灰 3.38），不是深色主题独有。
-	   所以「当前章更醒目」不能只靠颜色：颜色给的是**色相**区分（蓝 vs 灰，一眼
-	   可辨但对比度低），必须再补一个**与亮度无关的通道**——粗细。加粗在明暗两
-	   套主题下等效，且不干扰「长度编码层级」（长度仍是 data-depth 的事），
-	   读起来就是「这条是当前所在位置」。
-	   进度仍由填充段的**明度**表达（--ur-active-fill）：轨道=实 accent 是定位
-	   信号，填充=accent 混 text-normal 是进度信号，两者不互抢同一个 alpha。 */
-	--ur-active-track: 100%;
+	/* 当前章保留目录短横原色底条，已读部分用主题强调色覆盖；不再整条预先铺满强调色。 */
+	--ur-active-track: var(--text-normal);
 	/* 当前章短横的粗细（设计 px，乘 --ur-u）。普通短横是 2，当前章 3 —— 比
 	   长度通道更可靠：长度已被层级占用，而粗细是空闲的。节点高度固定 8u、
 	   短横垂直居中，所以改这个值**不产生任何布局位移**（间距断言照旧成立）。 */
@@ -117,19 +104,8 @@
 	   ⚠️ 居中留白 --ur-pad-center 不在本规则声明：它必须落在 .unreader-continuous 自身，
 	   并通过 stage 的容器查询宽度计算，否则侧栏钉住/台前调度缩窄阅读容器时可能不重算。 */
 	--ur-read-max: var(--file-line-width, 700px);
-	/* 已读段：accent 与 --text-normal 混合。深色主题下 text-normal 是浅灰
-	   → 混合色偏亮；浅色主题下是深灰 → 偏暗。明度差自动跟着主题走，
-	   不需要为明暗两套主题各写一条规则。
-	   ⚠️ 比例 **30%**（2026-10-13 用户「每个短横都是一个进度条，把这个正在进度移动的
-	   这个弄得更明显一点」）：与纯 accent 轨道的对比度必须够 —— 55% 时实测只有 **1.64**
-	   （分界线几乎看不出，只会觉得「整条蓝」），30% 时 **2.15**，且明暗两套主题都成立
-	   （混合色自动跟主题走明暗）。**不要再退回 55%**：回归 `test:toc-rail` 的
-	   `activeFillContrast` 钉着「填充 ↔ 轨道对比度 ≥ 1.9」。 */
-	--ur-active-fill: color-mix(in srgb, var(--interactive-accent) 30%, var(--text-normal));
-	/* 当前章「进度头」的颜色：骑在已读/未读分界上的那枚亮块，随 --p 左右滑动。
-	   与填充同族（--text-normal）——深色主题偏亮、浅色主题偏暗，两侧都能与纯 accent
-	   轨道拉开硬边。它的**几何位置**才是信息（进度到哪了），颜色只是让它看得见。 */
-	--ur-active-head: var(--text-normal);
+	--ur-active-fill: var(--interactive-accent);
+	--ur-active-head: var(--interactive-accent);
 	/* 当前章短横的光晕模糊半径（单位 px，乘 --ur-u 随「目录条大小」缩放）。
 	   常态给一点点让当前章从背景里浮起来；整条轨被淡化时由上方规则加大到 3
 	   ——轨淡了，但「我在哪」不该跟着一起淡。设为 0 可关掉。 */
@@ -1070,27 +1046,9 @@ body.is-tablet .unreader-md-root .unreader-nav-nodes {
 
 .unreader-nav-node.is-active .unreader-nav-dash {
 	opacity: 1;
-	/* 当前章短横 = 轨道 + 填充。宽度仍由层级（data-depth）决定，高亮不改长度；
-	   进度只改填充比例，不产生任何布局变化。
-	   四个通道各司其职，互不挤占（这是「辨识度」与「进度可读」能同时成立的
-	   唯一方式）：
-	   - **粗细**（--ur-active-h，3 vs 2）＝ 主定位信号。与亮度、主题、层级都
-	     正交，在对比度天生吃亏的 accent 蓝上补足「这条不一样」的感知。
-	   - **色相**（--ur-active-track，纯 accent）＝ 次定位信号，蓝 vs 灰。
-	   - **填充明度**（::after，--ur-active-fill）＝ 进度信号「本章读到哪」。
-	     与轨道同色系、异明度，已读/未读分界一眼可辨（对比度 ≥ 1.9，见变量区）；
-	     且进度为 0 时整条仍是实 accent（对比度最低点已由粗细+纯色兜住），
-	     不会出现「刚进新章就看不见」。
-	   - **进度头**（::before，--ur-active-head）＝ 进度的**动态**信号：一枚骑在
-	     已读/未读分界线上的亮块，`left = --p × 100%`，随滚动左右滑动（0.18s 过渡）。
-	     为什么要它：单看「一度深、一度浅」两段，读 30% 还是 40% 要靠目测比长度；
-	     有了硬边界上的这枚头，「正在走」这件事是一眼看得见的动态。
-	   - **光晕**（--ur-active-glow）＝ 收尾的感知权重，见变量区。
-	   该元素 `overflow:hidden` 只裁 ::after / ::before（进度头的溢光一并被裁，
-	   所以头部不额外画 box-shadow）；box-shadow 画在外框外侧不受裁剪，
-	   且与尺寸无关、不占布局。 */
+	/* 层级决定长度，粗细标记当前章；强调色覆盖的长度表达已读比例。 */
 	height: calc(var(--ur-active-h, 3) * var(--ur-u));
-	background: color-mix(in srgb, var(--interactive-accent) var(--ur-active-track, 100%), transparent);
+	background: var(--ur-active-track);
 	box-shadow: 0 0 calc(var(--ur-active-glow, 1.5) * var(--ur-u))
 		color-mix(in srgb, var(--interactive-accent) 55%, transparent);
 	position: relative;
@@ -1110,7 +1068,7 @@ body.is-tablet .unreader-md-root .unreader-nav-nodes {
 }
 
 /* 当前章的「进度头」：骑在已读/未读分界线上的那枚亮块，随 --p 左右滑动。
-   与填充共用同一个 --p（SideNav.setChapterProgress 写在**节点**上，两者都继承得到），
+   与强调色填充共用同一个 --p（SideNav.setChapterProgress 写在**节点**上，两者都继承得到），
    所以边界永远对得齐；宽度 1.6u、以边界为中心（-0.8u 抵消），不占布局。 */
 .unreader-nav-node.is-active .unreader-nav-dash::before {
 	content: "";
@@ -8429,10 +8387,10 @@ body:not(.is-phone) .unreader-md-view .view-header {
 	--ur-u: calc(var(--unreader-rail-scale, 1) * 1px);
 	--ur-float-rail-w: calc(32 * var(--ur-u));
 	--ur-nav-cluster-idle: 0.3;
-	--ur-active-track: 100%;
+	--ur-active-track: var(--text-normal);
 	--ur-active-h: 3;
-	--ur-active-fill: color-mix(in srgb, var(--interactive-accent) 30%, var(--text-normal));
-	--ur-active-head: var(--text-normal);
+	--ur-active-fill: var(--interactive-accent);
+	--ur-active-head: var(--interactive-accent);
 	--ur-active-glow: 1.5;
 	--ur-nav-panel-max: min(62vh, 480px);
 	/* 笔记抽屉沿用阅读器的宽度变量（`.unreader-anno-panel{width:var(--ur-anno-w)}`）；

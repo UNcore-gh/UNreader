@@ -40,7 +40,7 @@ const SVG_NS = "http://www.w3.org/2000/svg"
 /** 建一枚进度环。返回的元素就是底栏里的第一个子节点（CSS 靠类名定位）。 */
 export function createProgressRing(options: ProgressRingOptions): HTMLElement {
 	const doc = document
-	const ring = doc.createElement("div")
+	const ring = createDiv()
 	ring.className = options.cls ? `unreader-ring ${options.cls}` : "unreader-ring"
 
 	const twoState = options.state != null
@@ -54,7 +54,7 @@ export function createProgressRing(options: ProgressRingOptions): HTMLElement {
 	ring.setAttribute("aria-label", options.label)
 	// 读数出口：回归断言读它，比解析 SVG 属性稳。
 	ring.dataset.ringPercent = String(percent)
-	ring.dataset.ringState = twoState ? (options.state as string) : "fraction"
+	ring.dataset.ringState = twoState ? (options.state) : "fraction"
 
 	// 自绘 SVG（不用 obsidian 的 setIcon：内置图标集里没有可控的进度环）。
 	const svg = doc.createElementNS(SVG_NS, "svg")

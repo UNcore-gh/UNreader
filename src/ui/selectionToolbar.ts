@@ -200,7 +200,7 @@ export class SelbarAiMenu {
 			else this.openAiMenu();
 		});
 		btn.addEventListener("pointerenter", e => {
-			if ((e as PointerEvent).pointerType === "touch") return;
+			if ((e).pointerType === "touch") return;
 			if (this.aiMenuOpen) {
 				this.cancelAiMenuClose();
 				return;
@@ -209,7 +209,7 @@ export class SelbarAiMenu {
 			this.openAiMenu();
 		});
 		btn.addEventListener("pointerleave", e => {
-			if ((e as PointerEvent).pointerType === "touch") return;
+			if ((e).pointerType === "touch") return;
 			this.scheduleAiMenuClose();
 		});
 		// 指针从按钮移进名单要继续保持展开（两者间有一条小缝）
@@ -553,7 +553,7 @@ export class SelectionToolbar {
 			this.inAvoidPass = false;
 			// 取证放在 finally：无论正常收敛、提前 break 还是抛错，**最后一帧的真实几何**
 			// 都必须落进缓冲 —— 真机上这一次可能就是用户看到重叠的那一次。
-			recordSelectionDiag("avoid", this.containerEl, diag as unknown as Record<string, unknown>);
+			recordSelectionDiag("avoid", this.containerEl, diag);
 		}
 	}
 

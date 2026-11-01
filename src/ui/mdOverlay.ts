@@ -732,9 +732,9 @@ export class MdOverlaySession {
 		if (!this.sideNav) return;
 		this.railTocBtn = this.sideNav.addIconButton("list", "打开目录", () => this.sideNav?.togglePanel("actions"));
 		this.sideNav.setTocTrigger(this.railTocBtn);
-		this.railSideBtn = this.sideNav.addIconButton("panel-left", "显示内容列表", () => this.toggleSidePanel());
+		this.railSideBtn = this.sideNav.addIconButton("panel-left", "显示内容列表", () => { void this.toggleSidePanel(); });
 		// 直达「本页高亮」：一键打开抽屉并落在标注页（再点且正停在标注页则收起）。
-		this.railHighlightsBtn = this.sideNav.addIconButton("highlighter", "显示本页高亮列表", () => this.toggleAnnotationsPanel());
+		this.railHighlightsBtn = this.sideNav.addIconButton("highlighter", "显示本页高亮列表", () => { void this.toggleAnnotationsPanel(); });
 		this.sideNav.addSeparator();
 		this.railPinBtn = this.sideNav.addIconButton("pin", "置顶当前笔记", () => {
 			const path = this.currentPath();

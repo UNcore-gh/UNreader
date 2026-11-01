@@ -506,10 +506,10 @@ export class AIPanel {
 		const enabledLabel = enabledRow.createEl("label", { text: "启用该工具", attr: { for: "unreader-ai-tool-enabled" } });
 		enabledLabel.addEventListener("click", () => {
 			enabledBox.checked = !enabledBox.checked;
-			this.editor = { ...this.editor!, enabled: enabledBox.checked } as AiEditor;
+			this.editor = { ...this.editor!, enabled: enabledBox.checked };
 		});
 		enabledBox.addEventListener("change", () => {
-			this.editor = { ...this.editor!, enabled: enabledBox.checked } as AiEditor;
+			this.editor = { ...this.editor!, enabled: enabledBox.checked };
 		});
 
 		// 作用域（两选一）
@@ -581,7 +581,7 @@ export class AIPanel {
 				cls: this.editor.scope === scope.key ? "is-active" : "",
 			});
 			button.addEventListener("click", () => {
-				this.editor = { ...this.editor!, scope: scope.key } as AiEditor;
+				this.editor = { ...this.editor!, scope: scope.key };
 				this.renderScopeButtons();
 			});
 		}

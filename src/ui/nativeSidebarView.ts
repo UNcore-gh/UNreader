@@ -30,10 +30,10 @@ export class UNreaderSidebarView extends ItemView {
 	async onOpen(): Promise<void> {
 		// 书架是按需扫描的快照；库内文件变化后，当前打开的书架也要重新扫描。
 		// 合并一批同步事件，避免移动整个文件夹时反复重画。
-		let shelfRefreshTimer: ReturnType<typeof setTimeout> | null = null;
+		let shelfRefreshTimer: number | null = null;
 		const scheduleShelfRefresh = () => {
-			if (shelfRefreshTimer !== null) clearTimeout(shelfRefreshTimer);
-			shelfRefreshTimer = setTimeout(() => {
+			if (shelfRefreshTimer !== null) window.clearTimeout(shelfRefreshTimer);
+			shelfRefreshTimer = window.setTimeout(() => {
 				shelfRefreshTimer = null;
 				this.refreshBookshelf();
 			}, 100);
@@ -45,7 +45,7 @@ export class UNreaderSidebarView extends ItemView {
 		this.registerEvent(this.app.vault.on("modify", file => { if (relevant(file)) scheduleShelfRefresh(); }));
 		this.registerEvent(this.app.vault.on("delete", file => { if (relevant(file)) scheduleShelfRefresh(); }));
 		this.registerEvent(this.app.vault.on("rename", (file, oldPath) => { if (relevant(file, oldPath)) scheduleShelfRefresh(); }));
-		this.register(() => { if (shelfRefreshTimer !== null) clearTimeout(shelfRefreshTimer); });
+		this.register(() => { if (shelfRefreshTimer !== null) window.clearTimeout(shelfRefreshTimer); });
 		this.contentEl.addClass("unreader-native-sidebar");
 		this.context = this.plugin.getNativeSidebarContext();
 		const modes: SidePanelMode[] = isRssFormatEnabled(this.plugin.settings.disabledFormats)

@@ -39,7 +39,7 @@ export function parseVersion(v: unknown): [number, number, number] | null {
  *  （生产构建把 obsidian 列为 external，两种写法都能拿到真值；这里只是让探针链路干净。） */
 function readApiVersion(): string {
 	try {
-		const v = Reflect.get(obsidianModule as object, "apiVersion");
+		const v: unknown = Reflect.get(obsidianModule, "apiVersion");
 		return typeof v === "string" ? v : "";
 	} catch {
 		return "";
@@ -63,7 +63,7 @@ export function supportsColorHighlight(): boolean {
 /** 读一个 CSS 自定义属性经浏览器解析后的颜色串（任何颜色格式都会被归一成 rgb()/rgba()）。 */
 function readComputedColor(name: string, forceTheme: "light" | "dark" | null): string {
 	try {
-		const probe = document.createElement("div");
+		const probe = createDiv();
 		if (forceTheme) probe.className = forceTheme === "dark" ? "theme-dark" : "theme-light";
 		probe.style.cssText = COLOR_PROBE_CSS;
 		probe.style.backgroundColor = `var(${name})`;

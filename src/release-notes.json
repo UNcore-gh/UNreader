@@ -110,5 +110,29 @@
 				"Visible text stays in place using actual chapter dimensions during initial loading, reloading, and shrinking near the end of a book."
 			]
 		}
+	},
+	"1.0.6": {
+		"title": {
+			"zh": "目录进度显示与兼容性整理",
+			"en": "Chapter progress and compatibility improvements"
+		},
+		"summary": {
+			"zh": "让目录条的已读进度更直观，并整理窗口兼容和代码检查提醒。",
+			"en": "Make chapter progress easier to read and improve window compatibility and code quality."
+		},
+		"items": {
+			"zh": [
+				"当前章节保留中性底条，已读部分以主题强调色覆盖，更直观地显示章内进度。",
+				"改用受支持的当前视图接口，完善跨窗口元素判断与侧栏刷新定时器。",
+				"清理多余类型标记和未使用引用；代码检查警告从 64 条减少到 29 条，保留必要兼容写法。",
+				"下载失败后的文件清理遵循 Obsidian 的删除偏好。"
+			],
+			"en": [
+				"Keep a neutral chapter rail track and overlay the read portion with the theme accent color.",
+				"Use the supported active-view API and improve cross-window element checks and sidebar refresh timers.",
+				"Remove redundant type assertions and unused imports, reducing lint warnings from 64 to 29 while retaining compatibility-sensitive code.",
+				"Respect Obsidian deletion preferences when cleaning up failed downloads."
+			]
+		}
 	}
 }
