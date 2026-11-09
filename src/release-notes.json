@@ -135,6 +135,11 @@
 			]
 		}
 	},
+	"1.0.9": {
+		"title": {"zh": "移动端面板布局修复", "en": "Mobile panel layout fix"},
+		"summary": {"zh": "重新发布移动端外观和 AI 面板的布局修复。", "en": "Re-release the mobile appearance and AI panel layout fix."},
+		"items": {"zh": ["统一外观与 AI 面板的尺寸限制，并让手机 Markdown 视图的外观面板避开底部导航栏。"], "en": ["Use consistent size limits for the appearance and AI panels, keeping the appearance panel clear of phone Markdown navigation."]}
+	},
 	"1.0.8": {
 		"title": {"zh": "移动端面板布局修复", "en": "Mobile panel layout fix"},
 		"summary": {"zh": "调整移动端外观和 AI 面板的尺寸与位置。", "en": "Adjust the size and position of the appearance and AI panels on mobile."},
