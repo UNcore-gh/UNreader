@@ -7423,9 +7423,10 @@ body.theme-dark .unreader-ai-panel {
 	background-color: var(--ur-surface);
 }
 
-body.is-phone .unreader-ai-panel,
-body.is-tablet .unreader-ai-panel {
+body.is-phone :is(.unreader-ai-panel, .unreader-appearance-panel),
+body.is-tablet :is(.unreader-ai-panel, .unreader-appearance-panel) {
 	width: min(360px, calc(100vw - 28px));
+	max-height: min(72vh, 560px);
 }
 
 /* ---------- 7. 弹窗面板：本插件自己的弹窗（`UnreaderModal` 基类） ---------- */
@@ -8485,7 +8486,7 @@ body:not(.is-phone) .unreader-md-view .view-header {
 	pointer-events: auto;
 }
 
-/* 手机 md 视图：AI 助手面板改成贴底 sheet。桌面/平板那套「左缘 54px + 垂直居中」
+/* 手机 md 视图：AI 和外观面板共用贴底布局。桌面/平板那套「左缘 54px + 垂直居中」
    在手机上有两个问题：① 盒子底边落进悬浮的官方 `.mobile-navbar`，面板下半截
    （含关闭钮）被压住点不到；② 左缘起步浪费小屏宽度。底边让开 host 上的
    三个让位量（mdOverlay 实测写入）：
@@ -8500,7 +8501,7 @@ body:not(.is-phone) .unreader-md-view .view-header {
      · `--ur-bottom-inset` = 只含原生栏（无键盘档的兜底，与上面取 max）。
      · `env(safe-area-inset-bottom)` = 无原生栏时的安全区兜底。
    特异性 (0,3,1) 同时压过基础规则与 body.is-phone .unreader-ai-panel 的宽度规则。 */
-body.is-phone .unreader-md-root .unreader-ai-panel {
+body.is-phone .unreader-md-root :is(.unreader-ai-panel, .unreader-appearance-panel) {
 	left: 8px;
 	right: 8px;
 	top: auto;
