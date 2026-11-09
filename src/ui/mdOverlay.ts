@@ -1,3 +1,6 @@
+import { dismissFloatingPanel } from "./floatingPanel";
+import { alignContentPopover } from "./growingPopover";
+import { setSelectionChromeHidden } from "./selectionChrome";
 /** markdown 阅读视图叠加层 —— 插件不接管 .md 文件，只在 Obsidian **原生**
  *  markdown 阅读视图（`MarkdownView.getMode() === "preview"`）上叠加四件东西：
  *  顶边章节进度条、右缘章节浮动目录条（复用阅读器的 `SideNav`）、沉浸模式会话，
@@ -40,6 +43,7 @@
  *  卸载必须**零残留**：ResizeObserver、scroll 监听、host 元素、leaf 容器类、
  *  app 级 body 类全部摘干净——宿主是官方视图，脏了就是污染用户的编辑器。 */
 
+import { AI_ICON_NAME } from "./aiIcon";
 import { Component, MarkdownRenderer, MarkdownView, Notice, setIcon, TFile, type App, type HeadingCache, type Workspace, type WorkspaceLeaf } from "obsidian";
 import { SideNav } from "./sideNav";
 import { SideHoverKeepAlive } from "./sideHoverKeepAlive";
@@ -65,7 +69,6 @@ import { NativeChromeGate } from "./nativeChromeGate";
 import { followHeaderMotion } from "./headerMotion";
 import { PLUGIN_NAV_HIDDEN_CLASS } from "./nativeNavGuard";
 import { bottomBarOverlap, floatingBottomInset, subscribeKeyboardGeometry, usableBottom } from "./keyboardInset";
-import { dispatchNativeContextMenu } from "./nativeContextMenu";
 import type UNreaderPlugin from "../main";
 
 /** 「滚动到多近算抵达本章」的余量（px）：比页首高略大，章标题刚被页首压住时
@@ -296,6 +299,7 @@ export class MdOverlaySession {
 	/** 同一 leaf 内换了文件后，只刷新工具栏状态（置顶按钮跟的是当前 file.path），
 	 *  不做整轮设置重放与进度重算 —— 换文件的滚动复位由官方视图负责。 */
 	refreshToolbar(): void {
+		this.selection?.hide();
 		this.syncToolbarButtons();
 	}
 
@@ -346,8 +350,9 @@ export class MdOverlaySession {
 		// actionsEl 里只放插件自己的阅读组件开关，正文排版（行距/字体/页宽）全部交给
 		// Obsidian 原生渲染器与主题，不在这里复制一套。
 		this.sideNav = new SideNav();
-		this.host.appendChild(this.sideNav.navEl);
+		// 与阅读器保持同一 DOM 顺序，复用「功能轨收边 → 目录短横淡化」的兄弟选择器。
 		this.host.appendChild(this.sideNav.actionsEl);
+		this.host.appendChild(this.sideNav.navEl);
 		// 「回到之前阅读」是 UNreader 内容轨的导航语义，对官方 Markdown 阅读模式没有
 		// 对应动作；不带着一个点了无反应的按钮。
 		this.sideNav.backEl.remove();
@@ -383,6 +388,11 @@ export class MdOverlaySession {
 			app: this.app,
 			view: () => this.view,
 			host: () => this.host,
+			// 选区工具条共用侧轨；拖选期间由共用显隐层临时收走工具栏和浮动目录。
+			selectionToolbarHost: () => this.sideNav?.getSelectionToolbarHost() ?? null,
+			onSelectionRailModeChange: active => this.sideNav?.setSelectionMode(active),
+			// 只改变临时可见性，不改原有工具栏、面板及原生导航状态。
+			onBodyDragChange: active => setSelectionChromeHidden(this.host, active),
 			windowFor: (range, rect) => this.windowForSelection(range, rect),
 			bounds: () => this.selectionBounds(),
 			aiTools: () => this.aiPanel?.selectionToolEntries() ?? [],
@@ -464,6 +474,7 @@ export class MdOverlaySession {
 		if (!this.host) return;
 		const next = modeOf(this.view);
 		if (next === this.mode) return;
+		this.selection?.hide();
 		this.mode = next;
 		// 点按显隐是**阅读模式**语义：切到编辑/实时预览先收干净。编辑态里「点一下
 		// 隐掉全部界面」不是阅读交互而是事故（光标落点、工具条全没了）。
@@ -716,7 +727,7 @@ export class MdOverlaySession {
 
 	/** 界面语言切换后重画当前已打开的 Markdown 外观面板。 */
 	refreshLanguage(): void {
-		this.appearancePanel?.refresh();
+		this.appearancePanel?.refresh(true);
 		this.syncToolbarButtons();
 	}
 
@@ -743,7 +754,7 @@ export class MdOverlaySession {
 		this.railAppearanceBtn = this.sideNav.addIconButton("sliders-horizontal", t("apOpen"), () => {
 			this.appearancePanel?.toggle();
 		});
-		this.railAIBtn = this.sideNav.addIconButton("sparkles", "打开 AI 助手", () => {
+		this.railAIBtn = this.sideNav.addIconButton(AI_ICON_NAME, "打开 AI 助手", () => {
 			this.aiPanel?.toggle();
 			this.syncToolbarButtons();
 		});
@@ -751,16 +762,7 @@ export class MdOverlaySession {
 			if (this.plugin.settings.mdOverlayImmersive === false) return;
 			this.toggleImmersion();
 		});
-		this.sideNav.addIconButton("ellipsis", "打开 Obsidian 原生右键菜单", () => this.openNativeContextMenu());
 		this.syncToolbarButtons();
-	}
-
-	/** Markdown 阅读/编辑容器共用同一原生右键事件；有选区时菜单落在选区上。 */
-	private openNativeContextMenu(): void {
-		const content = this.view?.contentEl;
-		if (!content) return;
-		const target = content.querySelector<HTMLElement>(".markdown-preview-view, .cm-scroller") ?? content;
-		dispatchNativeContextMenu(target, content.ownerDocument.defaultView ?? window);
 	}
 
 	/** 自定义命令按钮同步到侧栏槽与划词条槽（空配置时两槽不进 DOM）。 */
@@ -877,7 +879,11 @@ export class MdOverlaySession {
 		this.appearancePanel = new MdAppearancePanel({
 			read: () => this.readMdAppearance(),
 			write: patch => this.writeMdAppearance(patch),
-			onOpenChange: () => this.syncToolbarButtons(),
+			onOpenChange: open => {
+				this.syncToolbarButtons();
+				if (open && this.railAppearanceBtn && this.sideNav && this.appearancePanel)
+					alignContentPopover(this.appearancePanel.containerEl, this.railAppearanceBtn, this.sideNav.actionsEl);
+			},
 		});
 		this.host.appendChild(this.appearancePanel.containerEl);
 
@@ -911,7 +917,11 @@ export class MdOverlaySession {
 			getFullTextRoot: () => this.getFullTextRoot(),
 			getSelectionText: () => this.getSelectionText(),
 			showResultCard: opts => this.showToolResultCard(opts),
-			onOpenChange: () => this.syncToolbarButtons(),
+			onOpenChange: open => {
+				this.syncToolbarButtons();
+				if (open && this.railAIBtn && this.sideNav && this.aiPanel)
+					alignContentPopover(this.aiPanel.containerEl, this.railAIBtn, this.sideNav.actionsEl);
+			},
 		});
 		this.host.appendChild(this.aiPanel.containerEl);
 
@@ -1184,6 +1194,8 @@ export class MdOverlaySession {
 			immersive: s.mdOverlayImmersive !== false,
 			immersionKeepToc: s.appearance?.fullImmersionShowTocRail === true,
 			immersionKeepProgress: s.appearance?.fullImmersionShowChapterProgress === true,
+			// 侧边工具栏尺寸：与阅读器外观面板的「按钮/目录条大小」同一个值
+			railScale: Math.max(0.8, Math.min(1.6, Number(s.appearance?.railScale ?? 1) || 1)),
 		};
 	}
 
@@ -1196,9 +1208,16 @@ export class MdOverlaySession {
 		if (patch.immersive !== undefined) s.mdOverlayImmersive = patch.immersive;
 		if (patch.immersionKeepToc !== undefined) s.appearance.fullImmersionShowTocRail = patch.immersionKeepToc;
 		if (patch.immersionKeepProgress !== undefined) s.appearance.fullImmersionShowChapterProgress = patch.immersionKeepProgress;
+		if (patch.railScale !== undefined) {
+			s.appearance.railScale = Math.max(0.8, Math.min(1.6, Number(patch.railScale) || 1));
+		}
 		this.plugin.scheduleSave();
 		this.plugin.mdOverlay?.applySettingsAll();
-		this.appearancePanel?.refresh();
+		// ⚠️ 拖动滑块期间**不能整块重绘**：`refresh()` 会把整张面板 rebuild，
+		// 正在拖的 `<input type=range>` 被换掉 ⇒ 拖动一下就被打断（用户能感到「粘住」）。
+		// 数值由滑块自己的 input 回调就地更新；只有别的开关才需要重绘。
+		const needsRepaint = Object.keys(patch).some(k => k !== "railScale");
+		if (needsRepaint) this.appearancePanel?.refresh();
 	}
 
 	// ---------- 侧边抽屉：悬浮自动关闭（md 侧不做钉住） ----------
@@ -1390,10 +1409,13 @@ export class MdOverlaySession {
 		this.railAppearanceBtn?.setAttribute("title", appearanceLabel);
 
 		const aiOpen = !!this.aiPanel?.isOpen();
-		this.paintToolbarIcon(this.railAIBtn, "sparkles", "AI");
+		this.paintToolbarIcon(this.railAIBtn, AI_ICON_NAME, "AI");
 		this.railAIBtn?.toggleClass("is-active", aiOpen);
 		this.railAIBtn?.setAttribute("aria-label", aiOpen ? "关闭 AI 助手" : "打开 AI 助手");
 		this.railAIBtn?.setAttribute("title", aiOpen ? "关闭 AI 助手" : "打开 AI 助手");
+
+		// 原生侧栏有自己的布局，不是按钮旁浮窗，不能把功能轨永久锁在展开态。
+		this.sideNav?.setActionsPanelOpen(!!this.sidePanel?.isOpen() || appearanceOpen || aiOpen);
 
 		const immersionOn = this.immersed && s.mdOverlayImmersive !== false;
 		this.paintToolbarIcon(this.railImmersionBtn, "maximize-2", "沉浸");
@@ -2379,6 +2401,10 @@ export class MdOverlaySession {
 	 *  （侧栏里的视图要靠官方页首/工具条）；切回自己 → 补写 app 级类。 */
 	onActiveLeafChange(newLeaf: WorkspaceLeaf | null): void {
 		if (!newLeaf) return;
+		if (newLeaf !== this.leaf) {
+			this.selection?.hide();
+			if (this.host) dismissFloatingPanel(this.host);
+		}
 		const facts = {
 			self: newLeaf === this.leaf,
 			sidePanel: isSidePanelLeaf(newLeaf, this.app.workspace),

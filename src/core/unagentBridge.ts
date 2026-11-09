@@ -16,7 +16,7 @@ import type {
 	UnagentDetection,
 	UnagentUnavailableReason,
 } from "../types";
-import { t, type StrKey } from "./i18n";
+import { getLang, t, type StrKey } from "./i18n";
 
 /** 三态指引文案（入口点击时直接展示，告诉用户去哪里修）。
  *
@@ -51,11 +51,14 @@ export function detectUnagent(host: unknown): UnagentDetection {
 	}
 }
 
-const SYSTEM_PROMPT = [
-	"你是书内选区翻译引擎，把用户给出的文本翻译成简体中文。",
-	"只输出译文正文：不要解释、不要前言结语、不要用引号包裹。",
-	"若原文本身已是简体中文，原样返回文本。",
-].join("\n");
+function selectionTranslationPrompt(): string {
+	const language = getLang() === "en" ? "English" : "简体中文";
+	return [
+		`你是书内选区翻译引擎，把用户给出的文本翻译成${language}。`,
+		"只输出译文正文：不要解释、不要前言结语、不要用引号包裹。",
+		`若原文本身已是${language}，原样返回文本。`,
+	].join("\n");
+}
 
 /** 选区翻译：M2 为单次调用（划词长度远小于单次上限；超限由 UNagent 抛错，
  *  message 已 friendlyMessage 化，直接展示即可），分块/缓存是 M3 的事。
@@ -66,7 +69,7 @@ export function translateViaUnagent(
 	options?: { signal?: AbortSignal; onChunk?: (delta: string) => void },
 ): Promise<UnagentCompleteResult> {
 	const request: UnagentCompleteRequest = {
-		system: SYSTEM_PROMPT,
+		system: selectionTranslationPrompt(),
 		user: text,
 		temperature: 0.2,
 		onChunk: options?.onChunk,

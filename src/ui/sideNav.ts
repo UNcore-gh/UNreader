@@ -1,3 +1,5 @@
+import { openFloatingPanel, closeFloatingPanel } from "./floatingPanel";
+import { placeGrowingPopover, watchGrowingPopover, resetPopoverPlacement } from "./growingPopover";
 import { setIcon, Platform } from "obsidian";
 
 import type { NavEntryModel } from "../core/engineAdapter";
@@ -17,6 +19,7 @@ export class SideNav {
 	readonly backEl: HTMLElement;
 
 	private nodesEl!: HTMLElement;
+	private stopGrowth: (() => void) | null = null;
 	private clusterEl!: HTMLElement;
 	/** 悬停通路桥：短横轨与目录面板之间那条 22u 宽的缝（见 styles.css 该段）。
 	 *  只为「鼠标从短横平移到面板」保留 hover，不承载任何交互。 */
@@ -56,6 +59,10 @@ export class SideNav {
 	 *  挂在面板内部而不是宿主各调用点 —— `syncPanelOpenState` 是开合的唯一收口
 	 *  （hover 展开、按钮唤出、行点击、点外面关闭都汇到它）。 */
 	onPanelOpenChange: ((open: boolean) => void) | null = null;
+
+	private hostPanelOpen = false;
+	private modalOpen = false;
+	private modalObserver: MutationObserver | null = null;
 
 	constructor() {
 		this.navEl = createDiv();
@@ -179,6 +186,15 @@ export class SideNav {
 		this.backEl.className = "unreader-nav-action unreader-back-btn";
 		this.backEl.setAttr("aria-label", "回到之前阅读");
 		setIcon(this.backEl, "undo-2");
+		// 官方设置等模态页挂在 body 下；只观察这一级，不扫描正文子树。
+		const doc = this.actionsEl.ownerDocument;
+		this.modalObserver = new MutationObserver(() => {
+			const opened = !!doc.querySelector(".modal-container");
+			if (opened && !this.modalOpen && !this.isActionsFullyShown() && !this.actionsEl.matches(":hover, :focus-within")) return;
+			this.modalOpen = opened;
+			this.syncActionsRetention();
+		});
+		this.modalObserver.observe(doc.body, { childList: true });
 	}
 
 	/** 在功能按钮排中添加一枚图标按钮。 */
@@ -199,6 +215,16 @@ export class SideNav {
 	/** 在功能按钮排中插入一条分隔线。 */
 	addSeparator(): void {
 		this.actionsPanel.createDiv({ cls: "unreader-nav-sep" });
+	}
+
+	/** 选区工具条共用功能轨原位；工具条组件自行在显示期间挂入此槽并在收起时归位。 */
+	getSelectionToolbarHost(): HTMLElement {
+		return this.actionsPanel;
+	}
+
+	/** 选区出现时由 CSS 暂时替换功能轨内容，收起后只移除此态，不改原显隐/钉住状态。 */
+	setSelectionMode(active: boolean): void {
+		this.actionsEl.toggleClass("is-selection-mode", active);
 	}
 
 	/** 自定义按钮槽（「命令 → 按钮」绑定，数据见 settings.customButtons）。
@@ -267,7 +293,10 @@ export class SideNav {
 	/** 功能轨是否已完整展示（展开/钉住）：沉浸模式点按语义里视为「已显示」。
 	 *  半隐藏待悬停态（默认滑出留 6px）不算——触屏无 hover，点按要负责把它完整滑出 */
 	isActionsFullyShown(): boolean {
-		return this.actionsEl.hasClass("is-expanded") || this.actionsEl.hasClass("is-pinned");
+		return this.actionsEl.hasClass("is-panel-open")
+			|| this.actionsEl.hasClass("is-selection-mode")
+			|| this.actionsEl.hasClass("is-expanded")
+			|| this.actionsEl.hasClass("is-pinned");
 	}
 
 	/** 触屏点按 6px peek 条后的整条滑出（is-expanded）；展开后点轨道外面收回。
@@ -282,6 +311,7 @@ export class SideNav {
 	}
 
 	private onActionsDocPointerDown = (ev: PointerEvent): void => {
+		if (this.actionsEl.hasClass("is-panel-open")) return;
 		const target = ev.target;
 		if (target instanceof Node && this.actionsEl.contains(target)) return;
 		// 点在标注抽屉里（阅读器 / md 宿主内的兄弟浮层）：别抢它的开合，轨道先收起即可。
@@ -291,6 +321,10 @@ export class SideNav {
 	/** 宿主卸载时调用：摘掉触屏展开态挂在 document 上的监听（DOM 随 host 移除，
 	 *  document 监听不会自动跟着没）。 */
 	destroy(): void {
+		if (this.panelEl) closeFloatingPanel(this.panelEl);
+		this.modalObserver?.disconnect();
+		this.modalObserver = null;
+		this.stopGrowth?.(); this.stopGrowth = null;
 		this.detachDocListener();
 		this.actionsEl.ownerDocument
 			?.removeEventListener("pointerdown", this.onActionsDocPointerDown, true);
@@ -330,9 +364,11 @@ export class SideNav {
 		this.activeNodeEl = null;
 		this.progressNodeEl = null;
 		this.detachDocListener();
+		if (this.panelEl) closeFloatingPanel(this.panelEl);
 		this.panelEl?.remove();
 		this.panelEl = null;
 		this.open = false;
+		this.stopGrowth?.(); this.stopGrowth = null;
 		this.buttonPinned = false;
 		// 与其它关闭路径同一收口（面板已摘掉，宿主侧的「作用中」高亮与按钮排展开态都要复位）
 		this.syncPanelOpenState();
@@ -564,6 +600,7 @@ export class SideNav {
 			// Hover 触发的关闭不应打断通过目录按钮钉住的状态
 			if (this.buttonPinned) return;
 			this.open = false;
+			this.stopGrowth?.(); this.stopGrowth = null;
 			this.panelEl?.removeClass("is-open");
 			this.stripPreview();
 			this.detachDocListener();
@@ -575,6 +612,10 @@ export class SideNav {
 		const panel = this.ensurePanel();
 		this.applyAnchor();
 		panel.addClass("is-open");
+		openFloatingPanel(panel, () => this.closePanel());
+		this.positionActionPanel(true);
+		this.stopGrowth?.();
+		this.stopGrowth = watchGrowingPopover(panel, this.tocTrigger ?? this.nodesEl, () => this.positionActionPanel());
 		this.syncPanelOpenState();
 		panel.querySelectorAll(".unreader-nav-row").forEach(row =>
 			row.toggleClass("is-active", Number((row as HTMLElement).dataset.navIndex) === this.activeIndex),
@@ -590,9 +631,23 @@ export class SideNav {
 	 *  否则鼠标离开按钮区后按钮框回到半隐藏位移，会把面板一起拽出屏幕外。
 	 *  不用 :has() 选择器，行为由 JS 显式控制、各路径统一收口。 */
 	private syncPanelOpenState(): void {
-		this.actionsEl.toggleClass("is-panel-open", this.open && this.panelAnchor === "actions");
+		if (!this.open && this.panelEl) closeFloatingPanel(this.panelEl);
+		this.syncActionsRetention();
 		this.syncBridge();
 		this.onPanelOpenChange?.(this.open);
+	}
+
+	/** 任一关联面板仍开着，就保留工具栏；全部关闭后恢复自动收边。 */
+	setActionsPanelOpen(open: boolean): void {
+		this.hostPanelOpen = open;
+		this.syncActionsRetention();
+	}
+
+	private syncActionsRetention(): void {
+		const wasHeld = this.actionsEl.hasClass("is-panel-open");
+		const held = this.hostPanelOpen || this.modalOpen || (this.open && this.panelAnchor === "actions");
+		this.actionsEl.toggleClass("is-panel-open", held);
+		if (wasHeld && !held) this.setActionsExpanded(false);
 	}
 
 	/** 悬停通路桥的激活闸门：只有「面板正开在右缘轨旁 + 轨可见」才让它接管指针。
@@ -611,22 +666,20 @@ export class SideNav {
 		if (this.panelAnchor === "actions") {
 			this.actionsEl.appendChild(this.panelEl);
 			this.panelEl.addClass("is-at-actions");
-			// 垂直位置与右缘轨锚（rail）形态**上下对齐**（用户 2026-10-01 报）：rail 面板
-			// 与短横轨共用同一条纵向中心线（top:50% + min-height:100%），原先 actions
-			// 形态对准「目录」按钮中心，两形态的中心差了近一个按钮位。两条轨各自带
-			// 避让偏移（margin-top：沉浸拉绳 / 播客条 / 页首的可用区修正），且按钮排的
-			// translateY 只在 X 上过渡、Y 恒定 —— 直接取两轨盒的实测 rect 相减最稳，
-			// 变量叫什么、谁写进去都不用关心。面板的 translateY(-50%) 由 CSS 承担，
-			// 这里的 top 即面板中心的视觉纵坐标。
-			const nodesRect = this.nodesEl.getBoundingClientRect();
-			const actionsRect = this.actionsEl.getBoundingClientRect();
-			this.panelEl.style.top = `${nodesRect.top + nodesRect.height / 2 - actionsRect.top}px`;
+			this.positionActionPanel();
 		} else {
 			this.nodesEl.appendChild(this.panelEl);
 			this.panelEl.removeClass("is-at-actions");
 			this.panelEl.style.removeProperty("top");
+			this.panelEl.style.removeProperty("max-height");
+			resetPopoverPlacement(this.panelEl);
 		}
 		this.syncPanelOpenState();
+	}
+
+	private positionActionPanel(animate = false): void {
+		if (!this.panelEl || this.panelAnchor !== "actions" || !this.tocTrigger) return;
+		placeGrowingPopover(this.panelEl, this.tocTrigger, undefined, animate, { toolbar: this.actionsEl });
 	}
 
 	isPanelOpen(): boolean {
@@ -638,6 +691,7 @@ export class SideNav {
 		if (!this.open) return;
 		this.buttonPinned = false;
 		this.open = false;
+		this.stopGrowth?.(); this.stopGrowth = null;
 		this.panelEl?.removeClass("is-open");
 		this.stripPreview();
 		this.detachDocListener();
@@ -726,6 +780,7 @@ export class SideNav {
 				this.jump(i);
 				this.buttonPinned = false;
 				this.open = false;
+				this.stopGrowth?.(); this.stopGrowth = null;
 				this.panelEl?.removeClass("is-open");
 				this.detachDocListener();
 				this.syncPanelOpenState();
@@ -748,6 +803,7 @@ export class SideNav {
 		this.buttonPinned = false;
 		// 强制关闭，绕过 buttonPinned 拦截
 		this.open = false;
+		this.stopGrowth?.(); this.stopGrowth = null;
 		this.panelEl?.removeClass("is-open");
 		this.detachDocListener();
 		// 必须走收口：先前漏了这一步，`is-panel-open` 会留在按钮排上

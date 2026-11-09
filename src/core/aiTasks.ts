@@ -21,6 +21,7 @@
  *   逐字相等」，AI 改一个字整组拒绝。含内联元素的块与 li/td/标题留在逐块空白通道
  *   （applyTypographyWriteBack，保结构能力不变）。 */
 import type { AiFunctionScope, UnagentAIApi } from "../types";
+import { getLang } from "./i18n";
 
 export interface AiTaskProgress {
 	done: number
@@ -124,12 +125,10 @@ function numberedSegmentText(segments: { value: string }[]): string {
 	return segments.map((seg, i) => `[${i + 1}] ${seg.value.replace(/\s+/g, " ").trim()}`).join("\n");
 }
 
-/** 全文翻译：目标语言由面板设置（settings.ai.targetLanguage）。逐块翻译保住段落结构。
- *  官方默认提示词用 `{目标语言}` 占位（运行时替换），这样用户改提示词时仍能引用语言设置。 */
-export const AI_LANGUAGE_TOKEN = "{目标语言}";
-
-export function translateSystemPrompt(targetLanguage: string): string {
-	return `你是专业的图书翻译引擎。把用户给出的内容翻译成${targetLanguage}，保持原文的段落结构与语气，专有名词保留原文。只输出译文：不要解释、不要前言结语、不要用引号包裹。`;
+/** 全文翻译：目标语言跟随当前界面语言，由 `withSystemLanguage` 在运行时追加约束。
+ *  工具提示词本身不暴露任何语言占位符或设置项。 */
+export function translateSystemPrompt(): string {
+	return "你是专业的图书翻译引擎。准确翻译用户给出的内容，保持原文的段落结构与语气，专有名词保留原文。只输出译文：不要解释、不要前言结语、不要用引号包裹。";
 }
 
 /** 排版优化基座提示词（v2，2026-09-29 用户要求「不仅要解决格式错乱，还要提供一定的
@@ -162,8 +161,7 @@ export const TYPOGRAPHY_BLOCK_INSTRUCTION = [
 	"本次按单个块整理：只修整该块内部的空白（硬换行/多余空格/空行），不要合并或拆分段落，不要输出任何 Markdown 语法。",
 ].join("\n");
 
-/** 官方预设工具（固定两枚，用户不可增删；提示词/作用域可改、可重置回这里的默认值）。
- *  全文翻译的默认提示词带 `{目标语言}` 占位符，运行时替换为面板选择的语言。 */
+/** 官方预置模板；提示词和作用域都与其他工具一样可编辑。 */
 export interface AiOfficialTool {
 	id: "translate" | "typography"
 	name: string
@@ -179,7 +177,7 @@ export const OFFICIAL_TOOLS: AiOfficialTool[] = [
 		name: "全文翻译",
 		icon: "languages",
 		description: "翻译当前文章/章节并替换正文",
-		defaultPrompt: translateSystemPrompt(AI_LANGUAGE_TOKEN),
+		defaultPrompt: translateSystemPrompt(),
 		defaultScope: "full",
 	},
 	{
@@ -192,9 +190,14 @@ export const OFFICIAL_TOOLS: AiOfficialTool[] = [
 	},
 ];
 
-/** 运行时把提示词里的 `{目标语言}` 占位替换为面板选择的语言（对官方与自定义工具一视同仁）。 */
-export function applyLanguageToken(prompt: string, targetLanguage: string): string {
-	return prompt.split(AI_LANGUAGE_TOKEN).join(targetLanguage);
+/** 当前界面语言对应的模型输出语言。 */
+export function systemLanguageName(): "简体中文" | "English" {
+	return getLang() === "en" ? "English" : "简体中文";
+}
+
+/** 所有 AI 工具共用同一份运行级语言约束；用户无需为每个工具配置语言。 */
+export function withSystemLanguage(prompt: string): string {
+	return `${prompt}\n\n输出语言要求：使用${systemLanguageName()}。不得因此改写代码、公式、链接目标或专有名词。`;
 }
 
 const isWsChar = (ch: string | undefined): boolean => ch != null && /\s/.test(ch);

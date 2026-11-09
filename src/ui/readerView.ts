@@ -1,3 +1,8 @@
+import { openFloatingPanel, closeFloatingPanel, dismissFloatingPanel } from "./floatingPanel";
+import { setSelectionChromeHidden } from "./selectionChrome";
+import { MobileSelectionInteractionController, domSelectionSnapshot } from "./mobileSelectionInteraction";
+import { notifyPopoverGeometryChanged, subscribePopoverGeometry, alignContentPopover } from "./growingPopover";
+import { AI_ICON_NAME } from "./aiIcon";
 import { HoverPopover, ItemView, WorkspaceLeaf, TFile, Notice, setIcon, debounce, ViewStateResult, Platform, MarkdownRenderer } from "obsidian";
 import type UNreaderPlugin from "../main";
 import { EngineAdapter, RelocateInfo, RawFoliateView, styleFootnoteView, NavEntryModel, backDebugOn, FrameSwipeInfo, type BookOpenTarget } from "../core/engineAdapter";
@@ -118,7 +123,6 @@ import { clampHeightToUsable, bottomBarOverlap, usableBottom } from "./keyboardI
 import type { Bounds } from "./floatingPlacement";
 import { idleYield } from "../core/idle";
 import { resolveRailBounds, RAIL_FREEZE_MS } from "./railBounds";
-import { dispatchNativeContextMenu } from "./nativeContextMenu";
 
 export const VIEW_TYPE_UNREADER = "unreader-view";
 
@@ -171,6 +175,16 @@ export class UNreaderView extends ItemView {
 	private readonly plugin: UNreaderPlugin;
 	private readonly adapter = new EngineAdapter();
 	private appearancePanel!: AppearancePanel;
+	private mobileSelection = new MobileSelectionInteractionController({
+		enabled: () => Platform.isMobile,
+		tools: node => this.selectionToolbar?.containerEl.contains(node) || this.highlightPopover?.containerEl.contains(node),
+		refreshed: doc => {
+			const index = this.pendingSelection?.doc === doc ? this.pendingSelection.index : 0;
+			this.captureSelection(doc, index);
+		},
+		ended: () => { this.pendingSelection = null; this.lastExcerpt = null; this.selectionToolbar?.hide(); this.clearMirrorSelection(); },
+		onDragVisibilityChange: active => setSelectionChromeHidden(this.rootEl, active),
+	});
 	private selectionToolbar!: SelectionToolbar;
 	private translationCard!: TranslationCard;
 	private aiPanel!: AIPanel;
@@ -598,6 +612,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	async setState(state: unknown, result: ViewStateResult): Promise<void> {
+		this.mobileSelection?.end();
 		// 「全沉浸返回哨兵」被消费（`leaf.history.back()` 把视图切回哨兵本身）：
 		// 返回动作已经被这一条吃掉了，这里只负责退出全沉浸 —— 不再走「换书」分支，
 		// 用户留在原书原位。标记必须在交给 `super.setState` 之前摘掉，
@@ -694,6 +709,7 @@ export class UNreaderView extends ItemView {
 	}
 
 	private applyReaderSource(source: ReaderSource): void {
+		this.mobileSelection.end(true);
 		const nextKey = this.sourceKey(source);
 		if (nextKey) this.beginNativeSidebarSourceLoad(nextKey);
 		this.loadedPath = null;
@@ -1008,6 +1024,10 @@ export class UNreaderView extends ItemView {
 		// 自愈一切陈旧落位；两个 align 都幂等且廉价（几次读数 + 行内样式写）。
 		this.alignActionsRail();
 		this.alignAppearancePanel();
+		this.alignAIPanel();
+		// 统一广播：窗口 / 分栏变化同样会让锚点发生纯位移，开着的所有 growing popover
+		// 必须重排（ResizeObserver 只认尺寸，认不出这种位移）。
+		notifyPopoverGeometryChanged();
 		// 播客条 / 进度条轨 / 工具栏可用高度同属「JS 实测落位」家族：钉住切换、
 		// 面板开合/拖宽已各自触发重算，这里兜住其余所有几何变化（标签激活、
 		// 分栏拖拽、横竖屏）—— 漏掉就是播客条按旧几何居中、半截压进面板/屏外
@@ -1018,12 +1038,23 @@ export class UNreaderView extends ItemView {
 	}
 
 	async onClose(): Promise<void> {
+		this.mobileSelection.dispose();
+		// 几何总线是模块级订阅，视图关掉必须退订；顺手撤掉在飞的合帧重排。
+		this.stopGeometrySync?.();
+		this.stopGeometrySync = null;
+		if (this.floatingGeometryRaf) {
+			window.cancelAnimationFrame(this.floatingGeometryRaf);
+			this.floatingGeometryRaf = 0;
+		}
 		this.isClosing = true;
 		this.plugin.forgetActiveReader(this);
 		// 视图已关：在飞的翻译请求与 AI 任务必须取消，结果也不再触碰已 detach 的 UI
+		if (this.rootEl) dismissFloatingPanel(this.rootEl);
 		this.hideTranslation();
 		this.aiPanel?.cancelTask();
 		this.aiPanel?.close();
+		this.appearancePanel?.close();
+		if (this.searchOpen) this.toggleSearch(false);
 		// 启动恢复的有限重试：视图已关，定时器必须摘掉（否则 2.5s 后对着已 detach
 		// 的视图跑一次 scheduleLoad）
 		if (this.restoreRetryTimer != null) {
@@ -2145,6 +2176,29 @@ export class UNreaderView extends ItemView {
 		await this.plugin.openBook(file);
 	}
 
+	/** 侧栏 / 轨道几何变化的统一收口。三个面板此前各有一条互不相干的定位生命周期：
+	 *  功能轨靠 transitionend + onResize、外观靠 onOpened + onResize、AI 只靠 onOpened，
+	 *  而拖宽的 pointermove 谁都不通知 —— 于是「拖拽期间」它们一起停在旧落点。
+	 *  这里把三者并成一次合帧后的重排；顺序不能换：外观 / AI 的 left 是从**功能轨右缘**
+	 *  现算的，必须先让 alignActionsRail 把轨放到新位置再量。 */
+	private floatingGeometryRaf = 0;
+	private stopGeometrySync: (() => void) | null = null;
+
+	private scheduleFloatingGeometry(): void {
+		if (this.floatingGeometryRaf) return;
+		this.floatingGeometryRaf = window.requestAnimationFrame(() => {
+			this.floatingGeometryRaf = 0;
+			this.syncFloatingGeometry();
+		});
+	}
+
+	private syncFloatingGeometry(): void {
+		this.alignActionsRail();
+		this.alignAppearancePanel();
+		this.alignAIPanel();
+		this.scheduleFloatingFit();
+	}
+
 	/** 按钮排紧贴标注面板右缘：读取面板实际宽度设置 left（CSS 变量在面板宽度
 	 *  被拖拽过的情况下可能不同步，导致按钮排与面板之间出现空隙/重叠） */
 	private alignActionsRail(): void {
@@ -2346,6 +2400,10 @@ export class UNreaderView extends ItemView {
 		const willOpen = open ?? !this.searchOpen;
 		this.searchOpen = willOpen;
 		this.searchBarEl?.toggleClass("is-open", willOpen);
+		if (this.searchBarEl) {
+			if (willOpen) openFloatingPanel(this.searchBarEl, () => this.toggleSearch(false));
+			else closeFloatingPanel(this.searchBarEl);
+		}
 		// 功能轨「搜索正文」按钮高亮跟随搜索栏开合
 		this.syncRailButtons();
 		if (willOpen) {
@@ -2579,6 +2637,7 @@ export class UNreaderView extends ItemView {
 		this.sideNav?.setActionsExpanded(false);
 
 		// 换书/换章是译文卡片与 AI 任务的「真出口」：旧文的翻译/任务没有意义，abort 在飞请求
+		if (this.rootEl) dismissFloatingPanel(this.rootEl);
 		this.hideTranslation();
 		this.aiPanel?.cancelTask();
 		this.aiPanel?.close();
@@ -2970,8 +3029,6 @@ export class UNreaderView extends ItemView {
 
 	/** 开合 AI 助手停靠面板；悬浮态下与外观面板互斥（同一侧空间，避免互相遮挡）。 */
 	toggleAIPanel(): void {
-		const willOpen = !this.aiPanel.isOpen();
-		if (willOpen && this.appearancePanel.isOpen() && !this.pinned) this.appearancePanel.close();
 		this.aiPanel.toggle();
 	}
 
@@ -3002,18 +3059,8 @@ export class UNreaderView extends ItemView {
 	}
 
 	private alignAIPanel(): void {
-		if (!this.aiPanel?.isOpen()) return;
-		const rail = this.sideNav?.actionsEl;
-		const body = this.bodyEl;
-		if (!rail || !body) return;
-		try {
-			const bodyRect = body.getBoundingClientRect();
-			const railRect = rail.getBoundingClientRect();
-			const margin = 8;
-			const left = railRect.right - bodyRect.left;
-			const maxLeft = bodyRect.width - (this.aiPanel.containerEl.offsetWidth || 360) - margin;
-			this.aiPanel.containerEl.style.left = `${Math.min(left, Math.max(margin, maxLeft))}px`;
-		} catch { /* ignore */ }
+		if (!this.aiPanel?.isOpen() || !this.railAIBtn || !this.sideNav) return;
+		alignContentPopover(this.aiPanel.containerEl, this.railAIBtn, this.sideNav.actionsEl);
 	}
 
 	private handleRelocate(info: RelocateInfo): void {
@@ -3026,7 +3073,7 @@ export class UNreaderView extends ItemView {
 		// 编辑区被 display:none 摘掉 → 输入框 blur → 软键盘刚弹起就被压回去；
 		// 即便键盘侥幸留住，下面清掉的 `pendingSelection` 也会让「保存」报
 		// 「无法定位选区」（applyHighlightWithComment 靠它取 CFI）。
-		if (!this.isEditingComment()) {
+		if (!this.isEditingComment() && !this.mobileSelection.active) {
 			this.selectionToolbar.hide();
 			this.highlightPopover.hide();
 			this.pendingSelection = null;
@@ -3279,7 +3326,11 @@ export class UNreaderView extends ItemView {
 		const panel = this.annotationsPanel.containerEl;
 		// 面板开关/尺寸变化都会影响按钮排位置
 		panel.addEventListener("transitionend", e => {
-			if ((e.target as HTMLElement | null)?.classList?.contains("unreader-anno-panel")) this.alignActionsRail();
+			if ((e.target as HTMLElement | null)?.classList?.contains("unreader-anno-panel")) {
+				// 过渡结束那一刻，抽屉右缘才落到最终位置：三块面板 + 目录一起重排。
+				this.syncFloatingGeometry();
+				notifyPopoverGeometryChanged();
+			}
 		});
 		if (!hoverable) return;
 		panel.addEventListener("mouseenter", () => this.cancelAnnoAutoClose());
@@ -3508,8 +3559,9 @@ export class UNreaderView extends ItemView {
 				if (px == null) delete this.plugin.settings.annoPanelWidth;
 				else this.plugin.settings.annoPanelWidth = px;
 				void this.plugin.persistData();
-				this.alignActionsRail();
-				this.scheduleFloatingFit();
+				// 松手这一刻也把三块面板一次性归位（拖拽过程中的逐帧同步走几何总线）。
+				this.syncFloatingGeometry();
+				notifyPopoverGeometryChanged();
 				// 松手后立即重绘高亮（连续模式），确保拖拽结束即对齐
 				this.adapter.notifyVisible();
 			},
@@ -3521,9 +3573,16 @@ export class UNreaderView extends ItemView {
 			this.annotationsPanel.setWidth(this.plugin.settings.annoPanelWidth);
 		}
 		body.appendChild(this.annotationsPanel.containerEl);
+		// 侧栏拖宽 / 开合的每一帧都由这里统一重排「功能轨 + 目录 + 外观 + AI」。
+		this.stopGeometrySync = subscribePopoverGeometry(() => this.scheduleFloatingGeometry());
 		try { this.annotationsPanel.syncAppearance(this.plugin.settings.appearance); } catch { /* ignore */ }
 
 		this.selectionToolbar = new SelectionToolbar({
+			onDismissSelection: () => {
+				this.pendingSelection = null;
+				this.lastExcerpt = null;
+				this.clearMirrorSelection();
+			},
 			onCopy: text => this.copySelection(text),
 			// 色点高亮 = 执行「高亮选中文本」命令的**同一实现**（`highlightCurrentSelection`
 			// 就是 main.ts 那条 `highlight-selection-*` 命令调用的入口，见下方方法注释）。
@@ -3548,7 +3607,13 @@ export class UNreaderView extends ItemView {
 		},
 		});
 		// 固定定位：工具条显示在正文区底部居中，不跟随选区（规避系统选区菜单同位置冲突）
+		this.selectionToolbar.setMobileInteraction(this.mobileSelection);
+		this.mobileSelection.bind({ doc: body.ownerDocument, body: () => body, read: () => null });
 		this.selectionToolbar.setFixed(true);
+		this.selectionToolbar.setOnVisibilityChange((_visible, inRailMode) => {
+			if (!_visible) this.mobileSelection?.end();
+			this.sideNav?.setSelectionMode(inRailMode);
+		});
 		// bounds 现测供体：评论编辑区展开时输入框会拉起键盘，官方随之把 `.app-container`
 		// 收缩到 `100vh - --keyboard-height`（键盘上方还有一条 .mobile-toolbar 浮层压在最底）。
 		// 浮动框必须按**当前**几何重排，否则会停在旧坐标上、被 body 的 overflow:hidden 裁掉 ==
@@ -3592,7 +3657,7 @@ export class UNreaderView extends ItemView {
 			versionBarBounds: () => this.stageBoundsNow(),
 			showResultCard: opts => this.showToolResultCard(opts),
 			onOpened: () => this.alignAIPanel(),
-			onOpenChange: open => this.railAIBtn?.toggleClass("is-active", open),
+			onOpenChange: () => this.syncRailButtons(),
 		});
 		body.appendChild(this.aiPanel.containerEl);
 		// 面板就绪后再同步一次 AI 控件：划词工具栏的 AI 工具按钮列表来自面板（settings）
@@ -3678,6 +3743,8 @@ export class UNreaderView extends ItemView {
 		});
 
 		this.sideNav = new SideNav();
+		// 工具条在上方先构造，但 SideNav 的功能轨槽到这里才存在；必须先建 SideNav 再接 rail host。
+		this.selectionToolbar.setRailHost(this.sideNav.getSelectionToolbarHost());
 		// 功能轨排列（2026-09-29 按使用场景分组重排，2026-10-01 书架/订阅合并成侧边栏
 		// 开关并归入内容标记组），自上而下 = 由「正在读的内容」到「整个应用」：返回
 		// （构造器固定在最顶）→ ① 定位与导航（目录/搜索）→ ② 内容标记与出处
@@ -3744,7 +3811,7 @@ export class UNreaderView extends ItemView {
 		this.railDeviceBtn = this.sideNav.addIconButton("monitor-smartphone", "切换网页阅读设备", () => this.cycleWebDevice());
 		this.railDeviceBtn.addClass("is-html-only-control");
 		// AI 助手（M2）：全源可用 —— 空态首页也能看状态/配置，选区翻译在文档里生效
-		this.railAIBtn = this.sideNav.addIconButton("sparkles", "打开 AI 助手", () => this.toggleAIPanel());
+		this.railAIBtn = this.sideNav.addIconButton(AI_ICON_NAME, "打开 AI 助手", () => this.toggleAIPanel());
 		this.railImmersionBtn = this.sideNav.addIconButton("maximize-2", "进入全沉浸", () => {
 			this.playImmersionSwitchPull();
 			this.toggleFullImmersion();
@@ -3753,8 +3820,6 @@ export class UNreaderView extends ItemView {
 		paintIcon(this.railImmersionBtn, "maximize-2", "scan");
 		this.sideNav.addSeparator();
 		// ④ 系统
-		const contextMenuBtn = this.sideNav.addIconButton("ellipsis", "打开 Obsidian 原生右键菜单", () => this.openNativeContextMenu());
-		contextMenuBtn.addClass("is-doc-only-control");
 		this.syncRailButtons();
 		this.sideNav.addIconButton("settings", "打开 UNreader 设置", () => this.openPluginSettings());
 		this.sideNav.setBackHandler(() => this.goBack());
@@ -3873,13 +3938,6 @@ export class UNreaderView extends ItemView {
 		this.syncNativeHeader();
 		// 窄屏首次渲染后再次校正一次（布局尚未完成时 clientWidth 可能为 0）
 		window.requestAnimationFrame(() => this.updatePinButtonVisibility());
-	}
-
-	/** 左侧三点按钮与书页右键共用 Obsidian 的 contextmenu 事件通路。 */
-	private openNativeContextMenu(): void {
-		const target = this.adapter.getContextMenuTarget() ?? this.contentHost;
-		const hostWindow = this.containerEl.ownerDocument.defaultView ?? window;
-		if (target) dispatchNativeContextMenu(target, hostWindow);
 	}
 
 	private showEmpty(): void {
@@ -4425,18 +4483,8 @@ export class UNreaderView extends ItemView {
 
 	/** 将外观面板左缘与右下按钮轨右缘精确对齐（各设备一致） */
 	private alignAppearancePanel(): void {
-		if (!this.appearancePanel?.isOpen()) return;
-		const rail = this.sideNav?.actionsEl;
-		const body = this.bodyEl;
-		if (!rail || !body) return;
-		try {
-			const bodyRect = body.getBoundingClientRect();
-			const railRect = rail.getBoundingClientRect();
-			const margin = 8;
-			const left = railRect.right - bodyRect.left;
-			const maxLeft = bodyRect.width - (this.appearancePanel.containerEl.offsetWidth || 340) - margin;
-			this.appearancePanel.containerEl.style.left = `${Math.min(left, Math.max(margin, maxLeft))}px`;
-		} catch { /* ignore */ }
+		if (!this.appearancePanel?.isOpen() || !this.railAppearanceBtn || !this.sideNav) return;
+		alignContentPopover(this.appearancePanel.containerEl, this.railAppearanceBtn, this.sideNav.actionsEl);
 	}
 
 	private saveAppearancePreset(): void {
@@ -4827,6 +4875,7 @@ export class UNreaderView extends ItemView {
 	 *  关键：pendingSelection 可能已被空白收口清掉（命令面板执行时焦点离开 iframe），
 	 *  缓存缺失时**主动从当前书页 iframe 重采一次**，采不到才提示。 */
 	highlightCurrentSelection(colorName: string): void {
+		if (this.mobileSelection.active && !this.mobileSelection.prepareAction()) return;
 		if (!this.pendingSelection?.cfi) {
 			if (!this.recaptureActiveSelection()) {
 				new Notice("先在书里选中文字，再执行高亮命令");
@@ -5003,6 +5052,8 @@ export class UNreaderView extends ItemView {
 	 *  宿主 body 与书页 iframe 内 pointerdown 都走这里——iframe 里的事件不会
 	 *  冒泡到宿主 body，若不在这里补收，书内点击永远关不掉这些浮层。 */
 	private dismissFloatingOnBlankClick(): void {
+		if (this.mobileSelection.active) return;
+		if (this.rootEl) dismissFloatingPanel(this.rootEl);
 		if (this.selectionToolbar?.visible) this.selectionToolbar.hide();
 		if (this.highlightPopover?.visible) this.highlightPopover.hide();
 		if (this.translationCard?.visible) this.hideTranslation();
@@ -6620,6 +6671,7 @@ export class UNreaderView extends ItemView {
 	 *  当场 `exitFullImmersion()` + `releaseNativeNav()`，用户看到的就是
 	 *  「打字打到一半，界面全回来了」（2026-09-29 报障，iPad 上最易复现）。 */
 	private onActiveLeafChange(leaf: WorkspaceLeaf | null): void {
+		if (leaf?.view !== this) this.mobileSelection?.end();
 		const facts: ActiveLeafChangeFacts = {
 			self: !!leaf && leaf.view === this,
 			sidePanel: isSidePanelLeaf(leaf, this.app.workspace),
@@ -6925,6 +6977,8 @@ export class UNreaderView extends ItemView {
 		this.railSearchBtn?.setAttribute("title", searchLabel);
 		const aiOpen = !!this.aiPanel?.isOpen();
 		this.railAIBtn?.toggleClass("is-active", aiOpen);
+		// 原生侧栏只参与按钮高亮；只有阅读区内的操作浮层才需要保持功能轨展开。
+		this.sideNav?.setActionsPanelOpen(!!this.annotationsPanel?.isOpen() || appearanceOpen || aiOpen || this.searchOpen);
 		const aiLabel = aiOpen ? "关闭 AI 助手" : "打开 AI 助手";
 		this.railAIBtn?.setAttribute("aria-label", aiLabel);
 		this.railAIBtn?.setAttribute("title", aiLabel);
@@ -7268,6 +7322,14 @@ export class UNreaderView extends ItemView {
 		const wiredDoc = doc as Document & { __unreaderDocEventsWired?: boolean };
 		if (wiredDoc.__unreaderDocEventsWired) return;
 		wiredDoc.__unreaderDocEventsWired = true;
+		const hostPoint = (x: number, y: number) => {
+			const el = doc.defaultView?.frameElement as HTMLElement | null;
+			const r = el?.getBoundingClientRect();
+			return { x: x * (el?.offsetWidth ? r!.width / el.offsetWidth : 1) + (r?.left ?? 0), y: y * (el?.offsetHeight ? r!.height / el.offsetHeight : 1) + (r?.top ?? 0) };
+		};
+		const frame = doc.defaultView?.frameElement;
+		this.mobileSelection.bind({ doc, body: () => doc.body, point: hostPoint, alive: () => !frame || frame.isConnected,
+			read: () => domSelectionSnapshot(doc, doc.body) });
 		// 脚注 Cmd/Ctrl 状态同步到 engine（iframe 内按键）
 		doc.addEventListener("keydown", e => {
 			// 模态框（命令面板/快速切换/设置）开着时整条让路：此时键盘不该在书页里
@@ -7328,19 +7390,20 @@ export class UNreaderView extends ItemView {
 			if (!e.ctrlKey && !e.metaKey) 
 			this.dismissHover();
 		});
-		doc.addEventListener("pointerdown", () => {
-		});
 		doc.addEventListener("pointerup", () => {
 			window.setTimeout(() => this.captureSelection(doc, index), 0);
 		});
 		doc.addEventListener("scroll", () => {
 			// 编辑评论时不让路：键盘弹起会让容器滚动被 clamp，书页跟着「滚动」一次，
 			// 那不是用户要放弃标注（同 isEditingComment）。
-			if (!this.isEditingComment()) this.selectionToolbar.hide();
+			if (!this.isEditingComment() && !this.mobileSelection.active) this.selectionToolbar.hide();
 			this.dismissHover();
 		}, { passive: true });
 		// 选区变化 → 同步到主文档（三方插件「选中后快捷键」能读到，与 markdown 一致）
-		doc.addEventListener("selectionchange", () => this.mirrorSelectionFrom(doc));
+		doc.addEventListener("selectionchange", () => {
+			this.mirrorSelectionFrom(doc);
+			if (Platform.isMobile) this.captureSelection(doc, index);
+		});
 	}
 
 	/** Feed 文章的「阅读原文」：入口在功能轨按钮上，点击直接交系统默认浏览器。
@@ -7593,7 +7656,7 @@ export class UNreaderView extends ItemView {
 			// 系统会收掉书页 iframe 里的选区，但用户并没有放弃这次标注 ——
 			// 这里若照旧 hide() + 清 pendingSelection，软键盘会立刻被压回去、
 			// 保存也会报「无法定位选区」。
-			if (this.isEditingComment()) return;
+			if (this.isEditingComment() || this.mobileSelection.active) return;
 			if (this.selectionToolbar.visible) this.selectionToolbar.hide();
 			this.pendingSelection = null;
 			this.lastExcerpt = null;
@@ -7609,6 +7672,7 @@ export class UNreaderView extends ItemView {
 			return;
 		}
 		this.syncSelectionToHost(text);
+		this.mobileSelection.observe(doc);
 		const sel0 = sel.getRangeAt(0);
 		const cfi = this.adapter.rangeCFI(doc, sel0);
 		// 固定定位：工具条固定在正文区（stage）底部居中，不跟随选区。
@@ -7827,7 +7891,7 @@ export class UNreaderView extends ItemView {
 	private handleContinuousSelection(info: { text: string; cfi: string | null; rect: DOMRect }): void {
 		if (!info.text) {
 			// 编辑评论期间同 captureSelection：选区被系统收走 ≠ 用户放弃标注
-			if (this.isEditingComment()) return;
+			if (this.isEditingComment() || this.mobileSelection.active) return;
 			if (this.selectionToolbar.visible) this.selectionToolbar.hide();
 			this.pendingSelection = null;
 			this.lastExcerpt = null;

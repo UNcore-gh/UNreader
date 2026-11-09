@@ -134,5 +134,27 @@
 				"Respect Obsidian deletion preferences when cleaning up failed downloads."
 			]
 		}
+	},
+	"1.0.7": {
+		"title": {
+			"zh": "阅读工具与划词体验改进",
+			"en": "Reading tools and text selection improvements"
+		},
+		"summary": {
+			"zh": "改进 AI 工具、阅读界面和移动端划词交互。",
+			"en": "Improved AI tools, the reading interface, and mobile text selection."
+		},
+		"items": {
+			"zh": [
+				"统一 AI 工具编辑与使用方式，并改进工具列表和结果展示。",
+				"优化 Markdown 和阅读器的划词工具栏、侧边功能轨与浮动面板。",
+				"改善移动端选区操作、外观设置和界面响应。"
+			],
+			"en": [
+				"Unified AI tool editing and improved tool lists and result display.",
+				"Improved selection toolbars, side rails, and floating panels in Markdown and the reader.",
+				"Improved mobile selection, appearance settings, and interface responsiveness."
+			]
+		}
 	}
 }

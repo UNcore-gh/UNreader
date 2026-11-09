@@ -1,3 +1,5 @@
+import { openFloatingPanel, closeFloatingPanel } from "./floatingPanel";
+import { stopContentPopover } from "./growingPopover";
 import { Notice } from "obsidian";
 import { AppearanceSettings, AppearancePreset, DEFAULT_APPEARANCE, normalizeHexColor, activeBackground, activeTextColor, activeTheme, activeBackgroundImage } from "../types";
 import { resolveAppearance } from "../core/engineAdapter";
@@ -115,8 +117,6 @@ export class AppearancePanel {
 	private current: AppearanceSettings;
 	/** 当前生效预设 id（下拉框回显用） */
 	private activePresetId: string | null = null;
-	private closeTimeout: number | null = null;
-	private entered = false;
 	private ignoreOutsideUntil = 0;
 	/** 下一次 render 完成后要定位到的分组（仅由工具栏快捷按钮传入）。 */
 	private pendingScrollSection: AppearanceSection | null = null;
@@ -159,44 +159,11 @@ export class AppearancePanel {
 		}
 		this.containerEl = createDiv();
 		this.containerEl.className = "unreader-appearance-panel";
-		// 鼠标离开面板自动关闭（300ms 延迟，移入则取消）。
-		// 仅 hover 能力设备绑定：触屏靠「点击按钮开 + 点外面关」，
-		// 否则触屏的合成 mouseenter/mouseleave 会在打开后 300ms 自动关掉面板。
-		let hoverable = false;
-		try { hoverable = window.matchMedia?.("(hover: hover)")?.matches ?? false; } catch { hoverable = false; }
-		if (hoverable) {
-			this.containerEl.addEventListener("mouseenter", () => {
-				this.entered = true;
-				if (this.closeTimeout) {
-					window.clearTimeout(this.closeTimeout);
-					this.closeTimeout = null;
-				}
-			});
-			this.containerEl.addEventListener("mouseleave", () => {
-				if (!this.entered) return; // 尚未进入过（如因布局变化误触发）不关闭
-				if (this.closeTimeout) window.clearTimeout(this.closeTimeout);
-				this.closeTimeout = window.setTimeout(() => {
-					this.closeTimeout = null;
-					try {
-						// 原生吸色盘（input[type=color] 弹窗）是 OS 级窗口，指针移上去
-						// 必然离开面板元素触发 mouseleave——但 color input 仍持焦，
-						// 此时不能自动关闭，否则调色进行到一半面板消失
-						const ae = document.activeElement as HTMLInputElement | null;
-						if (ae && ae.tagName === "INPUT" && ae.type === "color") return;
-					} catch { /* ignore */ }
-					this.close();
-				}, 300);
-			});
-		}
+		// 点击打开的设置面板保持到显式关闭/点外面，避免移向调色盘时突然消失。
 		this.current = { ...DEFAULT_APPEARANCE };
 	}
 
 	open(current: AppearanceSettings, section: AppearanceSection | null = null): void {
-		if (this.closeTimeout) {
-			window.clearTimeout(this.closeTimeout);
-			this.closeTimeout = null;
-		}
-		this.entered = false;
 		// 刚打开时短窗口内忽略外部 pointerdown（覆盖点击触发按钮时的同一次指针事件链）
 		this.ignoreOutsideUntil = performance.now() + 300;
 		this.current = { ...current };
@@ -204,6 +171,7 @@ export class AppearancePanel {
 		this.activePresetId = this.getActivePresetId();
 		this.render();
 		this.containerEl.addClass("is-open");
+		openFloatingPanel(this.containerEl, () => this.close());
 		document.addEventListener("pointerdown", this.onDocPointerDown, true);
 		// 通知外部对齐定位（边框与右下按钮轨对齐）
 		this.onOpened();
@@ -212,11 +180,8 @@ export class AppearancePanel {
 	}
 
 	close(): void {
-		if (this.closeTimeout) {
-			window.clearTimeout(this.closeTimeout);
-			this.closeTimeout = null;
-		}
-		this.entered = false;
+		closeFloatingPanel(this.containerEl);
+		stopContentPopover(this.containerEl);
 		if (!this.containerEl.hasClass("is-open")) return;
 		this.containerEl.removeClass("is-open");
 		document.removeEventListener("pointerdown", this.onDocPointerDown, true);

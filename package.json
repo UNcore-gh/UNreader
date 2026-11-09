@@ -1,6 +1,6 @@
 {
   "name": "unreader",
-  "version": "1.0.6",
+  "version": "1.0.7",
   "description": "UNreader - A beautiful local-first reader. EPUB first, plus MOBI/AZW3, TXT, HTML and RSS feeds.",
   "main": "main.js",
   "type": "module",
@@ -93,7 +93,15 @@
     "test:font-ref-repair": "node test/run-font-ref-repair.mjs",
     "test:persist-layout": "esbuild test/persist-layout-probe.ts --bundle --outfile=test/persist-layout-bundle.js --format=iife --global-name=PersistLayoutProbe --target=es2022 --alias:obsidian=./test/obsidian-stub-startup.mjs --external:./pdf.js --log-level=warning && node test/run-persist-layout.mjs",
     "test:md-selection": "node test/run-md-selection.mjs",
-    "test:selbar-fit": "esbuild test/selbar-fit-probe.ts --bundle --outfile=test/selbar-fit-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-selbar-fit.mjs"
+    "test:selbar-fit": "esbuild test/selbar-fit-probe.ts --bundle --outfile=test/selbar-fit-bundle.js --format=esm --target=es2022 --alias:obsidian=./test/obsidian-stub-anno.mjs --external:./pdf.js --log-level=warning && node test/run-selbar-fit.mjs",
+    "test:selection-rail": "node test/run-selection-rail.mjs",
+    "test:chrome-native": "node test/run-chrome-native.mjs",
+    "test:mobile-selection": "node test/run-mobile-selection.mjs",
+    "test:growing-popover": "node test/run-growing-popover.mjs",
+    "test:appearance-slider": "node test/run-appearance-slider.mjs",
+    "test:floating-geometry": "node test/run-floating-geometry.mjs",
+    "test:ai-tools-layout": "node test/run-ai-tools-layout.mjs",
+    "test:popover-placement": "node test/run-popover-placement.mjs"
   },
   "keywords": [],
   "author": "UNcore",

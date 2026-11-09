@@ -219,8 +219,6 @@ const STRINGS = {
 		aiSelTranslateName: "选区翻译",
 		aiSelTranslateDesc:
 			"选中文字后，划词工具条出现翻译入口。译文以卡片形式显示，不改动原文。",
-		aiTargetLangName: "翻译目标语言",
-		aiTargetLangDesc: "全文翻译与选区翻译的目标语言，写进提示词。",
 		aiCustomTitle: "自定义功能",
 		aiCustomDesc: "自定义提示词，接在划词工具条与 AI 面板里。",
 		aiCustomAdd: "添加功能",
@@ -697,8 +695,6 @@ const STRINGS = {
 		aiSelTranslateName: "Selection translation",
 		aiSelTranslateDesc:
 			"A translate entry appears in the selection toolbar after you select text. The translation is shown as a card and never rewrites the original.",
-		aiTargetLangName: "Translation target language",
-		aiTargetLangDesc: "Target language for both full-text and selection translation; goes into the prompt.",
 		aiCustomTitle: "Custom functions",
 		aiCustomDesc: "Custom prompts, available in the selection toolbar and in the AI panel.",
 		aiCustomAdd: "Add function",

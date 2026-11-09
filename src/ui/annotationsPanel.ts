@@ -1,4 +1,5 @@
 import { Menu, setIcon } from "obsidian";
+import { notifyPopoverGeometryChanged } from "./growingPopover";
 
 /** 侧边栏设定高度时的两条行内样式（提常量以过 no-static-styles-assignment）。 */
 const ANNO_HEIGHT_ALIGN_SELF = "flex-start";
@@ -689,14 +690,18 @@ export class AnnotationsPanel {
 		// 就永远拿不到 75vw（拖拽把手也已隐藏，用户改不了，只会以为坏了）。
 		if (this.isPhoneLayout()) {
 			el.style.removeProperty("width");
-			this.writeHostWidthVar();
-			// 宽度换了 → 每行容纳的字数换了 → 截断行数跟着变，展开按钮必须重定
-			this.scheduleSettleExpand();
-			return;
+		} else if (px == null) {
+			el.style.removeProperty("width");
+		} else {
+			el.style.width = `${px}px`;
 		}
-		if (px == null) el.style.removeProperty("width");
-		else el.style.width = `${px}px`;
 		this.writeHostWidthVar();
+		// 拖拽的**每一帧**都要广播：功能轨、外观 / 预设、AI 面板与按钮唤出的目录
+		// 都靠 JS 行内几何贴着抽屉右缘。以前只在 pointerup 的 onWidthChange 里重算，
+		// 整段拖拽期间它们全停在旧落点（用户报「调侧边栏大小时格外明显」）。
+		// 订阅方各自 rAF 合帧，不轮询、不读正文，高频 pointermove 只是几次空转。
+		notifyPopoverGeometryChanged();
+		// 宽度换了 → 每行容纳的字数换了 → 截断行数跟着变，展开按钮必须重定
 		this.scheduleSettleExpand();
 	}
 
@@ -2105,6 +2110,8 @@ export class AnnotationsPanel {
 		// 宿主变量会停在默认 330px（md 侧表现为「工具栏离抽屉一条缝」）。见 writeHostWidthVar。
 		this.writeHostWidthVar();
 		this.containerEl.addClass("is-open");
+		// 开合会改功能轨的 left / transform，面板落点必须跟着那一帧走。
+		notifyPopoverGeometryChanged();
 		this.actions.onOpenChange?.(true);
 		// 面板可见后再实测一次：渲染那一帧元素若还没参与布局，展开按钮停在长度兜底值上。
 		this.scheduleSettleExpand();
@@ -2113,6 +2120,8 @@ export class AnnotationsPanel {
 	hide(): void {
 		this.shelfDragCleanup?.();
 		this.containerEl.removeClass("is-open");
+		// 收起时功能轨要回到左缘，三块面板同样要跟着重排。
+		notifyPopoverGeometryChanged();
 		this.actions.onOpenChange?.(false);
 	}
 

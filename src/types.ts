@@ -512,28 +512,28 @@ export interface CustomButton {
 }
 
 export interface AiSettings {
+	/** 工具已完成一次性模板迁移；删除后不自动补回。 */
+	toolsInitialized?: boolean
 	/** 选区工具条上的「翻译」按钮。**默认开**；读法写 `!== false` 兼容老数据。 */
 	translateSelection: boolean
-	/** 全文翻译的目标语言（AI 面板下拉框）。 */
-	targetLanguage: string
-	/** 用户自定义 AI 工具（面板按钮形式，可编辑/删除）。官方的「全文翻译 / 排版优化」
-	 *  不在此列：它们不可删除，改动存 toolOverrides，可重置回官方默认。 */
+	/** 统一工具列表；预置模板迁移后也是可编辑、停用、删除的普通条目。 */
 	customFunctions: AiCustomFunction[]
-	/** 官方工具的改动（提示词/作用域），键 = 官方工具 id。只存**偏离项** —— 官方默认
-	 *  提示词活在代码里，升级改进默认词不会丢；重置 = 删除对应键。 */
+	/** 旧版本兼容输入，仅在一次性模板迁移时读取。 */
 	toolOverrides: Record<string, AiToolOverride>
 }
 
 export interface AiCustomFunction {
+	/** 全部工具都可选择的安全写回方式。 */
+	mode?: "rewrite" | "typography"
 	/** 稳定 id（面板内增删的键，随机生成） */
 	id: string
 	/** 工具名（≤40 字符）：面板列表与划词工具栏的**统一 AI 入口名单**都只显示它 ——
 	 *  2026-09-28 用户要求「没有图标，只有标题」，逐工具的按钮样式/图标设置已移除。 */
 	name: string
-	/** 发给模型的 system 指令（≤4000 字符） */
+	/** 发给模型的 system 指令（≤6000 字符） */
 	prompt: string
-	/** 作用域：full = 对整篇/当前章生效（结果**替换正文**）；selection = 对选中文字触发（结果在面板展示）。
-	 *  两者都进划词工具栏的统一 AI 入口名单（见 AIPanel.selectionToolEntries）。 */
+	/** 作用域：full = 对整篇/当前章生效（结果**替换正文**）；selection = 对选中文字触发（结果显示在正文结果卡片）。
+	 *  只有选中文字作用域进入划词工具栏的统一 AI 入口名单（见 AIPanel.selectionToolEntries）。 */
 	scope: AiFunctionScope
 	/** 功能开关（默认开，缺省读法 `!== false`）。停用后：面板里置灰不可运行、入口名单里不出现。 */
 	enabled?: boolean
@@ -588,7 +588,6 @@ export const DEFAULT_SETTINGS: UNreaderSettings = {
 	},
 	ai: {
 		translateSelection: true,
-		targetLanguage: "简体中文",
 		customFunctions: [],
 		toolOverrides: {},
 	},

@@ -1,3 +1,7 @@
+import { openFloatingPanel, closeFloatingPanel } from "./floatingPanel";
+import { placeGrowingPopover, watchGrowingPopover } from "./growingPopover";
+import type { MobileSelectionInteractionController } from "./mobileSelectionInteraction";
+import { AI_ICON_NAME } from "./aiIcon";
 import { setIcon } from "obsidian";
 import { HIGHLIGHT_COLORS, highlightColorOf } from "../types";
 import type { AiToolEntry } from "../types";
@@ -16,6 +20,34 @@ import { recordSelectionDiag } from "./selectionDiag";
 function avoidOcclusionEnabled(): boolean {
 	try {
 		return (globalThis as unknown as Record<string, unknown>).__UR_BREAK_AVOID !== true;
+	} catch {
+		return true;
+	}
+}
+
+/**
+ * 「压字避让」的**阴性对照**开关（生产恒 false）。
+ *
+ * 关掉后工具条恢复 2026-11-06 之前的行为：只按 `bounds` 贴底/居中，**完全不看选区矩形**
+ * —— 于是「选中屏幕下方的字、工具条正好压在上面、想拖选区手柄却点到条上」那一档重新变红。
+ * 探针用 `?break=seloverlap` 注回旧行为。
+ */
+function selectionOverlapEnabled(): boolean {
+	try {
+		return (globalThis as unknown as Record<string, unknown>).__UR_BREAK_SEL_OVERLAP !== true;
+	} catch {
+		return true;
+	}
+}
+
+/** 「叉号连带清选区」的阴性对照开关。
+ *
+ *  `test:md-selection` 的 `?break=sticky-bar` 要复现旧版「清选区后 pointerup
+ *  又把工具条弹回来」；如果叉号仍执行今天的新逻辑（主动清选区），旧开关就
+ *  无法制造原文中的故障，整组阴性断言会变成假绿。生产恒为关闭。 */
+function dismissClearsSelectionEnabled(): boolean {
+	try {
+		return (globalThis as unknown as Record<string, unknown>).__UR_BREAK_STICKY_BAR !== true;
 	} catch {
 		return true;
 	}
@@ -90,6 +122,7 @@ export interface SelectionSnapshot {
 }
 
 export interface SelectionActions {
+	onDismissSelection?: () => void
 	onCopy: (text: string) => void
 	onHighlight: (colorName: string) => void
 	onComment: (text: string, comment: string, colorName: string) => void
@@ -109,9 +142,11 @@ export class SelbarAiMenu {
 	readonly el: HTMLElement;
 	private readonly host: HTMLElement;
 	private readonly onRun: (id: string) => void;
+	private readonly beforeAction: (() => void) | null;
 	private entryBtn: HTMLElement | null = null;
 	private menuEl: HTMLElement | null = null;
 	private aiMenuOpen = false;
+	private stopGrowth: (() => void) | null = null;
 	/** 名单当前由「悬浮」开出（而非点按）：悬停开出的名单要吃掉紧随的那次点按，
 	 *  否则鼠标下「悬浮刚展开 → 点按又关掉」就是两套开合互相打架。 */
 	private aiMenuOpenedByHover = false;
@@ -125,9 +160,10 @@ export class SelbarAiMenu {
 	 *  DOM。名单在会话内基本恒定，指纹一致时直接返回，重建成本归零。 */
 	private toolsSig: string | null = null;
 
-	constructor(host: HTMLElement, onRun: (id: string) => void) {
+	constructor(host: HTMLElement, onRun: (id: string) => void, beforeAction?: () => void) {
 		this.host = host;
 		this.onRun = onRun;
+		this.beforeAction = beforeAction ?? null;
 		this.el = createDiv({ cls: "unreader-selbar-tools" });
 		this.el.hide();
 	}
@@ -161,7 +197,7 @@ export class SelbarAiMenu {
 				title: `AI 工具（${tools.length} 个）：点按或悬浮展开`,
 			},
 		});
-		setIcon(btn, "sparkles");
+		setIcon(btn, AI_ICON_NAME);
 		this.entryBtn = btn;
 
 		const menu = this.el.createDiv({ cls: "unreader-selbar-ai-menu" });
@@ -176,6 +212,7 @@ export class SelbarAiMenu {
 			});
 			item.addEventListener("click", e => {
 				e.stopPropagation();
+				this.beforeAction?.();
 				this.close();
 				this.onRun(tool.id);
 			});
@@ -195,6 +232,7 @@ export class SelbarAiMenu {
 		//   readerView 的空白点按路径也放行）。
 		btn.addEventListener("click", e => {
 			e.stopPropagation();
+			this.beforeAction?.();
 			if (this.aiMenuOpen && this.aiMenuOpenedByHover) return;
 			if (this.aiMenuOpen) this.close();
 			else this.openAiMenu();
@@ -223,12 +261,17 @@ export class SelbarAiMenu {
 		this.cancelAiMenuClose();
 		menu.show();
 		menu.addClass("is-open");
+		openFloatingPanel(menu, () => this.close());
 		this.aiMenuOpen = true;
-		this.positionAiMenu();
+		this.positionAiMenu(true);
+		this.stopGrowth?.();
+		this.stopGrowth = watchGrowingPopover(menu, this.entryBtn!, () => this.positionAiMenu());
 	}
 
 	/** 收起名单（换名单 / 工具条隐藏 / 展开评论编辑区时都要调）。 */
 	close(): void {
+		if (this.menuEl) closeFloatingPanel(this.menuEl);
+		this.stopGrowth?.(); this.stopGrowth = null;
 		this.cancelAiMenuClose();
 		this.aiMenuOpen = false;
 		this.aiMenuOpenedByHover = false;
@@ -236,6 +279,9 @@ export class SelbarAiMenu {
 		this.menuEl.removeClass("is-open");
 		this.menuEl.removeClass("is-below");
 		this.menuEl.style.removeProperty("left");
+		this.menuEl.style.removeProperty("top");
+		this.menuEl.style.removeProperty("bottom");
+		this.menuEl.style.removeProperty("max-height");
 		this.menuEl.hide();
 	}
 
@@ -253,27 +299,14 @@ export class SelbarAiMenu {
 		this.aiMenuCloseTimer = null;
 	}
 
-	/** 名单默认开在入口按钮**上方**（贴底工具条：向上展开不挡正文）；上方放不下
-	 *  （工具条贴着正文区顶边）时翻到按钮下方 —— 否则会被 `.unreader-body` 的
-	 *  `overflow: hidden` 裁掉。横向以按钮为中心，按正文区宽度夹住。 */
-	private positionAiMenu(): void {
+	/** 名单与功能轨贴边；单项对齐入口按钮，增高时向空间宽裕的一侧展开。 */
+	private positionAiMenu(animate = false): void {
 		const menu = this.menuEl;
 		const btn = this.entryBtn;
-		const wrap = this.el;
-		if (!menu || !btn || !wrap) return;
-		const btnRect = btn.getBoundingClientRect();
-		const hostRect = this.host.parentElement?.getBoundingClientRect();
-		const menuH = menu.offsetHeight || 0;
-		const spaceAbove = btnRect.top - (hostRect?.top ?? 0);
-		menu.toggleClass("is-below", spaceAbove < menuH + 12);
-		// 横向：目标 = 菜单中心对齐按钮中心，再夹进正文区（`left` 相对名单的定位父级 wrap）
-		const menuW = menu.offsetWidth || 0;
-		const wrapRect = wrap.getBoundingClientRect();
-		const minX = (hostRect?.left ?? 0) + 4;
-		const maxX = (hostRect?.right ?? window.innerWidth) - menuW - 4;
-		const wantX = btnRect.left + btnRect.width / 2 - menuW / 2;
-		const left = Math.max(minX, Math.min(wantX, Math.max(minX, maxX))) - wrapRect.left;
-		menu.style.left = `${Math.round(left)}px`;
+		if (!menu || !btn || !this.el) return;
+		menu.removeClass("is-below");
+		placeGrowingPopover(menu, btn, 260, animate);
+
 	}
 }
 
@@ -285,6 +318,8 @@ export class SelectionToolbar {
 	readonly containerEl: HTMLElement;
 	private actions: SelectionActions;
 	private snapshot: SelectionSnapshot | null = null;
+	/** 移动端点按会收走 live Selection；保留同一宿主中的精确 Range 供操作前复原。 */
+	private selectionRange: Range | null = null;
 	private barRow!: HTMLElement;
 	/** 横滑带：所有可左右滑动的按钮都住在这里（见 render 的注释）。 */
 	private scrollEl!: HTMLElement;
@@ -296,6 +331,13 @@ export class SelectionToolbar {
 	private commentQuote!: HTMLElement;
 	private pickedColor = "yellow";
 	private lastAnchorRect: DOMRect | null = null;
+	/** 本次选区的**视口坐标**矩形（md 侧注入；阅读器/无选区时为 null）。
+	 *
+	 *  它**不是**定位锚点 —— 工具条仍是「贴底居中」的固定形态（`setFixed(true)`，
+	 *  用户与既有回归都认这个落点，且能避开系统选区菜单的原地弹出）。
+	 *  它只用来回答一个问题：**这次落点是不是正好压在选中的字上**。
+	 *  是 ⇒ 抬到选区上方（或下方）去（见 `liftOffSelection`）。 */
+	private obstacleRect: DOMRect | null = null;
 	private lastBounds: Bounds | null = null;
 	private translateBtn: HTMLElement | null = null;
 	private translateDivider: HTMLElement | null = null;
@@ -304,6 +346,8 @@ export class SelectionToolbar {
 	private commentDivider: HTMLElement | null = null;
 	private commentEnabled = true;
 	/** 关闭钮（住在钉住区，不随横滑移动）。 */
+	private mobileInteraction: MobileSelectionInteractionController | null = null;
+	setMobileInteraction(controller: MobileSelectionInteractionController): void { this.mobileInteraction = controller; }
 	private closeBtn: HTMLElement | null = null;
 	/** 自定义按钮槽（「命令 → 按钮」绑定）。空配置时不进 DOM（懒创建）。 */
 	private customWrap: HTMLElement | null = null;
@@ -335,7 +379,11 @@ export class SelectionToolbar {
 	/** 避让重排进行中：期间 `reposition` 不得再排队（否则自激） */
 	private inAvoidPass = false;
 	/** 显隐变化上报（见 `setOnVisibilityChange`） */
-	private visibilityListener: ((visible: boolean) => void) | null = null;
+	private visibilityListener: ((visible: boolean, inRailMode: boolean) => void) | null = null;
+	/** 选区期间暂挂的功能轨按钮槽；隐藏或进入评论输入时归回原宿主。 */
+	private railHost: HTMLElement | null = null;
+	private homeParent: HTMLElement | null = null;
+	private railMounted = false;
 
 	/** 订阅「工具条是否可见」的变化。
 	 *
@@ -345,13 +393,41 @@ export class SelectionToolbar {
 	 *  根因就是宿主那边的「让位窗口」在漏挂的出口上没被及时关掉。
 	 *  ⇒ 只在这里上报一次**状态**，由宿主决定做什么；实现侧不再重复枚举出口。
 	 *  `hide()` 的早退守卫（无状态可清时直接返回）不会走到这里 —— 那种情况本来就没有状态变化。 */
-	setOnVisibilityChange(fn: ((visible: boolean) => void) | null): void {
+	setOnVisibilityChange(fn: ((visible: boolean, inRailMode: boolean) => void) | null): void {
 		this.visibilityListener = fn;
 	}
 
+	/** 将已有操作工具条临时接入侧边功能轨；工具 DOM 只创建一次，拖动选区时不拆建。 */
+	setRailHost(host: HTMLElement | null): void {
+		this.railHost = host;
+		this.syncRailMount();
+	}
+
+	private syncRailMount(): void {
+		const shouldMount = !!this.railHost && this.visible && !this.commentOpen;
+		if (shouldMount) {
+			if (!this.railMounted) this.homeParent = this.containerEl.parentElement;
+			if (this.containerEl.parentElement !== this.railHost) this.railHost?.appendChild(this.containerEl);
+			this.containerEl.addClass("is-rail-mode");
+			// 清掉浮动模式写入的坐标；轨内位置完全由 rail 的纵向布局决定。
+			this.containerEl.style.removeProperty("left");
+			this.containerEl.style.removeProperty("top");
+			this.containerEl.style.removeProperty("transform-origin");
+			this.railMounted = true;
+			return;
+		}
+		if (!this.railMounted) return;
+		this.railMounted = false;
+		this.containerEl.removeClass("is-rail-mode");
+		if (this.homeParent && this.containerEl.parentElement !== this.homeParent) {
+			this.homeParent.appendChild(this.containerEl);
+		}
+	}
+
 	private notifyVisibility(): void {
+		this.syncRailMount();
 		try {
-			this.visibilityListener?.(this.visible);
+			this.visibilityListener?.(this.visible, this.railMounted);
 		} catch { /* 订阅方抛错不影响工具条自身 */ }
 	}
 
@@ -594,6 +670,7 @@ export class SelectionToolbar {
 		setIcon(copyBtn, "copy");
 		copyBtn.addEventListener("click", e => {
 			e.stopPropagation();
+			this.restoreSnapshotSelection();
 			if (this.snapshot) this.actions.onCopy(this.snapshot.text);
 			this.hide();
 		});
@@ -606,6 +683,7 @@ export class SelectionToolbar {
 		setIcon(translateBtn, "languages");
 		translateBtn.addEventListener("click", e => {
 			e.stopPropagation();
+			this.restoreSnapshotSelection();
 			if (this.snapshot) this.actions.onTranslate(this.snapshot.text);
 		});
 		this.translateBtn = translateBtn;
@@ -624,6 +702,7 @@ export class SelectionToolbar {
 			dot.style.backgroundColor = highlightColorOf(color.name).replace(/[\d.]+\)$/, "1)");
 			dot.addEventListener("click", e => {
 				e.stopPropagation();
+				this.restoreSnapshotSelection();
 				this.pickedColor = color.name;
 				if (this.snapshot) this.actions.onHighlight(color.name);
 				this.hide();
@@ -648,14 +727,24 @@ export class SelectionToolbar {
 		// 名单为空时整个容器收起，不占位、不动原有布局。
 		// 与高亮气泡共用同一份实现（SelbarAiMenu，2026-09-29 用户「共用一套代码」）。
 		// 点击瞬间把当前快照文本一并递出（不能等面板回头读活选区 —— iPad 触摸点按后选区已塌）
-		this.aiMenu = new SelbarAiMenu(this.containerEl, id => this.actions.onRunAiTool?.(id, this.snapshot?.text ?? ""));
+		this.aiMenu = new SelbarAiMenu(
+			this.containerEl,
+			id => this.actions.onRunAiTool?.(id, this.snapshot?.text ?? ""),
+			() => this.restoreSnapshotSelection(),
+		);
 		pinned.appendChild(this.aiMenu.el);
 
 		const closeBtn = pinned.createDiv({ cls: "unreader-selbar-btn", attr: { "aria-label": "关闭" } });
 		setIcon(closeBtn, "x");
 		closeBtn.addEventListener("click", e => {
 			e.stopPropagation();
-			this.hide();
+			this.mobileInteraction?.end(true);
+			if (dismissClearsSelectionEnabled()) {
+				try { this.snapshot?.doc.getSelection()?.removeAllRanges(); } catch { /* 已卸载的书页 */ }
+				try { this.actions.onDismissSelection?.(); } finally { this.hide(); }
+			} else {
+				this.hide();
+			}
 		});
 		this.closeBtn = closeBtn;
 
@@ -713,8 +802,13 @@ export class SelectionToolbar {
 	}
 
 	private openCommentEditor(): void {
+		// 与高亮同样先刷新本宿主定位，避免紧接拖动时给上一段文字添加评论。
+		this.restoreSnapshotSelection();
 		this.closeAiMenu();
 		this.commentOpen = true;
+		// 评论编辑卡仍用原来的键盘避让定位；它独立浮在正文上，阅读工具轨恢复原状。
+		this.syncRailMount();
+		this.notifyVisibility();
 		// 弹框态：容器退成透明的定位盒，内容 = 背板 + 评论卡片（样式见 styles.css 第 6 节）
 		this.containerEl.addClass("is-comment-open");
 		// 标题与原文：选中文字就是这次标注的对象（背板压暗正文后，这一行是唯一的位置锚点）
@@ -779,6 +873,12 @@ export class SelectionToolbar {
 	 *   回归契约（`test:comment-mobile` 的「精确贴回可用区底边 −8px」），不许一起改。
 	 */
 	private reposition(anchorRect: DOMRect | null, bounds: Bounds, opts?: { edgeMargin?: number }): void {
+		if (this.railHost && !this.commentOpen) {
+			this.containerEl.addClass("is-rail-mode");
+			this.containerEl.addClass("is-visible");
+			this.syncRailMount();
+			return;
+		}
 		// 「隐藏测量」只在**首次落位**用：工具条还没写 left/top，不藏会在默认位置闪一帧。
 		// 之后每次重排都 add/remove 的话，CSS 的 `.is-measuring{visibility:hidden}`
 		// （排在 `.is-visible` 之后 ⇒ 必然压住）配合 `visibility 110ms` 的 transition，
@@ -843,6 +943,9 @@ export class SelectionToolbar {
 				}
 			}
 		}
+		// 压字避让：**相交才让**（见 liftOffSelection）。不相交时 top 原值返回，
+		// 既有的「贴回可用区底边 / 与官方栏重合」断言因此逐像素不变。
+		top = this.liftOffSelection(left, top, tw, th);
 		this.containerEl.style.left = `${left}px`;
 		this.containerEl.style.top = `${top}px`;
 		this.containerEl.style.transformOrigin = origin;
@@ -855,13 +958,58 @@ export class SelectionToolbar {
 		if (firstPlacement) this.scheduleTransitionAvoid();
 	}
 
+	/** 压字避让：默认落点一动不动，**只有**工具条矩形真的压在选中的字上时才抬走。
+	 *
+	 *  为什么不直接改成「锚定选区」（像桌面浮层那样贴到选区上方 8px）：
+	 *  ① md 侧是 `setFixed(true)` 的贴底形态，落点被 `test:comment-mobile` 与
+	 *     `test:md-kb` 那组「贴回可用区底边 −8px / 与官方栏重合」断言逐像素钉着；
+	 *  ② iOS 的系统选区菜单（拷贝 / 查询 气泡）就在选区正上方，贴上去会撞。
+	 *  所以只加一条**局部规则**：相交才让，不相交时 top 原值返回（既有断言全绿）。
+	 *
+	 *  候选顺序：选区上方 → 选区下方 → 保持原样（宁可压字也不能跑到可用区外）。
+	 *  阴性对照 `?break=seloverlap` 注回旧行为（恒不动）。 */
+	private liftOffSelection(left: number, top: number, tw: number, th: number): number {
+		if (this.commentOpen) return top; // 评论态是弹框，跟着键盘走，不许挪
+		if (!selectionOverlapEnabled()) return top;
+		const sel = this.obstacleRect;
+		if (!sel || !(sel.width > 0) || !(sel.height > 0)) return top;
+		const bounds = this.lastBounds;
+		if (!bounds) return top;
+		// 统一换到**视口**坐标再比：sel 是 `getBoundingClientRect()` 的原始口径，
+		// 而 left/top 是宿主本地坐标（宿主原点 = 容器定位原点）。
+		const host = this.containerEl.parentElement?.getBoundingClientRect();
+		const hostTop = host?.top ?? 0;
+		const hostLeft = host?.left ?? 0;
+		const vpTop = hostTop + top;
+		const vpLeft = hostLeft + left;
+		const intersects = vpTop < sel.bottom && vpTop + th > sel.top
+			&& vpLeft < sel.right && vpLeft + tw > sel.left;
+		if (!intersects) return top;
+		const gap = 8;
+		const minTop = bounds.top ?? 0;
+		const maxTop = minTop + bounds.height - th;
+		const above = sel.top - hostTop - th - gap;
+		const below = sel.bottom - hostTop + gap;
+		const fits = (v: number): boolean => v >= minTop && v <= maxTop;
+		if (fits(above)) return above;
+		if (fits(below)) return below;
+		debugLog.info("[selbar] 压字避让无解（上下都放不下），保持原落点", JSON.stringify({ top, above, below }));
+		return top;
+	}
+
 	private submitComment(): void {
 		if (!this.snapshot) return;
 		this.actions.onComment(this.snapshot.text, this.commentInput.value.trim(), this.pickedColor);
 		this.hide();
 	}
 
-	showFor(snapshot: SelectionSnapshot, anchorRect: DOMRect | null, bounds: Bounds): void {
+	showFor(
+		snapshot: SelectionSnapshot,
+		anchorRect: DOMRect | null,
+		bounds: Bounds,
+		/** 本次选区的**视口坐标**矩形：只用于「别压住选中的字」，不作定位锚点（见 obstacleRect） */
+		obstacleRect?: DOMRect | null,
+	): void {
 		// 新一次显示不该带着上一次悬浮留下的 AI 名单（它不是编辑态，收起无副作用）
 		this.closeAiMenu();
 		// 新一次划词从横滑带**最左**开始（上次滑到哪与这次无关）。只在「由隐到显」那一拍复位：
@@ -884,7 +1032,9 @@ export class SelectionToolbar {
 		// 所以编辑区还开着时收到的选区事件，只可能是同一次划选的重投，不是新意图。
 		if (this.commentOpen) {
 			this.snapshot = snapshot;
+			this.captureSnapshotSelection(snapshot);
 			this.lastAnchorRect = this.fixed ? null : anchorRect;
+			this.obstacleRect = obstacleRect ?? null;
 			const freshBounds = this.boundsResolver?.() ?? bounds;
 			this.lastBounds = freshBounds;
 			this.reposition(this.lastAnchorRect, freshBounds);
@@ -893,7 +1043,9 @@ export class SelectionToolbar {
 			return;
 		}
 		this.snapshot = snapshot;
+		this.captureSnapshotSelection(snapshot);
 		this.lastAnchorRect = this.fixed ? null : anchorRect;
+		this.obstacleRect = obstacleRect ?? null;
 		this.commentOpen = false;
 		this.containerEl.removeClass("is-comment-open");
 		// 只有「订阅之后不会马上重建」时才退订（阅读器非评论态：不再跟随几何）。
@@ -992,6 +1144,7 @@ export class SelectionToolbar {
 			btn.addEventListener("click", e => {
 				e.stopPropagation();
 				if (!exists) return;
+				this.restoreSnapshotSelection();
 				onRun(b.commandId);
 			});
 		}
@@ -1021,6 +1174,32 @@ export class SelectionToolbar {
 		this.aiMenu?.close();
 	}
 
+	/** 点击外置工具前恢复本次快照对应的原 Range；只在原文档里操作，不跟随全局活动窗口。 */
+	private restoreSnapshotSelection(): void {
+		if (this.mobileInteraction?.enabled) { this.mobileInteraction.prepareAction(); return; }
+		const snapshot = this.snapshot;
+		const range = this.selectionRange;
+		if (!snapshot || !range) return;
+		try {
+			if (range.startContainer.ownerDocument !== snapshot.doc || range.endContainer.ownerDocument !== snapshot.doc) return;
+			const selection = snapshot.doc.getSelection();
+			if (!selection) return;
+			const normalize = (value: string): string => value.replace(/\s+/g, " ").trim();
+			if (!selection.isCollapsed && normalize(selection.toString()) === normalize(snapshot.text)) return;
+			selection.removeAllRanges();
+			selection.addRange(range.cloneRange());
+		} catch { /* 书页 frame 已卸载时仍可使用冻结文本与宿主定位快照 */ }
+	}
+
+	private captureSnapshotSelection(snapshot: SelectionSnapshot): void {
+		try {
+			const selection = snapshot.doc.getSelection();
+			this.selectionRange = selection && !selection.isCollapsed && selection.rangeCount
+				? selection.getRangeAt(0).cloneRange()
+				: null;
+		} catch { this.selectionRange = null; }
+	}
+
 	hide(): void {
 		// relocate 每帧调用：已经收干净时直接返回。下面每个 removeClass/removeProperty 都会
 		// 碰样式或 class，空转时纯噪声（guard 不改变任何可观察状态：三个条件覆盖了 hide 的全部副作用）。
@@ -1032,6 +1211,7 @@ export class SelectionToolbar {
 		// 是哪条路径动的手（正常出口：取消 / 关闭 / Esc / 点正文空白 / 点别处高亮 / 全沉浸）。
 		if (this.commentOpen) debugLog.info("[comment] hide() 在编辑评论期间收起工具条 ←", new Error("fold"));
 		this.snapshot = null;
+		this.selectionRange = null;
 		this.lastAnchorRect = null;
 		this.lastBounds = null;
 		this.commentOpen = false;

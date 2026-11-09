@@ -14,9 +14,10 @@
  *  定位的三条通道与降级顺序见 `resolveRange`；端到端回归见 `test:md-selection`。
  */
 
-import { MarkdownView, Notice, type App } from "obsidian";
+import { MarkdownView, Notice, Platform, type App } from "obsidian";
 import type { AiToolEntry } from "../types";
 import type { Bounds } from "./floatingPlacement";
+import { MobileSelectionInteractionController, domSelectionSnapshot, type MobileSelectionSnapshot } from "./mobileSelectionInteraction";
 import { NativeChromeGate } from "./nativeChromeGate";
 import { nodeChain, recordCaptureDiag } from "./selectionDiag";
 import { isDebugEnabled, onDiagnosticClear } from "../core/debugLog";
@@ -37,6 +38,12 @@ export interface MdSelectionDeps {
 	view(): MarkdownView | null
 	/** 叠加层根（`.unreader-md-root`）：工具条挂它下面，也是定位坐标系原点 */
 	host(): HTMLElement | null
+	/** 与 Markdown 阅读工具共用的功能轨槽；缺省时保留原浮动形态，供独立探针/宿主使用。 */
+	selectionToolbarHost?(): HTMLElement | null
+	/** 选区期间临时显示并替换功能轨；结束后恢复宿主原状态。 */
+	onSelectionRailModeChange?(active: boolean): void
+	/** 已有选区的正文触摸期间临时隐藏工具栏和浮动目录；松手/取消时解除。 */
+	onBodyDragChange?(active: boolean): void
 	/** 选区所在**渲染分节**对应的源码行范围（0 基闭区间），用作消歧窗口；null = 无约束 */
 	windowFor(range: Range, rect: DOMRect): [number, number] | null
 	/** 工具条可用区，**host 本地坐标** */
@@ -53,6 +60,14 @@ export interface MdSelectionDeps {
 
 /** 选区事件合并后的去抖（与 readerView 的选区采集同量级）。 */
 const CAPTURE_DEBOUNCE_MS = 120;
+
+/** 工具条刚出现时，忽略紧接着的一记 scroll。
+ *
+ *  source / 实时预览里，“选中文字”本身会让编辑器聚焦并弹起键盘；官方随后插入
+ *  `.mobile-toolbar`，CM6 滚动层会跟着平移一次。这一记 scroll 不是用户在翻正文，
+ *  若当成阅读滚动处理，刚出现的工具条会被立刻收掉（2026-10-11 真机报障）。
+ *  只保护“刚显示”这一小段；之后用户真的滚动正文，仍按阅读滚动收起。 */
+const TOOLBAR_SCROLL_SETTLE_MS = 700;
 
 /** 官方快速编辑栏让位窗口的**安全网**（见 syncAnnotationChrome）。
  *  正常路径由「手指按压正文 / 正文里刚有过选区活动」两条驱动上报开合，每次上报都重新计时；
@@ -229,6 +244,14 @@ export class MdSelectionController {
 	private selectionGateTimer = 0;
 	/** 手指/笔正压在**笔记正文**上的手势（见 onPointerDown / shouldGateAnnotationChrome） */
 	private gesture: { pointerId: number } | null = null;
+	/** 点正文时，等触摸会话先完成“误塌陷选区恢复”，到抬手后再收工具条。 */
+	private dismissToolbarOnRelease: number | null = null;
+	/** 工具条因“开始阅读/滚动”主动收起，但**保留文字选区**。
+	 *  此时禁止 selectionchange 把工具条立刻重新弹出来；下一次用户按下正文（重新选词）
+	 *  才解除。第二次点正文时工具条已经退场，由原生选区行为正常清掉文字。 */
+	private toolbarParked = false;
+	/** 工具条由隐到显的时刻，用来区分键盘弹起造成的 scroll 与用户真正滚动正文。 */
+	private toolbarShownAt = 0;
 	/** 最近一次采集的**自述结论**（见 `narrate` / `armNoShowWatch`）：
 	 *  `null` = 成功走到 `showFor`；否则 = 早退原因（`view-null` / `no-text` / `scope-miss`…）。
 	 *  真机报「选中了文字但工具条不出现」时，这一个字段就指认了断在哪一环。 */
@@ -239,8 +262,22 @@ export class MdSelectionController {
 	/** 「采集跑完但工具条最终不可见」的裁决定时器（见 armNoShowWatch）。 */
 	private noShowTimer = 0;
 
+	private mobile!: MobileSelectionInteractionController;
+
 	constructor(private readonly deps: MdSelectionDeps) {
 		this.toolbar = new SelectionToolbar({
+			onDismissSelection: () => {
+				const view = this.deps.view();
+				const editor = view?.editor;
+				if (modeOf(view) === "source" && editor) {
+					try {
+						const head = editor.listSelections()[0]?.head;
+						if (head) editor.setSelection(head);
+					} catch { /* 编辑器已卸载或宿主接口不完整时，仍继续走 DOM 选区清理 */ }
+				}
+				this.clearSelection();
+				this.hide();
+			},
 			onCopy: text => this.copy(text),
 			// 色点高亮 = 执行「高亮选中文本」命令的**同一实现**（`highlightCurrent` 就是
 			// main.ts 那条 `highlight-selection-*` 命令调用的入口，见下方方法注释）。
@@ -268,6 +305,14 @@ export class MdSelectionController {
 				this.deps.runAiTool(id, text);
 			},
 		});
+		this.mobile = new MobileSelectionInteractionController({
+			enabled: () => Platform.isMobile,
+			tools: node => this.toolbar.containerEl.contains(node),
+			refreshed: () => this.capture(),
+			ended: () => { this.pending = null; this.toolbar.hide(); },
+			onDragVisibilityChange: active => this.deps.onBodyDragChange?.(active),
+		});
+		this.toolbar.setMobileInteraction(this.mobile);
 		// 与阅读器同一套口径：贴底居中（固定定位），避开系统选区菜单的原地弹出
 		this.toolbar.setFixed(true);
 		this.toolbar.setBoundsResolver(() => this.deps.bounds());
@@ -286,7 +331,12 @@ export class MdSelectionController {
 		// 订阅回调不读参数 —— 它现在**不是驱动**（工具条可见不再是判据，见
 		// shouldGateAnnotationChrome 里 ① 的说明），只是一条「重新求值」的廉价时机：
 		// 工具条收起那一刻顺手判一次，能更早把闸门放掉。
-		this.toolbar.setOnVisibilityChange(() => this.syncAnnotationChrome());
+		this.toolbar.setOnVisibilityChange((_visible, inRailMode) => {
+
+			if (!_visible) this.mobile.end();
+			this.deps.onSelectionRailModeChange?.(inRailMode);
+			this.syncAnnotationChrome();
+		});
 	}
 
 	// ---------- 官方快速编辑栏的让位（2026-10-12） ----------
@@ -492,8 +542,9 @@ export class MdSelectionController {
 	 *  ⚠️ **只许在外部事件里调**（见 `SELECTION_GATE_GRACE_MS`）：到期复查定时器走的也是
 	 *  `syncAnnotationChrome`，若把续命写进判据内部，③ 就会自己喂自己、闸门永不放行。 */
 	private noteSelectionActivity(): void {
+		const wasLive = this.selectionWasLive;
 		const live = this.bodySelectionLive();
-		if (live && !this.selectionWasLive) this.gateLatched = true;
+		if (live && !wasLive) this.gateLatched = true;
 		this.selectionWasLive = live;
 		this.selectionGateAt = live ? performance.now() : 0;
 	}
@@ -628,8 +679,10 @@ export class MdSelectionController {
 			this.noShowTimer = 0;
 		});
 		host.appendChild(this.toolbar.containerEl);
+		this.toolbar.setRailHost(this.deps.selectionToolbarHost?.() ?? null);
 
 		const doc = this.ownerDoc();
+		this.mobile.bind({ doc, body: () => this.deps.view()?.contentEl ?? null, read: () => this.mobileSnapshot() });
 		doc.addEventListener("selectionchange", this.onSelectionChange);
 		doc.addEventListener("pointerup", this.onPointerUp);
 		doc.addEventListener("pointercancel", this.onPointerCancel);
@@ -680,9 +733,13 @@ export class MdSelectionController {
 		if (this.rafId) { window.cancelAnimationFrame(this.rafId); this.rafId = 0; }
 		if (this.timer) { window.clearTimeout(this.timer); this.timer = 0; }
 		if (this.noShowTimer) { window.clearTimeout(this.noShowTimer); this.noShowTimer = 0; }
+		this.mobile.dispose();
 		this.pending = null;
 		this.toolbar.hide();
 		this.toolbar.containerEl.remove();
+		this.dismissToolbarOnRelease = null;
+		this.toolbarParked = false;
+		this.toolbarShownAt = 0;
 		// 视图关闭 / 切模式：让位窗口必须跟着散 —— 否则官方快速编辑栏在本会话里再也出不来
 		if (this.chromeGateTimer) {
 			window.clearTimeout(this.chromeGateTimer);
@@ -700,6 +757,7 @@ export class MdSelectionController {
 
 	/** 主动收起（由宿主在某些时机调用，例如切模式、打开别的面板）。 */
 	hide(): void {
+		this.mobile.end();
 		this.toolbar.hide();
 	}
 
@@ -720,6 +778,9 @@ export class MdSelectionController {
 	 *  （经 `mdOverlay.highlightSelectionOnActiveLeaf`）与划词工具条的色点都调它
 	 *  （2026-10-11 用户要求「用命令替换按钮的功能实现逻辑」）。 */
 	highlightCurrent(colorName: string): boolean {
+		// 命令是明确动作：即使工具条刚被“阅读滚动”收起，也允许从仍保留的选区继续。
+		this.toolbarParked = false;
+		if (this.mobile.active && !this.mobile.prepareAction()) return false;
 		if (!this.pending) {
 			this.capture();
 			if (!this.pending) return false;
@@ -736,6 +797,13 @@ export class MdSelectionController {
 		// 拖动过程中的高频 selectionchange 会在「已排队」时被整批跳过，而 ③ 就靠它续。
 		this.noteSelectionActivity();
 		this.syncAnnotationChrome();
+		// 自动收起工具条后，触摸会话的 click 还会恢复一次 Range，从而再发一记
+		// selectionchange。那个事件不应把已经 end() 的移动会话重新建起来；否则
+		// 第二次点正文仍会走“第一拍保护”分支，文字永远清不掉。
+		if (this.toolbarParked) {
+			this.mobile.end();
+			return;
+		}
 		if (this.rafId) return;
 		this.rafId = window.requestAnimationFrame(() => {
 			this.rafId = 0;
@@ -762,9 +830,19 @@ export class MdSelectionController {
 	 *  （不看 target 无条件重采）→ `test:md-selection` 的 P11 必须变红。 */
 	private readonly onPointerUp = (e: PointerEvent): void => {
 		if (!this.attached) return;
+		const shouldPark = this.dismissToolbarOnRelease === e.pointerId;
+		if (shouldPark) this.dismissToolbarOnRelease = null;
+		// 抬手 ⇒ 侧轨立刻恢复可点（拖动选区结束，用户接下来通常就是要按按钮）。
+		// 放在最前：下面有几条早退，漏一条就会剩下面板永久不吃触摸。
 		// 手势这一条先结清：**工具条子树内的 pointerup 也要结清**，否则一次点按会把
 		// 手势挂到安全网（`CHROME_GATE_MAX_MS`）才放行（用户会看到「点一下之后那栏半天不回来」）。
 		this.endChromeGesture(e);
+		if (shouldPark) {
+			// 触摸会话在自己的 window/document capture 阶段已先恢复原选区；这里再收 UI，
+			// 就不会把用户刚选的文字一起弄丢。
+			this.scheduleToolbarPark();
+			return;
+		}
 		if (!breakFlag("__UR_BREAK_STICKY_BAR")) {
 			const target = e.target;
 			if (target instanceof Node && this.toolbar.containerEl.contains(target)) return;
@@ -781,6 +859,9 @@ export class MdSelectionController {
 	}
 
 	private capture(): void {
+		// 用户开始阅读时我们已经主动把工具条收起了；此刻正文选区仍在，但不应被
+		// selectionchange 重新采集并弹回。显式命令（如“高亮选中文本”）会先解除它。
+		if (this.toolbarParked) return;
 		// 每次采集都挂一次「最终出现了吗」的裁决。**必须放在最前** —— 下面每一条早退
 		// 都可能正是故障本身，而裁决还要覆盖「一条早退都没走到、工具条却也没出现」那种。
 		this.narrate("pending");
@@ -864,6 +945,7 @@ export class MdSelectionController {
 			cloned = range.cloneRange();
 		} catch { /* 某些浏览器对跨影子的 range 会抛 */ }
 
+		this.mobile.observe(doc);
 		this.pending = {
 			text,
 			tokenCount: tokenize(text).length,
@@ -872,16 +954,21 @@ export class MdSelectionController {
 			editor: ed ?? undefined,
 		};
 		this.toolbar.setAiTools(this.deps.aiTools());
+		const wasVisible = this.toolbar.visible;
 		try {
-			this.toolbar.showFor({ doc, text }, null, this.deps.bounds());
+			// 第 4 个参数是**本选区矩形**（视口坐标）：工具条仍是贴底固定形态，
+			// 它只用来判「这一落点是不是正好压在选中的字上」（见 SelectionToolbar.liftOffSelection）。
+			this.toolbar.showFor({ doc, text }, null, this.deps.bounds(), this.pending.rect);
 		} catch (e) {
 			// 显示本身抛错 ⇒ 工具条一定不出现，而这一档此前**完全静默**
 			// （异常直接冒到事件回调里，用户侧只是「什么都没发生」）。留一条自述再原样抛。
 			this.narrate("show-throw", { ...baseFacts, error: String((e as Error)?.message ?? e) });
 			throw e;
 		}
+		if (!wasVisible) this.toolbarShownAt = performance.now();
 		// 采集成功：自述清空。（若裁决时工具条仍不可见 ⇒ 记成 `shown-then-hidden`）
 		this.narrateShown(baseFacts);
+
 	}
 
 	/**
@@ -986,11 +1073,80 @@ export class MdSelectionController {
 		}
 	}
 
+	private mobileSnapshot(): MobileSelectionSnapshot | null {
+		const view = this.deps.view();
+		if (!view) return null;
+		const dom = domSelectionSnapshot(this.ownerDoc(), view.contentEl);
+		if (modeOf(view) !== "source") {
+			if (!dom) return null;
+			const file = view.file;
+			const valid = dom.valid;
+			return { ...dom, valid: () => this.deps.view() === view && view.file === file && valid() };
+		}
+		const ed = view.editor;
+		const offsets = this.editorOffsets(view);
+		if (!ed || !offsets) return null;
+		const file = view.file;
+		const selections = ed.listSelections().map(s => ({ anchor: { ...s.anchor }, head: { ...s.head } }));
+		// 只取**选中区间**的文本做指纹：`Editor.getRange` 是 rope 上的一次局部切片，
+		// 不像 `getValue()` 那样把整篇文档拼成字符串。旧实现在每记 selectionchange
+		// 建快照时读一遍全文、`valid()` 每次判断再读一遍并比较 —— 长笔记里主线程被
+		// 反复拖住；而且正文别处的无关改动会让快照提前失效，表现为选区自己收掉。
+		// 端点归属仍由 view / file / editor / mode 四重身份校验兜住。
+		const probe = ed as unknown as {
+			getRange?: (from: unknown, to: unknown) => string
+			offsetToPos?: (offset: number) => unknown
+		};
+		const slice = (): string | null => {
+			if (typeof probe.getRange !== "function" || typeof probe.offsetToPos !== "function") return null;
+			try { return probe.getRange(probe.offsetToPos(offsets.from), probe.offsetToPos(offsets.to)); }
+			catch { return null; }
+		};
+		const version = slice() ?? "";
+		const hasSlice = version !== "";
+		// 拿不到局部区间接口的合成编辑器（测试夹具）退回**纯身份校验**：不能把
+		// 「当前选区偏移是否还相等」当内容版本 —— 用户每次调整选区都会让它变，
+		// 于是仍有效的快照被判过期、会话被 end() 收掉（连续调整后点色点直接失灵）。
+		const valid = () => this.deps.view() === view && view.file === file && view.editor === ed
+			&& modeOf(view) === "source" && view.contentEl.isConnected
+			&& (!hasSlice || slice() === version);
+		return {
+			identity: ed, version, endpoints: [offsets.from, offsets.to], valid,
+			restore: () => { if (valid()) ed.setSelections(selections); },
+			clear: () => { if (valid()) { ed.setSelection(selections[0]!.head); this.clearSelection(); } },
+		};
+	}
+
 	// ---------- 收口 ----------
 
 	private readonly onPointerDown = (e: PointerEvent): void => {
 		const target = e.target;
 		if (target instanceof Node && this.toolbar.containerEl.contains(target)) return;
+		// 下一次按下正文代表新一轮阅读/选词。被自动收起的旧工具条不再阻止采集。
+		const wasParked = this.toolbarParked;
+		this.toolbarParked = false;
+		if (wasParked) {
+			// 第一次点正文只收 UI；来到这里的下一次按下才是“第二下”。这时主动收掉
+			// 旧 Range，避免触摸会话又被那记 selectionchange 复活成“第一拍保护”。
+			this.mobile.end();
+			const view = this.deps.view();
+			const editor = view?.editor;
+			if (modeOf(view) === "source" && editor) {
+				try {
+					const head = editor.listSelections()[0]?.head;
+					if (head) editor.setSelection(head);
+				} catch { /* 编辑器已卸载时仍继续 DOM 选区清理 */ }
+			}
+			this.clearSelection();
+			this.pending = null;
+		}
+		if (this.mobile.active && e.pointerType === "touch") {
+			// 不能在这里同步 hide：浏览器随后还会把 live selection 折叠一次，而触摸会话
+			// 要到抬手/click 才把它精确恢复。先让那一段完成，抬手时再收工具条。
+			this.dismissToolbarOnRelease = e.pointerId;
+			this.beginChromeGesture(e);
+			return;
+		}
 		this.toolbar.hide();
 		// 落闸必须发生在**这一次 pointerdown 的同步阶段**：官方那栏在编辑器聚焦时就 show()，
 		// 用 microtask / timeout 都会晚一步（那时 52px 的 spacerEl 已经把正文顶上去了）。
@@ -1001,6 +1157,10 @@ export class MdSelectionController {
 	private readonly onPointerCancel = (e: PointerEvent): void => {
 		if (!this.attached) return;
 		this.endChromeGesture(e);
+		if (this.dismissToolbarOnRelease === e.pointerId) {
+			this.dismissToolbarOnRelease = null;
+			this.scheduleToolbarPark();
+		}
 	};
 
 	/** ② 的收口补通道之一：**window 捕获**阶段的 pointerup / cancel。
@@ -1011,6 +1171,10 @@ export class MdSelectionController {
 	private readonly onWindowRelease = (e: PointerEvent): void => {
 		if (!this.attached) return;
 		this.endChromeGesture(e);
+		if (this.dismissToolbarOnRelease === e.pointerId) {
+			this.dismissToolbarOnRelease = null;
+			this.scheduleToolbarPark();
+		}
 	};
 
 	/** ② 的收口补通道之二：**触摸通道的 touches 清空**。
@@ -1019,10 +1183,17 @@ export class MdSelectionController {
 	 *  可能吞掉其中一条。`touches.length === 0` 是「手指已全部离开屏幕」的**物理事实**
 	 *  （多指也覆盖），拿它结清手势不会误伤 —— 还有手指压着时一律不动。 */
 	private readonly onTouchRelease = (e: TouchEvent): void => {
-		if (!this.attached || !this.gesture) return;
+		if (!this.attached) return;
 		if (e.touches.length > 0) return;
+		const shouldPark = this.dismissToolbarOnRelease !== null;
+		this.dismissToolbarOnRelease = null;
+		if (!this.gesture) {
+			if (shouldPark) this.scheduleToolbarPark();
+			return;
+		}
 		this.gesture = null;
 		this.syncAnnotationChrome();
+		if (shouldPark) this.scheduleToolbarPark();
 	};
 
 	/** ② 的收口补通道之三：**页面转后台**（切应用 / 锁屏 / 系统返回）。
@@ -1038,15 +1209,14 @@ export class MdSelectionController {
 		if (e.key === "Escape" && this.toolbar.visible) this.toolbar.hide();
 	};
 
-	/** 滚动时收起工具条：阅读模式下锚点在正文流里，跟着滚会飘到别处 —— 收起最干净。
+	/** 阅读滚动时收起工具条，但保留文字选区。
 	 *
-	 *  **实时渲染 / 源码模式例外**（2026-10-11 用户报障：「实时渲染模式下，选中文字后
-	 *  自动出现键盘，这种情况下选中文字工具栏不会出现」）：工具条在 source 模式是
-	 *  **贴底居中的固定定位**，与锚点无关、不需要跟着滚；而移动端软键盘弹起会让 CM6 的
-	 *  滚动层（`.cm-scroller`）连同 `visualViewport` 一起平移一次，这一记 scroll 正好
-	 *  落在「刚 capture 出工具条」之后 → 刚显示就被收掉，用户看到的就是「选完字、
-	 *  键盘弹出、工具条没了」。source 模式的收口交给「点空白 / Esc / 关闭钮 / 高亮完成」
-	 *  这几条明确出口，scrolling 不再参与。 */
+	 *  与旧实现的关键差异：以前 `toolbar.hide()` 会结束整次选区会话；现在只把 UI 停到
+	 *  parked 态，选区仍在。用户第二次点正文时才按原生行为清掉文字。
+	 *
+	 *  source / 实时预览刚选中文字时，键盘弹起会让 CM6 滚动层平移一次；那一记
+	 *  scroll 必须忽略（2026-10-11 真机报障：「选完字、键盘弹出、工具条没了」）。
+	 *  settle 窗口过后，用户真正滚动正文仍然正常收起。 */
 	private readonly onScroll = (e: Event): void => {
 		if (!this.toolbar.visible) return;
 		// **工具条自己的横滑带不算「阅读区滚动」**（2026-10-14 单行横滑改版）：
@@ -1056,11 +1226,42 @@ export class MdSelectionController {
 		// 是否落在工具条子树内（与上方空白点按路径同一套「容器内不算外部」口径）。
 		const t = e.target;
 		if (t instanceof Node && this.toolbar.containerEl.contains(t)) return;
-		// 阴性对照 `__UR_BREAK_SCROLL_HIDE`：注回旧行为「任何滚动都收起」→
-		// test:md-selection 的 P16（source 模式键盘引发的滚动不得收工具条）必须变红。
-		if (!breakFlag("__UR_BREAK_SCROLL_HIDE") && modeOf(this.deps.view()) === "source") return;
-		this.toolbar.hide();
+		const view = this.deps.view();
+		if (!view || !(t instanceof Node) || !view.contentEl.contains(t)) return;
+		// source / 实时预览：刚选中文字时键盘弹起也会搬一次 CM6 滚动层，这一拍不是
+		// “用户开始翻正文”。等布局稳定后再让滚动参与收口。
+		if (modeOf(view) === "source"
+			&& performance.now() - this.toolbarShownAt < TOOLBAR_SCROLL_SETTLE_MS
+			&& !this.gesture
+			&& !breakFlag("__UR_BREAK_SCROLL_HIDE")) return;
+		// 阅读滚动只收 UI，不动文字选区。用户仍可再次点正文；那一下才由原生行为清选区。
+		this.parkToolbarForReading();
 	};
+
+	/** 收起工具条并退出侧轨，但保留当前文字选区。
+	 *
+	 *  `SelectionToolbar.hide()` 会通知宿主结束移动选区会话；这里额外立一个 parked
+	 *  闸，挡住仍有效的 selectionchange 把工具条立即采集回来。第二次点正文时
+	 *  `onPointerDown` 解除这个闸，之后按正常的空白点按路径清选区。 */
+	private parkToolbarForReading(): void {
+		if (!this.toolbar.visible && !this.mobile.active) {
+			this.toolbarParked = true;
+			return;
+		}
+		this.toolbarParked = true;
+		this.toolbar.hide();
+	}
+
+	/** 等到本轮 pointerup 后面的兼容 click 走完，再结束移动选区会话。
+	 *
+	 *  iOS / Android 的点击链是 pointerup → click；触摸会话还要靠最后那记 click
+	 *  阻止浏览器默认塌陷并恢复精确 Range。若在 pointerup 里同步 `hide()`，会话会先被
+	 *  清掉，click 便不再受保护，用户看到的仍是“工具栏刚收、选中的字也没了”。 */
+	private scheduleToolbarPark(): void {
+		(this.ownerDoc().defaultView ?? window).setTimeout(() => {
+			if (this.attached) this.parkToolbarForReading();
+		}, 0);
+	}
 
 	// ---------- 动作 ----------
 
@@ -1125,7 +1326,8 @@ export class MdSelectionController {
 
 	private clearSelection(): void {
 		try {
-			this.ownerDoc().getSelection()?.removeAllRanges();
+			const selection = this.ownerDoc().getSelection();
+			if (selection?.anchorNode && this.deps.view()?.contentEl.contains(selection.anchorNode)) selection.removeAllRanges();
 		} catch { /* ignore */ }
 	}
 
@@ -1268,7 +1470,11 @@ export class MdSelectionController {
 			return;
 		}
 
+		const file = view.file;
+		const editor = view.editor;
+		const version = modeOf(view) === "source" ? editor.getValue() : null;
 		const src = await this.readSource(view);
+		if (view.file !== file || view.editor !== editor || (version !== null && editor.getValue() !== version)) return;
 		if (src == null) {
 			new Notice("读取笔记失败");
 			return;

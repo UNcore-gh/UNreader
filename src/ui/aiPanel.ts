@@ -1,8 +1,8 @@
+import { migrateAiTools } from "../core/aiTools";
+import { openFloatingPanel, closeFloatingPanel } from "./floatingPanel";
+import { stopContentPopover } from "./growingPopover";
 import { App, Notice, setIcon } from "obsidian";
 import {
-	OFFICIAL_TOOLS,
-	AI_LANGUAGE_TOKEN,
-	applyLanguageToken,
 	extractBlockElements,
 	applyTypographyWriteBack,
 	applyTypographyChunkWriteBack,
@@ -13,6 +13,7 @@ import {
 	TYPOGRAPHY_CHUNK_INSTRUCTION,
 	TYPOGRAPHY_BLOCK_INSTRUCTION,
 	SEGMENTED_TRANSLATION_INSTRUCTION,
+	withSystemLanguage,
 	type AiBlock,
 } from "../core/aiTasks";
 import { detectUnagent, unagentGuidance } from "../core/unagentBridge";
@@ -70,10 +71,8 @@ interface SettingAppApi {
 	}
 }
 
-export const AI_LANGUAGES = ["简体中文", "繁體中文", "English", "日本語", "한국어", "Français", "Deutsch", "Español", "Русский", "Português"];
-const CUSTOM_LIMIT = 20;
-const CUSTOM_PROMPT_MAX = 4000;
-const OFFICIAL_PROMPT_MAX = 6000;
+const CUSTOM_LIMIT = 100;
+const CUSTOM_PROMPT_MAX = 6000;
 
 type AiRunState = "idle" | "running" | "done" | "error" | "cancelled";
 
@@ -117,25 +116,9 @@ interface AiRun {
 }
 
 /** 统一工具编辑器状态：官方工具（查看/改/重置）与自定义工具（新增/编辑）共用一套表单。 */
-type AiEditor =
-	| { kind: "official"; toolId: "translate" | "typography"; scope: AiFunctionScope; enabled: boolean }
-	| { kind: "custom-new"; scope: AiFunctionScope; enabled: boolean }
-	| { kind: "custom-edit"; fnId: string; scope: AiFunctionScope; enabled: boolean }
-	| null;
+type AiEditor = { kind: "custom-new" | "custom-edit"; fnId?: string; scope: AiFunctionScope; enabled: boolean; mode?: "rewrite" | "typography" } | null;
 
-/** AI 助手停靠面板（与外观/目录面板同一形态）：挂 `.unreader-body`、功能轨按钮开合、
- *  `is-open` 显隐、点外面关闭。
- *
- *  统一工具模型：官方「全文翻译 / 排版优化」与用户自定义工具同构 —— 都是
- *  「提示词 + 作用域（全文/选中文字）」，点击即运行。官方工具不可删除，但可点开
- *  查看/修改提示词与作用域、重置回官方默认（改动存 settings.ai.toolOverrides，
- *  默认词活在代码里、升级不丢）；自定义工具可增删改。提示词里的 `{目标语言}` 占位
- *  在运行时替换为面板选择的语言。
- *
- *  全文类任务的结果**替换到正文当中**：对当前渲染帧的文档逐块写回；正文里「原文 / AI
- *  版本」的切换由**正文区底部的版本条**提供（`src/ui/versionBar.ts`）—— 面板只放工具、
- *  进度与状态，**不再展示 AI 输出内容**（2026-09-28 用户要求）。「选中文字」作用域的
- *  结果落在正文区的贴底卡片（由宿主提供，与划词翻译同一张）。 */
+/** AI 工具面板：模板与用户工具共享数据、编辑和运行路径。 */
 export class AIPanel {
 	readonly containerEl: HTMLElement;
 	private readonly callbacks: AIPanelCallbacks;
@@ -145,7 +128,6 @@ export class AIPanel {
 	private customListEl!: HTMLElement;
 	private addBtn!: HTMLElement;
 	private formEl!: HTMLElement;
-	private formNameRow!: HTMLElement;
 	private formNameEl!: HTMLInputElement;
 	private formPromptEl!: HTMLTextAreaElement;
 	private formScopeEl!: HTMLElement;
@@ -204,20 +186,24 @@ export class AIPanel {
 	}
 
 	getSettings(): AiSettings {
-		return this.callbacks.getSettings();
+		return migrateAiTools(this.callbacks.getSettings());
 	}
 
 	open(): void {
 		this.ignoreOutsideUntil = performance.now() + 300;
 		this.render();
 		this.containerEl.addClass("is-open");
+		openFloatingPanel(this.containerEl, () => this.close());
 		document.addEventListener("pointerdown", this.onDocPointerDown, true);
 		this.callbacks.onOpened?.();
 		this.callbacks.onOpenChange?.(true);
 	}
 
 	close(): void {
+		closeFloatingPanel(this.containerEl);
+		stopContentPopover(this.containerEl);
 		if (!this.containerEl.hasClass("is-open")) return;
+		this.editor = null;
 		this.containerEl.removeClass("is-open");
 		document.removeEventListener("pointerdown", this.onDocPointerDown, true);
 		this.callbacks.onOpenChange?.(false);
@@ -276,43 +262,39 @@ export class AIPanel {
 		return detectUnagent(this.callbacks.app);
 	}
 
-	/** 官方工具的生效形态 = 官方默认 + 用户改动（toolOverrides）。 */
-	private resolveOfficial(toolId: "translate" | "typography"): {
-		id: "translate" | "typography"
-		name: string
-		icon: string
-		description: string
-		prompt: string
-		scope: AiFunctionScope
-		enabled: boolean
-		overridden: boolean
-	} {
-		const base = OFFICIAL_TOOLS.find(t => t.id === toolId)!;
-		const override = this.getSettings().toolOverrides[toolId];
-		return {
-			id: base.id,
-			name: base.name,
-			icon: base.icon,
-			description: base.description,
-			prompt: override?.prompt ?? base.defaultPrompt,
-			scope: override?.scope ?? base.defaultScope,
-			enabled: override?.enabled !== false,
-			// 「已修改」标记只反映提示词/作用域偏离；单纯的停用由置灰态表达
-			overridden: !!override && (override.prompt != null || override.scope != null),
-		};
+	private saveTools(tools: AiCustomFunction[]): void {
+		this.callbacks.onPatch({ customFunctions: tools, toolsInitialized: true, toolOverrides: {} });
 	}
 
 	private render(): void {
 		this.containerEl.empty();
+		const editing = this.editor !== null;
+		this.containerEl.toggleClass("is-editing", editing);
 		const head = this.containerEl.createDiv({ cls: "unreader-ai-head" });
-		head.createDiv({ cls: "unreader-ai-title", text: "AI 助手" });
+		const headMain = head.createDiv({ cls: "unreader-ai-head-main" });
+		if (editing) {
+			const back = headMain.createDiv({ cls: "unreader-ai-back", attr: { role: "button", tabindex: "0", "aria-label": "返回工具列表" } });
+			setIcon(back, "arrow-left");
+			back.addEventListener("click", () => { this.editor = null; this.render(); });
+			back.addEventListener("keydown", e => {
+				if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.editor = null; this.render(); }
+			});
+		}
+		headMain.createDiv({
+			cls: "unreader-ai-title",
+			text: editing ? (this.editor?.kind === "custom-new" ? "新建 AI 工具" : "编辑 AI 工具") : "AI 助手",
+		});
 		const closeBtn = head.createDiv({ cls: "unreader-ai-close", attr: { "aria-label": "关闭" } });
 		setIcon(closeBtn, "x");
 		closeBtn.addEventListener("click", () => this.close());
 
 		const body = this.containerEl.createDiv({ cls: "unreader-ai-body" });
+		if (editing) {
+			this.renderForm(body);
+			return;
+		}
 
-		// ① UNagent 状态行：实时检测 + 按状态给唯一下一步动作
+		// 主面板：连接、全局设置、创建入口、两个工具分区。
 		const detection = this.detection();
 		const status = body.createDiv({ cls: "unreader-ai-status" });
 		this.statusDotEl = status.createDiv({ cls: "unreader-ai-status-dot" });
@@ -320,39 +302,13 @@ export class AIPanel {
 		this.statusActionBtn = status.createDiv({ cls: "unreader-ai-status-action", attr: { "aria-label": "下一步" } });
 		this.renderStatus(detection);
 
-		// ② 官方工具：固定两枚，点击即运行；铅笔进编辑器（查看/改提示词与作用域/重置）
-		body.createDiv({ cls: "unreader-ai-section-title", text: "功能" });
-		const official = body.createDiv({ cls: "unreader-ai-official" });
-		for (const tool of OFFICIAL_TOOLS) {
-			this.renderOfficialTool(official, tool.id);
-		}
-
-		// 目标语言（提示词里的 {目标语言} 占位在运行时替换）
-		const langRow = body.createDiv({ cls: "unreader-ai-lang" });
-		langRow.createDiv({ cls: "unreader-ai-lang-label", text: "翻译目标语言" });
-		const select = langRow.createEl("select", { cls: "unreader-ai-lang-select" });
-		const current = this.getSettings().targetLanguage;
-		for (const lang of AI_LANGUAGES) {
-			const option = select.createEl("option", { text: lang, attr: { value: lang } });
-			if (lang === current) option.selected = true;
-		}
-		if (!AI_LANGUAGES.includes(current)) {
-			const option = select.createEl("option", { text: current, attr: { value: current } });
-			option.selected = true;
-		}
-		select.addEventListener("change", () => this.callbacks.onPatch({ targetLanguage: select.value }));
-
-		// ③ 自定义工具：用户增删改，按钮形式
-		const customHead = body.createDiv({ cls: "unreader-ai-custom-head" });
-		customHead.createDiv({ cls: "unreader-ai-section-title", text: "自定义工具" });
-		this.addBtn = customHead.createDiv({ cls: "unreader-ai-add", attr: { "aria-label": "添加工具" } });
-		setIcon(this.addBtn, "plus");
-		this.addBtn.addEventListener("click", () => this.openEditor({ kind: "custom-new", scope: "full", enabled: true }));
+		this.addBtn = body.createDiv({ cls: "unreader-ai-add", text: "＋ 创建新工具", attr: { role: "button", tabindex: "0", "aria-label": "创建新工具" } });
+		this.addBtn.addEventListener("click", () => this.openEditor({ kind: "custom-new", scope: "full", enabled: true, mode: "rewrite" }));
+		this.addBtn.addEventListener("keydown", e => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.addBtn.click(); } });
 		this.customListEl = body.createDiv({ cls: "unreader-ai-custom-list" });
 		this.renderCustomList();
-		this.renderForm(body);
 
-		// ④ 运行区：进度 / 结果 / 复制
+		// 运行区：进度 / 版本入口。
 		this.runEl = body.createDiv({ cls: "unreader-ai-run" });
 		this.updateRunArea();
 	}
@@ -410,162 +366,94 @@ export class AIPanel {
 		this.openNextStep("not-configured");
 	}
 
-	private renderOfficialTool(parent: HTMLElement, toolId: "translate" | "typography"): void {
-		const tool = this.resolveOfficial(toolId);
-		const button = parent.createDiv({ cls: "unreader-ai-func-btn", attr: { "data-task": tool.id } });
-		const iconEl = button.createDiv({ cls: "unreader-ai-func-icon" });
-		setIcon(iconEl, tool.icon);
-		const textWrap = button.createDiv({ cls: "unreader-ai-func-text" });
-		textWrap.createDiv({ cls: "unreader-ai-func-label", text: tool.name });
-		textWrap.createDiv({ cls: "unreader-ai-func-desc", text: tool.description });
-		button.addEventListener("click", () => this.runTool({
-			id: tool.id,
-			name: tool.name,
-			prompt: tool.prompt,
-			scope: tool.scope,
-			enabled: tool.enabled,
-		}));
-		// 编辑入口：点开查看/修改提示词与作用域（官方工具不可删除，可重置默认）
-		const edit = button.createDiv({ cls: "unreader-ai-tool-edit", attr: { "aria-label": `编辑「${tool.name}」提示词` } });
-		setIcon(edit, "pencil");
-		edit.addEventListener("click", e => {
-			e.stopPropagation();
-			this.openEditor({ kind: "official", toolId: tool.id, scope: tool.scope, enabled: tool.enabled });
-		});
-		if (tool.overridden) {
-			button.addClass("is-overridden");
-		}
-		if (!tool.enabled) {
-			button.addClass("is-disabled");
-		}
-	}
-
 	private renderCustomList(): void {
 		this.customListEl.empty();
-		const functions = this.getSettings().customFunctions;
-		if (!functions.length) {
-			this.customListEl.createDiv({ cls: "unreader-ai-custom-empty", text: "还没有自定义工具，点右上角 + 添加" });
-			return;
-		}
-		for (const fn of functions) {
-			const enabled = fn.enabled !== false;
-			const row = this.customListEl.createDiv({ cls: "unreader-ai-custom-row" });
-			if (!enabled) row.addClass("is-disabled");
-			const runBtn = row.createDiv({ cls: "unreader-ai-custom-run", attr: { title: fn.prompt.slice(0, 120) } });
-			runBtn.setText(fn.name);
-			runBtn.createSpan({
-				cls: "unreader-ai-custom-scope",
-				text: fn.scope === "selection" ? (enabled ? "选区" : "选区 · 已停用") : (enabled ? "全文" : "全文 · 已停用"),
-			});
-			runBtn.addEventListener("click", () => this.runTool({
-				id: fn.id,
-				name: fn.name,
-				prompt: fn.prompt,
-				scope: fn.scope,
-				enabled,
-			}));
-			const edit = row.createDiv({ cls: "unreader-ai-custom-edit", attr: { "aria-label": `编辑 ${fn.name}` } });
-			setIcon(edit, "pencil");
-			edit.addEventListener("click", () => this.openEditor({
-				kind: "custom-edit",
-				fnId: fn.id,
-				scope: fn.scope,
-				enabled,
-			}));
-			const del = row.createDiv({ cls: "unreader-ai-custom-del", attr: { "aria-label": `删除 ${fn.name}` } });
-			setIcon(del, "trash-2");
-			del.addEventListener("click", () => {
-				const rest = this.getSettings().customFunctions.filter(f => f.id !== fn.id);
-				this.callbacks.onPatch({ customFunctions: rest });
-				if (this.editor?.kind === "custom-edit" && this.editor.fnId === fn.id) this.editor = null;
-				this.render();
-			});
+		for (const scope of ["full", "selection"] as const) {
+			const section = this.customListEl.createDiv({ cls: "unreader-ai-tool-section", attr: { "data-scope": scope } });
+			section.createDiv({ cls: "unreader-ai-section-title", text: scope === "full" ? "全文工具" : "选中文本工具" });
+			section.createDiv({ cls: "unreader-ai-form-hint", text: scope === "full" ? "处理当前文章或章节，结果替换正文，可切回原文。" : "选中文字后使用，结果显示在单独卡片中。" });
+			const tools = this.getSettings().customFunctions.filter(fn => fn.scope === scope);
+			if (!tools.length) section.createDiv({ cls: "unreader-ai-custom-empty", text: "暂无工具，点击上方创建。" });
+			for (const fn of tools) {
+				const enabled = fn.enabled !== false;
+				const row = section.createDiv({ cls: "unreader-ai-custom-row", attr: { "data-task": fn.id } });
+				row.toggleClass("is-disabled", !enabled);
+				const head = row.createDiv({ cls: "unreader-ai-tool-head" });
+				if (fn.scope === "full") {
+					const run = head.createEl("button", {
+						cls: "unreader-ai-custom-run",
+						text: fn.name,
+						attr: { title: fn.prompt.slice(0, 120), "aria-label": `运行 ${fn.name}` },
+					});
+					run.disabled = !enabled;
+					run.addEventListener("click", () => this.runTool(fn));
+				} else {
+					// 选区工具只在选中文字后的统一 AI 入口运行；面板里保留它作为管理项。
+					head.createDiv({
+						cls: "unreader-ai-custom-run is-contextual",
+						text: fn.name,
+						attr: { title: "选中文字后，从划词工具栏的 AI 入口运行" },
+					});
+				}
+				const actions = row.createDiv({ cls: "unreader-ai-tool-actions" });
+				const toggle = actions.createEl("button", {
+					cls: "unreader-ai-tool-toggle",
+					attr: {
+						title: enabled ? `停用 ${fn.name}` : `启用 ${fn.name}`,
+						"aria-label": `${enabled ? "停用" : "启用"} ${fn.name}`,
+					},
+				});
+				setIcon(toggle, enabled ? "pause" : "play");
+				toggle.addEventListener("click", () => { this.saveTools(this.getSettings().customFunctions.map(tool => tool.id === fn.id ? { ...tool, enabled: !enabled } : tool)); this.render(); });
+				const edit = actions.createEl("button", {
+					cls: "unreader-ai-custom-edit",
+					attr: { title: `编辑 ${fn.name}`, "aria-label": `编辑 ${fn.name}` },
+				});
+				setIcon(edit, "pencil");
+				edit.addEventListener("click", () => this.openEditor({ kind: "custom-edit", fnId: fn.id, scope: fn.scope, enabled, mode: fn.mode ?? "rewrite" }));
+				const del = actions.createEl("button", {
+					cls: "unreader-ai-custom-del",
+					attr: { title: `删除 ${fn.name}`, "aria-label": `删除 ${fn.name}` },
+				});
+				setIcon(del, "trash-2");
+				del.addEventListener("click", () => {
+					this.saveTools(this.getSettings().customFunctions.filter(tool => tool.id !== fn.id));
+					if (this.editor?.fnId === fn.id) this.editor = null;
+					this.render();
+				});
+			}
 		}
 	}
 
-	/** 统一编辑器：官方工具（名称只读 + 重置默认）与自定义工具（新增/编辑）共用。 */
 	private renderForm(parent: HTMLElement): void {
-		this.formEl = parent.createDiv({ cls: "unreader-ai-form" });
 		const editor = this.editor;
-		if (!editor) {
-			this.formEl.hide();
-			this.formScopeEl = this.formEl.createDiv();
-			this.formNameRow = this.formEl.createDiv();
-			this.formNameEl = this.formEl.createEl("input");
-			this.formPromptEl = this.formEl.createEl("textarea");
-			this.formButtonsEl = this.formEl.createDiv();
-			return;
-		}
-		this.formEl.show();
+		this.formEl = parent.createDiv({ cls: "unreader-ai-form" });
+		if (!editor) { this.formEl.hide(); return; }
 		this.formEl.addClass("is-visible");
-
-		// 功能开关（两侧都有）：关掉后不运行、划词工具栏不出现
-		const enabledRow = this.formEl.createDiv({ cls: "unreader-ai-form-switch" });
-		const enabledBox = enabledRow.createEl("input", { attr: { type: "checkbox", id: "unreader-ai-tool-enabled" } });
-		enabledBox.checked = editor.enabled;
-		const enabledLabel = enabledRow.createEl("label", { text: "启用该工具", attr: { for: "unreader-ai-tool-enabled" } });
-		enabledLabel.addEventListener("click", () => {
-			enabledBox.checked = !enabledBox.checked;
-			this.editor = { ...this.editor!, enabled: enabledBox.checked };
-		});
-		enabledBox.addEventListener("change", () => {
-			this.editor = { ...this.editor!, enabled: enabledBox.checked };
+		this.formEl.createDiv({
+			cls: "unreader-ai-editor-intro",
+			text: "工具只保存名称、使用范围和提示词。全文工具会改写正文，选中文字工具会出现在划词 AI 入口中。",
 		});
 
-		// 作用域（两选一）
-		this.formEl.createDiv({ cls: "unreader-ai-form-label", text: "作用方法" });
-		this.formScopeEl = this.formEl.createDiv({ cls: "unreader-ai-form-scope" });
+		const nameField = this.formEl.createDiv({ cls: "unreader-ai-field" });
+		nameField.createDiv({ cls: "unreader-ai-form-label", text: "工具名称" });
+		this.formNameEl = nameField.createEl("input", { cls: "unreader-ai-form-input", attr: { placeholder: "例如：总结要点", maxlength: "40", "aria-label": "工具名称" } });
+
+		const scopeField = this.formEl.createDiv({ cls: "unreader-ai-field" });
+		scopeField.createDiv({ cls: "unreader-ai-form-label", text: "使用范围" });
+		this.formScopeEl = scopeField.createDiv({ cls: "unreader-ai-form-scope" });
 		this.renderScopeButtons();
 
-		// 名称（官方工具名称固定，不开放修改）
-		this.formNameRow = this.formEl.createDiv({ cls: "unreader-ai-form-label" });
-		if (editor.kind === "official") {
-			this.formNameRow.setText(`工具：${OFFICIAL_TOOLS.find(t => t.id === editor.toolId)?.name ?? ""}`);
-		} else {
-			this.formNameRow.setText("名称");
-			this.formNameEl = this.formEl.createEl("input", {
-				cls: "unreader-ai-form-input",
-				attr: { type: "text", placeholder: "如：摘要要点", maxlength: "40" },
-			});
-		}
+		const promptField = this.formEl.createDiv({ cls: "unreader-ai-field" });
+		promptField.createDiv({ cls: "unreader-ai-form-label", text: "提示词" });
+		this.formPromptEl = promptField.createEl("textarea", { cls: "unreader-ai-form-prompt", attr: { placeholder: "告诉 AI 具体要做什么", maxlength: String(CUSTOM_PROMPT_MAX), "aria-label": "提示词" } });
 
-		// 提示词
-		this.formEl.createDiv({ cls: "unreader-ai-form-label", text: "提示词（希望 AI 帮你做什么）" });
-		this.formPromptEl = this.formEl.createEl("textarea", { cls: "unreader-ai-form-prompt", attr: { maxlength: editor.kind === "official" ? String(OFFICIAL_PROMPT_MAX) : String(CUSTOM_PROMPT_MAX) } });
-		this.formEl.createDiv({
-			cls: "unreader-ai-form-hint",
-			text: `提示词里的 ${AI_LANGUAGE_TOKEN} 会在运行时替换为下方选择的目标语言；全文作用域的结果将替换正文，选中文字作用域的结果在面板展示。两类工具都会出现在划词工具栏的统一 AI 入口里（悬浮该入口列出全部工具名）。`,
-		});
-
-		// 按钮：重置默认（官方且有改动）+ 取消 + 保存
 		this.formButtonsEl = this.formEl.createDiv({ cls: "unreader-ai-form-row" });
-		if (editor.kind === "official") {
-			const tool = this.resolveOfficial(editor.toolId);
-			if (tool.overridden) {
-				const resetBtn = this.formButtonsEl.createEl("button", { text: "重置默认" });
-				resetBtn.addEventListener("click", () => this.resetOfficialTool(editor.toolId));
-			}
-		}
-		const cancelBtn = this.formButtonsEl.createEl("button", { text: "取消" });
-		cancelBtn.addEventListener("click", () => {
-			this.editor = null;
-			this.render();
-		});
-		const saveBtn = this.formButtonsEl.createEl("button", { text: "保存", cls: "mod-cta" });
-		saveBtn.addEventListener("click", () => this.saveEditor());
-
-		// 回填现值
-		const fill = (prompt: string, name?: string): void => {
-			this.formPromptEl.value = prompt;
-			if (name != null && this.formNameEl) this.formNameEl.value = name;
-		};
-		if (editor.kind === "official") {
-			const tool = this.resolveOfficial(editor.toolId);
-			fill(tool.prompt);
-		} else if (editor.kind === "custom-edit") {
-			const fn = this.getSettings().customFunctions.find(f => f.id === editor.fnId);
-			if (fn) fill(fn.prompt, fn.name);
-		}
+		this.formButtonsEl.createEl("button", { text: "取消" }).addEventListener("click", () => { this.editor = null; this.render(); });
+		this.formButtonsEl.createEl("button", { text: "保存", cls: "mod-cta" }).addEventListener("click", () => this.saveEditor());
+		const fn = this.getSettings().customFunctions.find(tool => tool.id === editor.fnId);
+		this.formNameEl.value = fn?.name ?? "";
+		this.formPromptEl.value = fn?.prompt ?? "";
 	}
 
 	private renderScopeButtons(): void {
@@ -596,80 +484,29 @@ export class AIPanel {
 	private saveEditor(): void {
 		const editor = this.editor;
 		if (!editor) return;
+		const name = this.formNameEl.value.trim();
 		const prompt = this.formPromptEl.value.trim();
-		if (!prompt) {
-			new Notice("提示词不能为空");
-			return;
-		}
-		if (editor.kind === "official") {
-			if (prompt.length > OFFICIAL_PROMPT_MAX) {
-				new Notice(`提示词过长（上限 ${OFFICIAL_PROMPT_MAX} 字符）`);
-				return;
-			}
-			const overrides = { ...this.getSettings().toolOverrides };
-			overrides[editor.toolId] = { prompt, scope: editor.scope, enabled: editor.enabled };
-			this.callbacks.onPatch({ toolOverrides: overrides });
-		} else if (editor.kind === "custom-new") {
-			const name = this.formNameEl.value.trim();
-			if (!name) {
-				new Notice("名称不能为空");
-				return;
-			}
-			const functions = this.getSettings().customFunctions;
-			if (functions.length >= CUSTOM_LIMIT) {
-				new Notice(`自定义工具最多 ${CUSTOM_LIMIT} 个`);
-				return;
-			}
-			const fn: AiCustomFunction = {
-				id: `fn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`,
-				name,
-				prompt: prompt.slice(0, CUSTOM_PROMPT_MAX),
-				scope: editor.scope,
-				enabled: editor.enabled,
-			};
-			this.callbacks.onPatch({ customFunctions: [...functions, fn] });
-		} else {
-			const name = this.formNameEl.value.trim();
-			if (!name) {
-				new Notice("名称不能为空");
-				return;
-			}
-			const functions = this.getSettings().customFunctions.map(f => f.id === editor.fnId
-				? {
-					...f, name,
-					prompt: prompt.slice(0, CUSTOM_PROMPT_MAX),
-					scope: editor.scope,
-					enabled: editor.enabled,
-				}
-				: f);
-			this.callbacks.onPatch({ customFunctions: functions });
-		}
+		if (!name || !prompt) { new Notice("请填写工具名称和提示词"); return; }
+		if (name.length > 40 || prompt.length > CUSTOM_PROMPT_MAX) { new Notice("名称最多 40 字，提示词最多 6000 字"); return; }
+		const tools = this.getSettings().customFunctions;
+		if (editor.kind === "custom-new" && tools.length >= CUSTOM_LIMIT) { new Notice("工具数量已达上限"); return; }
+		const fn: AiCustomFunction = { id: editor.fnId ?? `fn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2,6)}`, name, prompt, scope: editor.scope, enabled: editor.enabled, mode: editor.mode ?? "rewrite" };
+		this.saveTools(editor.kind === "custom-new" ? [...tools, fn] : tools.map(tool => tool.id === fn.id ? fn : tool));
 		this.editor = null;
 		this.render();
 	}
 
-	/** 官方工具重置：删掉对应 override 即回到代码里的官方默认提示词、作用域与启用态。 */
-	private resetOfficialTool(toolId: "translate" | "typography"): void {
-		const overrides = { ...this.getSettings().toolOverrides };
-		delete overrides[toolId];
-		this.callbacks.onPatch({ toolOverrides: overrides });
-		if (this.editor?.kind === "official" && this.editor.toolId === toolId) {
-			this.editor = { ...this.editor, scope: OFFICIAL_TOOLS.find(t => t.id === toolId)!.defaultScope, enabled: true };
-		}
-		this.render();
-	}
-
-	/** 点一下即运行：官方与自定义工具共用。提示词统一过 {目标语言} 占位替换。
+	/** 点一下即运行：官方与自定义工具共用，输出语言统一跟随当前界面语言。
 	 *  `typography`：排版优化走「保结构」通道——原始空白提取 + 逐字守卫写回
 	 *  （AI 只能动空白，改一个字就整块拒绝，链接/代码/序号原样保留）。
 	 *  停用的工具不运行（来源入口已在 UI 置灰，这里兜底）。 */
-	private runTool(tool: { id?: string; name: string; prompt: string; scope: AiFunctionScope; enabled?: boolean }, selectionText?: string): void {
+	private runTool(tool: { id?: string; name: string; prompt: string; scope: AiFunctionScope; enabled?: boolean; mode?: "rewrite" | "typography" }, selectionText?: string): void {
 		if (tool.enabled === false) {
-			new Notice(`「${tool.name}」已停用：在 AI 面板里点铅笔重新启用`);
+			new Notice(`「${tool.name}」已停用：在 AI 面板里点“启用”`);
 			return;
 		}
-		const effectivePrompt = applyLanguageToken(tool.prompt, this.getSettings().targetLanguage || "简体中文");
-		const typography = tool.id === "typography";
+		const effectivePrompt = withSystemLanguage(tool.prompt);
+		const typography = tool.mode === "typography";
 		if (tool.scope === "selection") void this.startSelectionTask(tool.name, effectivePrompt, selectionText);
 		else void this.startFullTask(tool.name, effectivePrompt, typography);
 	}
@@ -680,35 +517,12 @@ export class AIPanel {
 	 *  不要展现」。官方两枚默认作用域都是 `full` → 默认不进名单；用户把某枚的作用域改成
 	 *  「选中文字触发」后它才进来（官方与自定义一视同仁）。停用的工具不列。 */
 	selectionToolEntries(): AiToolEntry[] {
-		const entries: AiToolEntry[] = [];
-		for (const official of OFFICIAL_TOOLS) {
-			const tool = this.resolveOfficial(official.id);
-			if (tool.enabled && tool.scope === "selection") entries.push({ id: tool.id, name: tool.name });
-		}
-		for (const fn of this.getSettings().customFunctions) {
-			if (fn.enabled !== false && fn.scope === "selection") entries.push({ id: fn.id, name: fn.name });
-		}
-		return entries;
+		return this.getSettings().customFunctions.filter(fn => fn.enabled !== false && fn.scope === "selection").map(({id, name}) => ({id, name}));
 	}
 
-	/** 划词工具栏入口按 id 触发：官方工具（translate / typography）与自定义工具共用一条路。
-	 *  **刻意不打开面板**（2026-09-28 用户要求「使用功能的时候，侧边栏的 ai 功能面板不要出现」）：
-	 *  选中文字的进度与结果落在**正文区的贴底结果卡片**（`callbacks.showResultCard`），
-	 *  面板不是这条路的必需品；面板由功能轨那枚 AI 按钮自己开合。
-	 *
-	 *  `selectionText`：划词工具条/高亮气泡在**点击那一刻**捕获的选中文字。iPad 触摸点按
-	 *  非输入元素会让活选区塌陷，等 startSelectionTask 再回头读 `getSelectionText()` 常拿到
-	 *  空串 → 弹「先选中文字」。有传入就以它为准；缺省（面板内运行按钮）走旧的现取路径。 */
 	runToolById(id: string, selectionText?: string): void {
-		const official = OFFICIAL_TOOLS.find(t => t.id === id);
-		if (official) {
-			const tool = this.resolveOfficial(official.id);
-			this.runTool({ id: tool.id, name: tool.name, prompt: tool.prompt, scope: tool.scope, enabled: tool.enabled }, selectionText);
-			return;
-		}
-		const fn = this.getSettings().customFunctions.find(f => f.id === id);
-		if (!fn) return;
-		this.runTool({ id: fn.id, name: fn.name, prompt: fn.prompt, scope: fn.scope, enabled: fn.enabled !== false }, selectionText);
+		const fn = this.getSettings().customFunctions.find(tool => tool.id === id);
+		if (fn) this.runTool(fn, selectionText);
 	}
 
 	/** 全文类任务：从当前渲染帧提取正文块 → 受控并发 → 逐块写回正文。 */

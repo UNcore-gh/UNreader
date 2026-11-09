@@ -1,4 +1,6 @@
-import { Plugin, TFile, Notice, FuzzySuggestModal, MarkdownView, WorkspaceLeaf, Platform, normalizePath, MarkdownRenderer, Component, View } from "obsidian";
+import { migrateAiTools } from "./core/aiTools";
+import { AI_ICON_NAME, AI_ICON_SVG } from "./ui/aiIcon";
+import { addIcon, Plugin, TFile, Notice, FuzzySuggestModal, MarkdownView, WorkspaceLeaf, Platform, normalizePath, MarkdownRenderer, Component, View } from "obsidian";
 import { DEFAULT_SETTINGS, DEFAULT_APPEARANCE, UNreaderSettings, AppearanceSettings, BookPosition, CustomFont, activeTheme, adoptLegacyAppearance, platformAppearanceDefaults, HIGHLIGHT_COLORS } from "./types";
 import type { AiToolOverride, FeedEntryKind, MarkdownNoteListItem, NoteMetaSummary } from "./types";
 import { UNreaderSettingTab } from "./settings";
@@ -237,6 +239,7 @@ export default class UNreaderPlugin extends Plugin {
 	private dataReady: Promise<void> = Promise.resolve();
 
 	async onload(): Promise<void> {
+		addIcon(AI_ICON_NAME, AI_ICON_SVG);
 		// 过滤 foliate 预期警告：sandbox 与 blob: CSP 拦截不影响阅读，仅刷屏
 		//
 		// ⚠️ **代理 console 绝不能抛异常**（2026-09-13 加固）：下面这些过滤器要先把
@@ -3481,20 +3484,20 @@ this.registerCommands();
 		// translateSelection 读法统一 `!== false`，这里只收口布尔形态。
 		this.settings.ai = Object.assign({}, DEFAULT_SETTINGS.ai, this.settings.ai ?? {});
 		this.settings.ai.translateSelection = this.settings.ai.translateSelection !== false;
-		this.settings.ai.targetLanguage = typeof this.settings.ai.targetLanguage === "string" && this.settings.ai.targetLanguage.trim()
-			? this.settings.ai.targetLanguage.trim()
-			: DEFAULT_SETTINGS.ai.targetLanguage;
+		// 目标语言改为跟随当前界面语言；清掉旧版遗留字段，避免继续落入设置快照。
+		delete (this.settings.ai as unknown as Record<string, unknown>).targetLanguage;
 		// 自定义工具：只留字段完整的条目，名字/提示词截断，作用域收口两种合法值，数量封顶；
 		// enabled 是功能开关（缺省 = 开）。v0.3.12 之前的 buttonStyle/icon（划词工具栏按钮
 		// 形态与图标）已随「统一 AI 入口」移除 —— 这里不再收口，老 data.json 里残留的同名键
 		// 会在下一次 saveSettings 时被这份对象覆盖掉（惰性清理，无读取点）。
 		this.settings.ai.customFunctions = (Array.isArray(this.settings.ai.customFunctions) ? this.settings.ai.customFunctions : [])
 			.filter(f => !!f && typeof f.name === "string" && typeof f.prompt === "string" && f.name.trim() && f.prompt.trim())
-			.slice(0, 20)
+			.slice(0, 100)
 			.map((f, index) => ({
 				id: typeof f.id === "string" && f.id.trim() ? f.id : `fn-${Date.now().toString(36)}-${index}`,
 				name: f.name.trim().slice(0, 40),
-				prompt: f.prompt.trim().slice(0, 4000),
+				prompt: f.prompt.trim().slice(0, 6000),
+				mode: f.mode === "typography" ? "typography" as const : "rewrite" as const,
 				scope: f.scope === "selection" ? "selection" as const : "full" as const,
 				enabled: f.enabled !== false,
 			}));
@@ -3534,6 +3537,7 @@ this.registerCommands();
 				showInSelbar: b.showInSelbar !== false,
 			}));
 		this.settings.ai.toolOverrides = cleanOverrides;
+		this.settings.ai = migrateAiTools(this.settings.ai);
 		// 界面语言（2026-10-11）：老 data.json 没有这个键，`Object.assign` 会补上
 		// 默认值；手改过 / 跨版本写坏的值由 `normalizeLangPref` 收口回 `'auto'`
 		// （= 跟随 Obsidian 软件语言，行为与本功能上线前一致）。
