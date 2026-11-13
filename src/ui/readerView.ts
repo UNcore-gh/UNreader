@@ -1,3 +1,4 @@
+import { withSystemLanguage } from "../core/aiTasks";
 import { openFloatingPanel, closeFloatingPanel, dismissFloatingPanel } from "./floatingPanel";
 import { setSelectionChromeHidden } from "./selectionChrome";
 import { MobileSelectionInteractionController, domSelectionSnapshot } from "./mobileSelectionInteraction";
@@ -104,7 +105,7 @@ import { PresetNameModal } from "./presetModal";
 import { SelectionToolbar } from "./selectionToolbar";
 import { TranslationCard } from "./translationCard";
 import { AIPanel, type AiResultCard } from "./aiPanel";
-import { detectUnagent, translateViaUnagent, unagentGuidance } from "../core/unagentBridge";
+import { detectUnagent, translateViaUnagent, unagentGuidance, openUnagentSelectionChat } from "../core/unagentBridge";
 import { HighlightPopover } from "./highlightPopover";
 import { AnnotationsPanel } from "./annotationsPanel";
 import { BookmarkModal } from "./bookmarkModal";
@@ -191,6 +192,7 @@ export class UNreaderView extends ItemView {
 	private railAIBtn: HTMLElement | null = null;
 	/** 在飞翻译的取消句柄：单飞保证（新请求 abort 旧请求），卡片关闭必取消。 */
 	private translationAbort: AbortController | null = null;
+	private readerSelectionHandoffAbort: AbortController | null = null;
 	private translationSource: string | null = null;
 	private highlightPopover!: HighlightPopover;
 	private annotationsPanel!: AnnotationsPanel;
@@ -1053,6 +1055,7 @@ export class UNreaderView extends ItemView {
 		this.hideTranslation();
 		this.aiPanel?.cancelTask();
 		this.aiPanel?.close();
+		this.cancelReaderSelectionHandoff();
 		this.appearancePanel?.close();
 		if (this.searchOpen) this.toggleSearch(false);
 		// 启动恢复的有限重试：视图已关，定时器必须摘掉（否则 2.5s 后对着已 detach
@@ -2641,6 +2644,7 @@ export class UNreaderView extends ItemView {
 		this.hideTranslation();
 		this.aiPanel?.cancelTask();
 		this.aiPanel?.close();
+		this.cancelReaderSelectionHandoff();
 		this.showLoading();
 		// 恢复定位期间容器**有布局但不绘制**：恢复落点全靠 offsetTop /
 		// getBoundingClientRect 计算，而 `.unreader-root:not(.has-book) .unreader-stage`
@@ -2914,8 +2918,24 @@ export class UNreaderView extends ItemView {
 			new Notice("没有可翻译的选中文本");
 			return;
 		}
-		this.translationSource = trimmed;
-		void this.runTranslation(trimmed);
+		this.cancelReaderSelectionHandoff();
+		const controller = new AbortController();
+		this.readerSelectionHandoffAbort = controller;
+		void openUnagentSelectionChat(this.app, withSystemLanguage("请翻译以下选中的原文，只输出译文。"), trimmed, {
+			...this.plugin.settings.ai,
+			signal: controller.signal,
+		})
+			.catch(error => {
+				if (!controller.signal.aborted) new Notice(error instanceof Error ? error.message : String(error));
+			})
+			.finally(() => {
+				if (this.readerSelectionHandoffAbort === controller) this.readerSelectionHandoffAbort = null;
+			});
+	}
+
+	private cancelReaderSelectionHandoff(): void {
+		this.readerSelectionHandoffAbort?.abort();
+		this.readerSelectionHandoffAbort = null;
 	}
 
 	private async runTranslation(text: string): Promise<void> {

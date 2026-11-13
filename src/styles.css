@@ -9769,3 +9769,21 @@ body .unreader-floating-panel :is(.unreader-nav-row, .unreader-selbar-ai-item):h
 
 /* 用于解析浮动面板高度表达式的不可见测量节点。 */
 .unreader-popover-measure { position: absolute; visibility: hidden; pointer-events: none; width: 0; padding: 0; border: 0; }
+
+/* AI 回答设置：两行统一对齐，说明保持次要层级。 */
+.unreader-ai-routing { display:flex; flex-direction:column; margin:10px 0 14px; padding:2px 0; border-block:1px solid var(--background-modifier-border); }
+.unreader-ai-routing-row { display:flex; align-items:center; justify-content:space-between; gap:16px; box-sizing:border-box; min-height:64px; padding:10px 0; cursor:pointer; }
+.unreader-ai-routing-copy { display:flex; flex-direction:column; gap:4px; min-width:0; }
+.unreader-ai-routing-title { color:var(--text-normal); font-size:var(--font-ui-small); font-weight:500; line-height:1.4; }
+.unreader-ai-routing-hint { color:var(--text-muted); font-size:var(--font-ui-smaller); line-height:1.5; }
+.unreader-ai-panel input.unreader-ai-routing-switch { appearance:none; -webkit-appearance:none; position:relative; flex:0 0 32px; width:32px; height:20px; margin:0; padding:0; border:0; border-radius:12px; background:var(--background-modifier-border-hover,var(--background-modifier-border)); box-shadow:none; cursor:pointer; transition:background-color .15s; }
+.unreader-ai-panel input.unreader-ai-routing-switch::before { content:""; position:absolute; top:3px; left:3px; width:14px; height:14px; border-radius:50%; background:var(--text-on-accent,#fff); box-shadow:0 1px 3px rgb(0 0 0 / .15); transition:transform .15s; }
+.unreader-ai-panel input.unreader-ai-routing-switch:checked { background:var(--interactive-accent,#7c6ee6); }
+.unreader-ai-panel input.unreader-ai-routing-switch:checked::before { transform:translateX(12px); }
+/* Obsidian 的复选框皮肤会用 ::after 画对号；此处只保留 ::before 的滑块。 */
+.unreader-ai-panel input.unreader-ai-routing-switch::after,
+.unreader-ai-panel input.unreader-ai-routing-switch:checked::after { content:none; display:none; mask:none; -webkit-mask:none; background:none; }
+.unreader-ai-panel select.unreader-ai-routing-session { flex:0 0 auto; width:auto; min-width:100px; max-width:45%; height:32px; margin:0; padding:0 26px 0 10px; border:1px solid var(--background-modifier-border); border-radius:8px; background-color:transparent; color:var(--text-normal); font-size:var(--font-ui-small); box-shadow:none; cursor:pointer; }
+.unreader-ai-panel select.unreader-ai-routing-session:hover { background-color:var(--background-modifier-hover); }
+.unreader-ai-panel :is(.unreader-ai-routing-switch,.unreader-ai-routing-session):focus-visible { outline:2px solid var(--interactive-accent); outline-offset:3px; }
+@media (prefers-reduced-motion:reduce) { .unreader-ai-panel input.unreader-ai-routing-switch, .unreader-ai-panel input.unreader-ai-routing-switch::before { transition:none; } }

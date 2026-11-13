@@ -512,6 +512,10 @@ export interface CustomButton {
 }
 
 export interface AiSettings {
+	/** 默认使用 UNagent 正文快速输入框显示回答。 */
+	quickComposer?: boolean
+	/** 默认沿用当前会话；可选择每次新建。 */
+	newConversation?: boolean
 	/** 工具已完成一次性模板迁移；删除后不自动补回。 */
 	toolsInitialized?: boolean
 	/** 选区工具条上的「翻译」按钮。**默认开**；读法写 `!== false` 兼容老数据。 */
@@ -532,7 +536,7 @@ export interface AiCustomFunction {
 	name: string
 	/** 发给模型的 system 指令（≤6000 字符） */
 	prompt: string
-	/** 作用域：full = 对整篇/当前章生效（结果**替换正文**）；selection = 对选中文字触发（结果显示在正文结果卡片）。
+	/** 作用域：full = 对整篇/当前章生效（结果**替换正文**）；selection = 对选中文字触发（结果显示在 UNagent）。
 	 *  只有选中文字作用域进入划词工具栏的统一 AI 入口名单（见 AIPanel.selectionToolEntries）。 */
 	scope: AiFunctionScope
 	/** 功能开关（默认开，缺省读法 `!== false`）。停用后：面板里置灰不可运行、入口名单里不出现。 */

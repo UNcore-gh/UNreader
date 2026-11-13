@@ -16,7 +16,7 @@ import {
 	withSystemLanguage,
 	type AiBlock,
 } from "../core/aiTasks";
-import { detectUnagent, unagentGuidance } from "../core/unagentBridge";
+import { detectUnagent, unagentGuidance, hasUnagentSelectionHandoff, unagentSelectionHandoffGuidance, openUnagentSelectionChat } from "../core/unagentBridge";
 import { VersionBar, type AiVersion } from "./versionBar";
 import type { Bounds } from "./floatingPlacement";
 import type { AiCustomFunction, AiFunctionScope, AiSettings, AiToolEntry, UnagentAIApi } from "../types";
@@ -140,7 +140,9 @@ export class AIPanel {
 	private versions: AiBodyVersions | null = null;
 	private readonly versionBar: VersionBar;
 	private abort: AbortController | null = null;
+	private selectionHandoffAbort: AbortController | null = null;
 	private ignoreOutsideUntil = 0;
+	private selectionAtOpen: string | null = null;
 	/** 阴性对照（`?legacy-no-original=1`）：关掉逐块原文快照 = 本特性之前的形态（跑完只有
 	 *  正文里那一版，没有版本条也就切不回去）。G7 的断言在阴性档必须变红、其余组仍绿。
 	 *  接缝先例 = translationCard 的 `?legacy-no-stream=1`（组件内读 URL 参数）。 */
@@ -190,6 +192,7 @@ export class AIPanel {
 	}
 
 	open(): void {
+		this.selectionAtOpen = this.callbacks.getSelectionText()?.trim() || null;
 		this.ignoreOutsideUntil = performance.now() + 300;
 		this.render();
 		this.containerEl.addClass("is-open");
@@ -200,10 +203,12 @@ export class AIPanel {
 	}
 
 	close(): void {
+		this.cancelSelectionHandoff();
 		closeFloatingPanel(this.containerEl);
 		stopContentPopover(this.containerEl);
 		if (!this.containerEl.hasClass("is-open")) return;
 		this.editor = null;
+		this.selectionAtOpen = null;
 		this.containerEl.removeClass("is-open");
 		document.removeEventListener("pointerdown", this.onDocPointerDown, true);
 		this.callbacks.onOpenChange?.(false);
@@ -258,6 +263,12 @@ export class AIPanel {
 		this.updateRunArea();
 	}
 
+	/** 选区交给 UNagent 的等待窗也是面板生命周期的一部分。 */
+	cancelSelectionHandoff(): void {
+		this.selectionHandoffAbort?.abort();
+		this.selectionHandoffAbort = null;
+	}
+
 	private detection(): ReturnType<typeof detectUnagent> {
 		return detectUnagent(this.callbacks.app);
 	}
@@ -301,6 +312,24 @@ export class AIPanel {
 		this.statusTextEl = status.createDiv({ cls: "unreader-ai-status-text" });
 		this.statusActionBtn = status.createDiv({ cls: "unreader-ai-status-action", attr: { "aria-label": "下一步" } });
 		this.renderStatus(detection);
+
+		const routing = body.createDiv({ cls: "unreader-ai-routing" });
+		const quickLabel = routing.createEl("label", { cls: "unreader-ai-routing-row" });
+		const quickCopy = quickLabel.createDiv({ cls: "unreader-ai-routing-copy" });
+		quickCopy.createSpan({ cls: "unreader-ai-routing-title", text: "正文快速输入框" });
+		quickCopy.createSpan({ cls: "unreader-ai-routing-hint", text: "关闭后在 UNagent 聊天面板回答" });
+		const quick = quickLabel.createEl("input", { cls: "unreader-ai-routing-switch", type: "checkbox", attr: { "aria-label": "正文快速输入框" } });
+		quick.checked = this.getSettings().quickComposer !== false;
+		quick.addEventListener("change", () => this.callbacks.onPatch({ quickComposer: quick.checked }));
+		const sessionLabel = routing.createEl("label", { cls: "unreader-ai-routing-row" });
+		const sessionCopy = sessionLabel.createDiv({ cls: "unreader-ai-routing-copy" });
+		sessionCopy.createSpan({ cls: "unreader-ai-routing-title", text: "打开会话" });
+		sessionCopy.createSpan({ cls: "unreader-ai-routing-hint", text: "选择接着聊，或开始新对话" });
+		const session = sessionLabel.createEl("select", { cls: "unreader-ai-routing-session", attr: { "aria-label": "AI 打开会话" } });
+		session.createEl("option", { value: "current", text: "当前会话" });
+		session.createEl("option", { value: "new", text: "新建会话" });
+		session.value = this.getSettings().newConversation === true ? "new" : "current";
+		session.addEventListener("change", () => this.callbacks.onPatch({ newConversation: session.value === "new" }));
 
 		this.addBtn = body.createDiv({ cls: "unreader-ai-add", text: "＋ 创建新工具", attr: { role: "button", tabindex: "0", "aria-label": "创建新工具" } });
 		this.addBtn.addEventListener("click", () => this.openEditor({ kind: "custom-new", scope: "full", enabled: true, mode: "rewrite" }));
@@ -371,7 +400,13 @@ export class AIPanel {
 		for (const scope of ["full", "selection"] as const) {
 			const section = this.customListEl.createDiv({ cls: "unreader-ai-tool-section", attr: { "data-scope": scope } });
 			section.createDiv({ cls: "unreader-ai-section-title", text: scope === "full" ? "全文工具" : "选中文本工具" });
-			section.createDiv({ cls: "unreader-ai-form-hint", text: scope === "full" ? "处理当前文章或章节，结果替换正文，可切回原文。" : "选中文字后使用，结果显示在单独卡片中。" });
+			section.createDiv({ cls: "unreader-ai-form-hint", text: scope === "full" ? "处理当前文章或章节，结果替换正文，可切回原文。" : "选中文字后使用，回答显示在 UNagent 中。" });
+			if (scope === "selection" && !hasUnagentSelectionHandoff(this.callbacks.app)) {
+				section.createDiv({
+					cls: "unreader-ai-form-hint unreader-ai-selection-handoff-warning",
+					text: unagentSelectionHandoffGuidance(this.callbacks.app),
+				});
+			}
 			const tools = this.getSettings().customFunctions.filter(fn => fn.scope === scope);
 			if (!tools.length) section.createDiv({ cls: "unreader-ai-custom-empty", text: "暂无工具，点击上方创建。" });
 			for (const fn of tools) {
@@ -621,57 +656,31 @@ export class AIPanel {
 		}
 	}
 
-	/** 「选中文字」作用域：取当前选区单次调用，结果只在面板展示（不动正文）。
-	 *  `injectedText` 来自划词工具条/高亮气泡点击瞬间捕获的文字（iPad 触摸点按后活选区
-	 *  会塌陷，不能再靠 getSelectionText 现取）；非空时以它为准，空则回退现取活选区。 */
+	/** 点击前锁定原文，随后打开 UNagent；不再在正文下方创建结果卡片。 */
 	private async startSelectionTask(title: string, system: string, injectedText?: string): Promise<void> {
-		const api = this.requireApi();
-		if (!api) return;
-		const injected = injectedText?.trim();
-		const live = this.callbacks.getSelectionText()?.trim();
-		const selection = injected && injected.length ? injected : (live ?? "");
+		const selection = injectedText?.trim() || this.callbacks.getSelectionText()?.trim() || this.selectionAtOpen;
 		if (!selection) {
-			new Notice("先在书内选中文字，再运行该工具");
+			new Notice("请先在正文中选中文字，再运行该工具");
 			return;
 		}
-		this.abort?.abort();
+		this.cancelSelectionHandoff();
 		const controller = new AbortController();
-		this.abort = controller;
-		// 结果落**正文区的贴底卡片**（宿主提供，与划词翻译同一张）：面板不再展示 AI 输出内容。
-		// 卡片里的「重试」= 重跑这一次工具（重跑要再花一次 token，所以默认不给，见 showResultCard）。
-		const card = this.callbacks.showResultCard?.({
-			title,
-			sourceText: selection,
-			modelLabel: api.describeModel(),
-			// 重试沿用本次已锁定的文本（活选区此刻早已塌陷），不能再走现取
-			onRetry: () => void this.startSelectionTask(title, system, selection),
-		}) ?? null;
-		// 选区任务不动正文：版本状态（上一轮全文任务的）原样留着
-		this.run = { title: `${title} · 选中文字`, state: "running", done: 0, total: 1, wroteBody: false };
-		this.containerEl.addClass("is-running");
-		this.updateRunArea();
+		this.selectionHandoffAbort = controller;
 		try {
-			const result = await api.complete({
-				system,
-				user: selection,
+			const handedOff = await openUnagentSelectionChat(this.callbacks.app, system, selection, {
+				...this.getSettings(),
 				signal: controller.signal,
-				onChunk: delta => {
-					if (!controller.signal.aborted) card?.chunk(delta);
-				},
 			});
-			if (controller.signal.aborted || !this.run) return;
-			this.run.state = "done";
-			this.updateRunArea();
-			card?.finish(result.text);
+			if (handedOff) {
+				if (this.selectionHandoffAbort === controller) this.selectionHandoffAbort = null;
+				this.close();
+			}
 		} catch (error) {
-			if (controller.signal.aborted || !this.run) return;
-			this.run.state = "error";
-			this.run.error = error instanceof Error ? error.message : String(error);
-			this.updateRunArea();
-			card?.fail(this.run.error);
+			if (!controller.signal.aborted) {
+				new Notice(error instanceof Error ? error.message : String(error));
+			}
 		} finally {
-			if (this.abort === controller) this.abort = null;
-			if (this.run?.state !== "running") this.containerEl.removeClass("is-running");
+			if (this.selectionHandoffAbort === controller) this.selectionHandoffAbort = null;
 		}
 	}
 

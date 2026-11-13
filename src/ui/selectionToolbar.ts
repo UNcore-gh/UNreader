@@ -727,10 +727,14 @@ export class SelectionToolbar {
 		// 名单为空时整个容器收起，不占位、不动原有布局。
 		// 与高亮气泡共用同一份实现（SelbarAiMenu，2026-09-29 用户「共用一套代码」）。
 		// 点击瞬间把当前快照文本一并递出（不能等面板回头读活选区 —— iPad 触摸点按后选区已塌）
+		let aiSelectionText = "";
 		this.aiMenu = new SelbarAiMenu(
 			this.containerEl,
-			id => this.actions.onRunAiTool?.(id, this.snapshot?.text ?? ""),
-			() => this.restoreSnapshotSelection(),
+			id => this.actions.onRunAiTool?.(id, aiSelectionText),
+			() => {
+				aiSelectionText = this.snapshot?.text ?? "";
+				this.restoreSnapshotSelection();
+			},
 		);
 		pinned.appendChild(this.aiMenu.el);
 

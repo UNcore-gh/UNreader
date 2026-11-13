@@ -61,6 +61,31 @@ export interface MdSelectionDeps {
 /** 选区事件合并后的去抖（与 readerView 的选区采集同量级）。 */
 const CAPTURE_DEBOUNCE_MS = 120;
 
+/**
+ * 「这段选区明确不属于本视图」的 UI 根（只用于早退，不参与正文容器挑选）。
+ *
+ * `attach()` 把 `selectionchange` / `pointerup` 挂在**整个宿主 document** 上，
+ * 于是别的视图里选字也会进 `capture()`。绝大多数别处视图都能由
+ * `.workspace-leaf-content` 归属判据认出来，但有几类浮层压根不在 leaf 里：
+ *   · `.UNagent-quick-root` —— UNagent 的「正文快速输入框」，挂在
+ *     `.workspace-split.mod-root` 上（见 UNagent/QuickComposer.tsx）；
+ *   · `.UNagent-root` / `[data-ai-conv-id]` —— UNagent 聊天视图根，兜住它
+ *     把面板挪出 leaf 或改挂法的情况（见 UNagent/ChatView.tsx、Chat.tsx）；
+ *   · `.modal-container` —— 官方模态框（设置、命令面板、插件弹窗）；
+ *   · `.unreader-clip-mirror` —— 阅读器把 iframe 选区镜像到宿主用的离屏 span，
+ *     它属于**书**，不属于笔记；`notifyExternalSelection()` 补发的那记宿主
+ *     `selectionchange` 不该让 md 工具条跟着弹。
+ *
+ * 这里只列「能明确指认成别人」的根，不去收紧 `resolveScope` 那两条真机保底。
+ */
+const FOREIGN_SELECTION_ROOT_SELECTOR = [
+	".UNagent-root",
+	".UNagent-quick-root",
+	"[data-ai-conv-id]",
+	".modal-container",
+	".unreader-clip-mirror",
+].join(",");
+
 /** 工具条刚出现时，忽略紧接着的一记 scroll。
  *
  *  source / 实时预览里，“选中文字”本身会让编辑器聚焦并弹起键盘；官方随后插入
@@ -218,6 +243,8 @@ interface Pending {
 }
 
 export class MdSelectionController {
+	/** 使用与划词工具条同源的快照，兼容编辑器选区。 */
+	getSelectionText(): string | null { return this.pending?.text?.trim() || null; }
 	private readonly toolbar: SelectionToolbar;
 	/** 最近一次有效选区（点色点那一刻 DOM 选区往往已被系统清掉，必须提前缓存）。 */
 	private pending: Pending | null = null;
@@ -627,10 +654,9 @@ export class MdSelectionController {
 		try {
 			if (!this.attached) return;
 			if (this.toolbar.visible) return;
-			// 「用户只是点了一下、压根没选字」是正常路径，不是故障 —— 不豁免它的话，
-			// 每次点屏都会写一份盘。**只有 `no-text` 享受这个豁免**：其余每一条早退
-			// 都意味着「有字可选却没抓到」，都是要修的东西。
-			if (this.lastCaptureNote === "no-text") return;
+		// 「用户只是点了一下、压根没选字」与「选区在别的视图里」都是正常路径，
+		// 不是故障 —— 不豁免的话，后者每次在 UNagent 里划词都会写一份诊断。
+		if (this.lastCaptureNote === "no-text" || this.lastCaptureNote === "foreign-view") return;
 			const view = this.deps.view();
 			const facts = this.lastCaptureFacts;
 			recordCaptureDiag({
@@ -908,6 +934,25 @@ export class MdSelectionController {
 			return;
 		}
 
+		// 选区落在**别人的视图**里 ⇒ 一律不接管（2026-11-10 用户报障「在 UNagent
+		// 正文区域选中文字，主窗口的 unreader 选中文字工具栏出现了」）。
+		//
+		// 根因：监听挂在宿主 document 上，不分视图；而 `resolveScope` 的 ②「有几何的
+		// 同名正文容器」/ ③「锚点最近的同名祖先」两条保底**只挑容器、不校验归属**。
+		// 分屏里只要还开着一份可见的 markdown 笔记，UNagent 聊天正文里的一段选区
+		// 就会命中那份笔记的 `.markdown-reading-view`，`showFor()` 照样被调到 ——
+		// 工具条弹在别人的视图上，后续高亮甚至会写进那篇不相干的笔记。
+		//
+		// 这里只挡「能明确指认成别的 leaf / 别的插件浮层」的选区；不在任何 leaf 内、
+		// 也不在已知外部根里的（夹具、真机视图归属偏差那几档）一律照旧放行，
+		// 不收紧 `resolveScope` 的既有保底。
+		// 阴性对照 `__UR_BREAK_FOREIGN_VIEW` 注回旧行为 ⇒ `test:md-selection` 的 P30
+		// 三条「UNagent 里划词不弹工具条」必须变红。
+		if (!breakFlag("__UR_BREAK_FOREIGN_VIEW") && this.isForeignViewSelection(anchorEl, view)) {
+			this.narrate("foreign-view", { ...baseFacts, foreignView: true });
+			return;
+		}
+
 		// 选区必须落在本视图的正文里（阅读区 / 编辑器，按形态各认各的容器）。
 		//
 		// ⚠️ 这里**不能**用裸 `querySelector`（2026-10-13 真机取证后改；这是「夹具全绿而
@@ -969,6 +1014,35 @@ export class MdSelectionController {
 		// 采集成功：自述清空。（若裁决时工具条仍不可见 ⇒ 记成 `shown-then-hidden`）
 		this.narrateShown(baseFacts);
 
+	}
+
+	/**
+	 * 选区是否**明确**落在别的视图 / 别的插件 UI 里。
+	 *
+	 * 两级判据，都是「只读、只排除」：
+	 *  ① 命中 `FOREIGN_SELECTION_ROOT_SELECTOR` —— 挂在 leaf 之外的浮层
+	 *     （UNagent 快速输入框、官方模态框、书页选区镜像…）；
+	 *  ② 锚点落在某个 `.workspace-leaf-content` 里，但这个 leaf **装不下本会话的
+	 *     view 根**。真机上 `view.contentEl`（`.view-content`）正是该 leaf 的子节点，
+	 *     所以自己在笔记里划词恒为 false；UNagent 的
+	 *     `.workspace-leaf-content[data-type='UNagent-chat']` 则是另一个 leaf ⇒ true。
+	 *     分屏两份笔记时也由这一条各归各的 session，不再互相串台。
+	 *
+	 * `leaf === null`（不在任何 leaf 内）或取不到 view 根时**一律返回 false**：
+	 * 这两档属于「无法明确指认」，交回 `resolveScope` 的原有保底，不把真机上
+	 * 「视图归属与选区所在有偏差」的那几档一并误杀。
+	 */
+	private isForeignViewSelection(anchorEl: Element | null, view: MarkdownView): boolean {
+		if (!anchorEl) return false;
+		try {
+			if (anchorEl.closest(FOREIGN_SELECTION_ROOT_SELECTOR)) return true;
+		} catch { /* 选择器异常 / 跨 realm：只当没命中，交给下面的 leaf 判据 */ }
+		let leaf: Element | null = null;
+		try { leaf = anchorEl.closest(".workspace-leaf-content"); } catch { return false; }
+		if (!leaf) return false;
+		const root = view.contentEl ?? view.containerEl;
+		if (!root) return false;
+		try { return !leaf.contains(root); } catch { return false; }
 	}
 
 	/**

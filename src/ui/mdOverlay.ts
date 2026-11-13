@@ -998,7 +998,9 @@ export class MdOverlaySession {
 	private getSelectionText(): string | null {
 		try {
 			const doc = this.view?.containerEl?.ownerDocument ?? document;
-			const text = doc.getSelection()?.toString() ?? "";
+			// 阅读模式下 editor 仍可能保留旧选区，只在编辑模式读取它。
+			const editorText = this.view?.getMode() === "source" ? this.view.editor?.getSelection() : "";
+			const text = editorText || doc.getSelection()?.toString() || this.selection?.getSelectionText() || "";
 			return text.trim() ? text : null;
 		} catch {
 			return null;

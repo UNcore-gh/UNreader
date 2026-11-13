@@ -1,14 +1,9 @@
-/** UNagent 桥：检测与选区翻译（M2）。
+/** UNagent 桥：检测旧版 AI 能力，并将选区交给新版 UNagent 聊天。
  *
- * 依赖方向单向（UNreader → UNagent）：这里只经 `app.plugins.plugins.unagent?.getAI?.()`
- * 这一个口子说话，契约见《UNreader接入UNagent-AI设计任务书》§1 —— 三重可选链
- * （插件未安装/已禁用、旧版本无方法、未配置模型）全部落入「不可用」分支，绝不抛
- * 未捕获错误；**绝不读取 UNagent 的设置或 data.json**（安全边界，test:aitrans 有
- * 源码不变量盯着）。检测必须实时做、不得缓存：`getAI()` 在 UNagent 设置未载完时
- * 返回 null（契约 §1.4），UI 每次点击现查，`describeModel()` 也在开卡时现取。
- *
- * 方法最终命名由 UNagent 侧 M1 定稿；定稿后只需改本文件的调用点一处，
- * 并同步双方 AGENTS.md（契约冻结）。 */
+ * 依赖方向单向（UNreader → UNagent）：全文工具沿用 `getAI()`，选区交接使用
+ * `runReaderAiTask()`。两者能力分开检测，避免旧接口可用时误报全文工具不可用。
+ * 检测实时进行、不缓存；**绝不读取 UNagent 的设置或 data.json**（安全边界，
+ * `test:aitrans` 有源码不变量盯着）。 */
 import type {
 	UnagentAIApi,
 	UnagentCompleteRequest,
@@ -30,6 +25,31 @@ export function unagentGuidance(reason: UnagentUnavailableReason): string {
 
 interface UnagentPluginShape {
 	getAI?: (...args: unknown[]) => unknown
+	runReaderAiTask?: (request: { text: string; quickComposer: boolean; newConversation: boolean; signal?: AbortSignal }) => Promise<void>
+}
+
+let selectionHandoffInFlight = false;
+
+function getUnagentPlugin(host: unknown): UnagentPluginShape | undefined {
+	const plugin = (host as { plugins?: { plugins?: { unagent?: unknown } } | null } | null | undefined)?.plugins?.plugins?.unagent;
+	return plugin && typeof plugin === "object" ? plugin as UnagentPluginShape : undefined;
+}
+
+/** 只检查「选区交给聊天」所需的新接口；不影响全文工具使用的 getAI()。 */
+export function hasUnagentSelectionHandoff(host: unknown): boolean {
+	return typeof getUnagentPlugin(host)?.runReaderAiTask === "function";
+}
+
+/** 选区入口和面板共用的说明，明确区分旧 getAI 与新交接接口。 */
+export function unagentSelectionHandoffGuidance(host: unknown): string {
+	const plugin = getUnagentPlugin(host);
+	if (!plugin) return unagentGuidance("not-installed");
+	if (typeof plugin.runReaderAiTask === "function") return "";
+	if (typeof plugin.getAI !== "function") return unagentGuidance("no-method");
+	if (detectUnagent(host).available) {
+		return "当前 UNagent 的旧版 AI 接口可用于全文工具，但选区交接接口不可用。请更新 UNagent 后重试选区功能。";
+	}
+	return "当前 UNagent 缺少选区交接接口。请更新 UNagent；全文工具还需要在 UNagent 中配置可用模型。";
 }
 
 /** 检测 UNagent 与可用模型。host 必传（生产调用方传 `this.app`，探针喂 fake）——
@@ -76,4 +96,33 @@ export function translateViaUnagent(
 		signal: options?.signal,
 	};
 	return api.complete(request);
+}
+
+/** 将冻结原文交给 UNagent；输出位置和会话由用户选择。 */
+export async function openUnagentSelectionChat(host: unknown, instruction: string, text: string, options?: { quickComposer?: boolean; newConversation?: boolean; signal?: AbortSignal }): Promise<boolean> {
+	const plugin = getUnagentPlugin(host);
+	if (!plugin) throw new Error(unagentGuidance("not-installed"));
+	if (typeof plugin.runReaderAiTask !== "function") throw new Error(unagentSelectionHandoffGuidance(host));
+	if (options?.signal?.aborted) throw selectionHandoffAbortError();
+	// 所有选区入口共用此锁：工具条连点、或多个入口同时触发，都只提交一次。
+	// API 完成、失败或取消后释放，用户仍可再次运行。
+	if (selectionHandoffInFlight) return false;
+	selectionHandoffInFlight = true;
+	try {
+		await plugin.runReaderAiTask({
+			text: `${instruction}\n\n以下是我在 UNreader 中选中的原文，请将其作为待处理材料：\n\n${text}`,
+			quickComposer: options?.quickComposer !== false,
+			newConversation: options?.newConversation === true,
+			signal: options?.signal,
+		});
+		return true;
+	} finally {
+		selectionHandoffInFlight = false;
+	}
+}
+
+function selectionHandoffAbortError(): Error {
+	const error = new Error("选区交接已取消。");
+	error.name = "AbortError";
+	return error;
 }

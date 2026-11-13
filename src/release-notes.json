@@ -135,6 +135,26 @@
 			]
 		}
 	},
+	"1.0.10": {
+		"title": {"zh": "选区 AI 工具与交接稳定性", "en": "Selection AI tools and reliable handoffs"},
+		"summary": {"zh": "选中文字后可以直接调用 UNagent，并选择正文快速输入框、当前会话或新会话；关闭阅读器或取消等待时不会再迟到提交。", "en": "Run AI tools on selected text through UNagent, choosing the quick composer, current chat, or a new chat. Closing the reader or cancelling no longer submits stale selections later."},
+		"items": {
+			"zh": [
+				"划词工具和自定义选中文字工具统一交给 UNagent 处理，结果继续使用 UNagent 的聊天记录、模型和权限流程。",
+				"可选择在正文快速输入框中打开，或进入 UNagent 聊天面板；会按设置接着当前会话或新建会话。",
+				"交接只有在一问一答的消息确认进入会话后才算成功，不再等待整段回答结束，也不会让快速连点重复提交。",
+				"关闭阅读器、换书、关闭 AI 面板或取消等待时，会停止尚未提交的选区；发送失败时保留原选区供重试。",
+				"Markdown 划词会排除 UNagent、弹窗和其他外部视图，工具条保存点击瞬间的选区快照，触屏选区塌陷后仍能正确提交。"
+			],
+			"en": [
+				"Route selection tools and custom selection commands through UNagent, retaining its chat history, model choice, and approval flow.",
+				"Open in the in-note quick composer or the UNagent chat view, then continue the current conversation or start a new one according to settings.",
+				"A handoff succeeds once the user turn is durably admitted instead of waiting for the entire answer, while rapid repeated actions still submit only once.",
+				"Closing the reader, changing books, closing the AI panel, or cancelling stops a pending handoff. Failed submissions keep the source selection available for retry.",
+				"Markdown selection ignores UNagent, modal, and other external views, and retains a click-time selection snapshot so touch selection collapse does not lose the text."
+			]
+		}
+	},
 	"1.0.9": {
 		"title": {"zh": "移动端面板布局修复", "en": "Mobile panel layout fix"},
 		"summary": {"zh": "重新发布移动端外观和 AI 面板的布局修复。", "en": "Re-release the mobile appearance and AI panel layout fix."},
