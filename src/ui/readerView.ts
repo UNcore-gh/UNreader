@@ -282,6 +282,8 @@ export class UNreaderView extends ItemView {
 	private annotationWriteBlocked = false;
 	private annotations: AnnotationFileData = { highlights: [], bookmarks: [] };
 	private lastAnnotationId = 0;
+	/** 短书/末章刚好一屏时，恢复后的几何位置是 0，但用户旧进度已接近完成；首轮 relocate 不能把它冲掉。 */
+	private restoredCompletion: { sourceKey: string; fraction: number; anchor: string } | null = null;
 	/** 目录跳转处理器：目录面板需在派生标题解析完成后增量重建（onNavDerived） */
 	private navJump: ((entry: NavEntryModel) => void) | null = null;
 	private pendingSelection: PendingSelection | null = null;
@@ -2712,6 +2714,7 @@ export class UNreaderView extends ItemView {
 		const sourceKey = this.sourceKey(source)!;
 		this.annotationWriteBlocked = false;
 		this.bookId = null;
+		this.restoredCompletion = null;
 		this.toolbarRevealedDuringLoad = false;
 		this.rootEl?.removeClass("is-load-failed");
 		this.sideNav?.setActionsExpanded(false);
@@ -2938,6 +2941,13 @@ export class UNreaderView extends ItemView {
 			this.sideNav.setBackEnabled(this.adapter.canGoBack());
 			this.rootEl.addClass("has-book");
 			this.rootEl.removeClass("is-empty");
+			this.restoredCompletion = source.kind === "book"
+				&& !!saved
+				&& saved.fraction >= 0.98
+				&& !this.adapter.canGoNextSection()
+				&& this.adapter.isAtSectionBottom()
+				? { sourceKey, fraction: saved.fraction, anchor: saved.anchor }
+				: null;
 			this.endRestoring();
 			this.emptyEl.hide();
 			this.loadingEl.hide();
@@ -3224,7 +3234,24 @@ export class UNreaderView extends ItemView {
 	}
 
 	private handleRelocate(info: RelocateInfo): void {
-		this.lastRelocate = info;
+		const sourceKey = this.currentSourceKey();
+		const completion = this.restoredCompletion;
+		let effective = info;
+		if (completion && sourceKey === completion.sourceKey) {
+			if (!this.adapter.canGoNextSection() && this.adapter.isAtSectionBottom()) {
+				if (info.fraction + 0.01 < completion.fraction) {
+					effective = {
+						...info,
+						fraction: completion.fraction,
+						cfi: info.cfi || completion.anchor,
+					};
+				}
+			} else {
+				// 用户已经离开书末；之后一切位置都以真实滚动为准。
+				this.restoredCompletion = null;
+			}
+		}
+		this.lastRelocate = effective;
 		this.sideNav.setActive(info.tocId);
 		this.refreshBackVisibility(info);
 		// 评论编辑区展开期间**不许收浮层**（见 isEditingComment）：
@@ -3245,12 +3272,11 @@ export class UNreaderView extends ItemView {
 		// 用户的阅读位置冲掉。恢复期结束后的第一次 relocate 会把真实位置补上。
 		// 去抖写之外还有一条**关闭/退出时**的立即写（flushPosition），它读的是
 		// cursor —— 所以「可落盘的位置」必须在这一处统一登记，否则两条路会分叉。
-		const sourceKey = this.currentSourceKey();
 		if (sourceKey && !this.restoring) {
 			const capturedAt = Date.now();
-			this.cursor.note(sourceKey, info.cfi, info.fraction, capturedAt, true);
-			this.checkpointPosition(sourceKey, info, capturedAt);
-			this.savePositionDebounced(sourceKey, info);
+			this.cursor.note(sourceKey, effective.cfi, effective.fraction, capturedAt, true);
+			this.checkpointPosition(sourceKey, effective, capturedAt);
+			this.savePositionDebounced(sourceKey, effective);
 		}
 		this.updateChapterProgress(info.sectionFraction);
 		// 页码模型变了（首次就绪 / 书籍重解析导致 locTotal 变化）→ 书签页码重算。
