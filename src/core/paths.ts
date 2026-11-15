@@ -6,12 +6,12 @@
  * 用户要求设置页能选「资料文件夹」，指的是**插件数据文件放哪儿**（阅读进度 / 外观预设 /
  * 字体 / 共享资源 / 标注笔记 / 订阅数据）。但一堆各自为政的数据目录会让库内文件树
  * 变得难懂（用户要的减法），所以：根可配置（`settings.dataFolder`，null = 默认库根
- * `UNreader/`），根下固定一个 `Data/` 容器，七个数据子目录**全部收在它里面**：
+ * `UNreader/`），根下固定一个 `Data/` 容器，八个数据子目录**全部收在它里面**：
  *
- *     <数据根>/Data/{Progress,Presets,Fonts,Resources,Notes,Feeds,Stats}
+ *     <数据根>/Data/{Progress,Presets,Fonts,Resources,Notes,Feeds,Stats,Identity}
  *
  * 换根时由 `core/libraryMigration.ts` 把这几个数据目录整树搬过去，**书籍一律不搬**
- * （书在库里任何位置都能读，见 `bookService.getBookFiles`）；旧版平铺在根下的六个
+ * （书在库里任何位置都能读，见 `bookService.getBookFiles`）；旧版平铺在根下的八个
  * 目录由同一模块收进 `Data/`。
  *
  * ## `Books/` 已退役（2026-09-19）
@@ -44,7 +44,7 @@
  *  `normalizeDataFolder` / `dataRootOf` 的注释。 */
 export const DEFAULT_ROOT = "UNreader"
 
-/** 数据容器名（2026-09-19）：六个数据子目录统一收在它下面。
+/** 数据容器名（2026-09-19）：八个数据子目录统一收在它下面。
  *
  *  刻意**不加点前缀**：点目录是 Obsidian 里唯一「真隐藏」的手段（不进索引、文件树里
  *  不存在），但 **Obsidian Sync 会整体跳过点前缀目录**（官方帮助「同步设置与选择性同步」），
@@ -57,7 +57,7 @@ export const DATA_DIR_NAME = "Data"
 export const BOOKS_DIR_NAME = "Books"
 
 /** 数据目录的子目录名（相对 `Data/`）。换根时整树搬的就是这几个。 */
-export const DATA_SUBFOLDERS = ["Progress", "Presets", "Fonts", "Resources", "Notes", "Feeds", "Stats"] as const
+export const DATA_SUBFOLDERS = ["Progress", "Presets", "Fonts", "Resources", "Notes", "Feeds", "Stats", "Identity"] as const
 
 export let UNREADER_ROOT = DEFAULT_ROOT
 
@@ -85,8 +85,8 @@ export let PROGRESS_FOLDER = `${DATA_FOLDER}/Progress`
 
 /** 高亮/书签旁车笔记落点。
  *  固定在插件目录下，不再跟随书籍位置推导 —— 书籍一旦允许放在库里任意位置，
- *  「笔记跟着书走」就没有确定解了（同名不同目录的两本书会撞同一个笔记文件；
- *  而按路径 hash 命名又会让笔记文件名变得不可读）。 */
+ *  「笔记跟着书走」就没有确定解。稳定身份索引记录每本书的 notePath；同名冲突时
+ *  只有后来者追加短 ID，已有可读文件名保持不变。 */
 export let NOTES_FOLDER = `${DATA_FOLDER}/Notes`
 
 /** RSS 订阅索引、每条订阅的元数据与阅读状态。
@@ -112,6 +112,10 @@ export let FEEDS_LEGACY_CONTENT_FOLDER = `${FEEDS_FOLDER}/Content`
  *  而统计是高频追加的累计值 **且** `ProgressStore.init()` 会把该目录下**所有** `.json`
  *  当成进度文件读 —— 混在一起会让统计文件被误认成一本书。 */
 export let STATS_FOLDER = `${DATA_FOLDER}/Stats`
+
+/** 书籍稳定身份索引。路径只是别名，进度和标注统一认书籍 ID。 */
+export let IDENTITY_FOLDER = `${DATA_FOLDER}/Identity`
+export let BOOK_IDENTITY_INDEX = `${IDENTITY_FOLDER}/books.json`
 
 /** 规范化**用户选的资料库文件夹**（库内相对路径，即数据根的**父目录**）：
  *  空值 / `.` / 与默认根等价 → null（= 库根下的默认 `UNreader/`）。
@@ -178,4 +182,6 @@ export function setLibraryRoot(root: string | null): void {
 	FEEDS_FOLDER = `${DATA_FOLDER}/Feeds`
 	FEEDS_LEGACY_CONTENT_FOLDER = `${FEEDS_FOLDER}/Content`
 	STATS_FOLDER = `${DATA_FOLDER}/Stats`
+	IDENTITY_FOLDER = `${DATA_FOLDER}/Identity`
+	BOOK_IDENTITY_INDEX = `${IDENTITY_FOLDER}/books.json`
 }

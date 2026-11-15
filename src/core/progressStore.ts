@@ -5,7 +5,10 @@ import { info as debugInfo, warn as debugWarn } from "./debugLog"
 /** 单个进度文件的磁盘格式（book 字段冗余存储书路径，
  *  同步冲突副本（-conflict 文件）也能按 updatedAt 合并） */
 interface ProgressFile {
+	version?: number
 	book: string
+	/** 新格式的稳定书籍身份；旧文件没有这个字段。 */
+	bookId?: string
 	/** 新格式位置 token（EPUB=CFI / MOBI=filepos），见 types.ts: BookPosition.anchor */
 	anchor: string
 	/** @deprecated 老格式字段（cfi=anchor），读取时自动迁移 */
@@ -65,6 +68,10 @@ function pickAnchor(parsed: Partial<ProgressFile>): string {
 export class ProgressStore {
 	/** 书路径 → 进度（内存缓存，启动时从库内加载） */
 	private cache = new Map<string, BookPosition>()
+	/** 稳定书籍 ID → 进度（新格式）。 */
+	private idCache = new Map<string, BookPosition>()
+	/** 当前路径 → 稳定书籍 ID。没有绑定的旧书仍按路径工作。 */
+	private pathToId = new Map<string, string>()
 	/** 每本书独立的写盘 timer（去抖写 + 读失败重试共用） */
 	private writeTimers = new Map<string, number>()
 	/** 每本书串行化写盘：避免 saveNow / 去抖 / 重试并发时后发先至。 */
@@ -94,6 +101,24 @@ export class ProgressStore {
 		return `${safe}-${hex}.json`
 	}
 
+	static fileNameForBookId(bookId: string): string {
+		const safe = bookId.replace(/[^a-z0-9_-]/gi, "_").slice(0, 96) || "book";
+		return `${safe}.json`;
+	}
+
+	/** 阅读器在打开前解析出稳定身份，之后所有新进度都写 ID 文件。 */
+	bindIdentity(bookPath: string, bookId: string, recoveredFrom?: string | null): void {
+		this.pathToId.set(bookPath, bookId);
+		if (recoveredFrom && recoveredFrom !== bookPath) {
+			const recovered = this.cache.get(recoveredFrom) ?? this.hotRead(recoveredFrom);
+			if (recovered) this.mergeIntoId(bookId, recovered);
+			this.cache.delete(recoveredFrom);
+			this.pathToId.delete(recoveredFrom);
+		}
+		const alongPath = this.cache.get(bookPath);
+		if (alongPath) this.mergeIntoId(bookId, alongPath);
+	}
+
 	/** 启动加载：读取库内全部进度文件 + 与旧 data.json positions 合并迁移 */
 	/** 读进度文件夹 + 迁移旧 data.json 里的 positions。
 	 *  **返回值 = 本次真正迁移并落盘的条数** —— 调用方据此把 `settings.positions` 清空，
@@ -103,6 +128,8 @@ export class ProgressStore {
 	 *  而移动端该容器在抽屉隐藏窗口里 → 虚拟化的条目被永久 `hidden`，见 explorerHeal.ts）。 */
 	async init(legacyPositions: Record<string, BookPosition>): Promise<number> {
 		this.cache.clear()
+		this.idCache.clear()
+		this.pathToId.clear()
 		try {
 			const folder = this.vault.getAbstractFileByPath(this.folder)
 			if (folder instanceof TFolder) {
@@ -131,7 +158,12 @@ export class ProgressStore {
 						fraction: typeof parsed.fraction === "number" ? parsed.fraction : 0,
 						updatedAt: typeof parsed.updatedAt === "number" ? parsed.updatedAt : 0,
 					}
-					this.mergeIn(parsed.book, pos)
+					if (typeof parsed.bookId === "string" && parsed.bookId) {
+						this.mergeIntoId(parsed.bookId, pos)
+						this.pathToId.set(parsed.book, parsed.bookId)
+					} else {
+						this.mergeIn(parsed.book, pos)
+					}
 				}
 			}
 		} catch (e) {
@@ -165,17 +197,28 @@ export class ProgressStore {
 	}
 
 	private mergeIn(bookPath: string, pos: BookPosition): void {
+		const id = this.pathToId.get(bookPath);
+		if (id) {
+			this.mergeIntoId(id, pos);
+			return;
+		}
 		const existing = this.cache.get(bookPath)
 		if (!existing || (pos.updatedAt ?? 0) >= existing.updatedAt) {
 			this.cache.set(bookPath, pos)
 		}
 	}
 
+	private mergeIntoId(bookId: string, pos: BookPosition): void {
+		const existing = this.idCache.get(bookId);
+		if (!existing || (pos.updatedAt ?? 0) >= existing.updatedAt) this.idCache.set(bookId, pos);
+	}
+
 	get(bookPath: string): BookPosition | undefined {
 		// 热缓存必须参与每一次读取，而不是只在内存缓存为空时兜底：
 		// 同一应用窗口里的闪退恢复、另一窗口刚写入、以及热缓存比启动时读到的
 		// 内存值更新，都要让最新那条胜出。
-		const cached = this.cache.get(bookPath)
+		const id = this.pathToId.get(bookPath);
+		const cached = (id ? this.idCache.get(id) : undefined) ?? this.cache.get(bookPath)
 		const hot = this.hotRead(bookPath)
 		const best = !cached
 			? hot
@@ -192,7 +235,8 @@ export class ProgressStore {
 		if (!oldPath || !newPath || oldPath === newPath) return false
 		this.clearWriteTimer(oldPath)
 
-		const oldFile = `${this.folder}/${ProgressStore.fileNameFor(oldPath)}`
+		const oldId = this.pathToId.get(oldPath);
+		const oldFile = `${this.folder}/${oldId ? ProgressStore.fileNameForBookId(oldId) : ProgressStore.fileNameFor(oldPath)}`
 		let diskPosition: BookPosition | null = null
 		let oldReadable = true
 		try {
@@ -211,7 +255,7 @@ export class ProgressStore {
 			try { oldReadable = !(await this.vault.adapter.exists(oldFile)) } catch { oldReadable = false }
 		}
 
-		const cached = this.cache.get(oldPath) ?? this.hotRead(oldPath) ?? undefined
+		const cached = (oldId ? this.idCache.get(oldId) : undefined) ?? this.cache.get(oldPath) ?? this.hotRead(oldPath) ?? undefined
 		const position = !diskPosition
 			? cached
 			: !cached || diskPosition.updatedAt >= cached.updatedAt
@@ -219,7 +263,7 @@ export class ProgressStore {
 				: cached
 		if (!position) return false
 
-		const newFile = `${this.folder}/${ProgressStore.fileNameFor(newPath)}`
+		const newFile = `${this.folder}/${oldId ? ProgressStore.fileNameForBookId(oldId) : ProgressStore.fileNameFor(newPath)}`
 		let current = position
 		try {
 			const raw = await this.vault.adapter.read(newFile)
@@ -241,6 +285,7 @@ export class ProgressStore {
 		await this.ensureFolder()
 		const payload: ProgressFile = {
 			book: newPath,
+			bookId: oldId,
 			anchor: current.anchor,
 			fraction: current.fraction,
 			updatedAt: current.updatedAt,
@@ -251,7 +296,13 @@ export class ProgressStore {
 			try { await this.vault.adapter.remove(oldFile) } catch { /* 旧文件清理失败不影响新键 */ }
 		}
 		this.cache.delete(oldPath)
-		this.mergeIn(newPath, current)
+		if (oldId) {
+			this.pathToId.delete(oldPath);
+			this.pathToId.set(newPath, oldId);
+			this.mergeIntoId(oldId, current);
+		} else {
+			this.mergeIn(newPath, current)
+		}
 		this.hotWrite(newPath, current)
 		try { window.localStorage.removeItem(this.hotKey(oldPath)) } catch { /* ignore */ }
 		return true
@@ -370,7 +421,8 @@ export class ProgressStore {
 
 	/** 把内存缓存里的当前值同步进热缓存（见 save 里的说明） */
 	private hotWriteCache(bookPath: string): void {
-		const cur = this.cache.get(bookPath)
+		const id = this.pathToId.get(bookPath);
+		const cur = (id ? this.idCache.get(id) : undefined) ?? this.cache.get(bookPath)
 		if (cur) this.hotWrite(bookPath, cur)
 	}
 
@@ -415,15 +467,18 @@ export class ProgressStore {
 	}
 
 	private async writeNow(bookPath: string): Promise<void> {
-		const pos = this.cache.get(bookPath)
+		const id = this.pathToId.get(bookPath);
+		const pos = (id ? this.idCache.get(id) : undefined) ?? this.cache.get(bookPath)
 		if (!pos) return
 		const payload: ProgressFile = {
+			version: id ? 2 : 1,
 			book: bookPath,
+			...(id ? { bookId: id } : {}),
 			anchor: pos.anchor,
 			fraction: pos.fraction,
 			updatedAt: pos.updatedAt,
 		}
-		const fileName = ProgressStore.fileNameFor(bookPath)
+		const fileName = id ? ProgressStore.fileNameForBookId(id) : ProgressStore.fileNameFor(bookPath)
 		const filePath = `${this.folder}/${fileName}`
 		const text = JSON.stringify(payload, null, "\t")
 		try {
@@ -463,7 +518,10 @@ export class ProgressStore {
 					// 会因此重算 UNreader/ 那一棵子树；移动端在抽屉隐藏窗口里的那次重算会把条目
 					// 永久打成 hidden（「夹子在、内容不显示」）。滚动停下的每一拍都写一遍毫无必要 ——
 					// 锚点与比例都没动，落盘字节除了 updatedAt 之外完全一样。
-					if (pickAnchor(disk) === payload.anchor && (disk.fraction ?? 0) === payload.fraction) return
+					if (pickAnchor(disk) === payload.anchor
+						&& (disk.fraction ?? 0) === payload.fraction
+						&& disk.book === payload.book
+						&& disk.bookId === payload.bookId) return
 				} catch {
 					// 字节读到了、只是解析不出来 = **文件本身损坏**（与上面的「读不到」是两件事）：
 					// 它没有任何可用内容，覆盖写是唯一能把这本书记录修回来的动作。

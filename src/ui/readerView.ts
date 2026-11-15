@@ -7,7 +7,7 @@ import { AI_ICON_NAME } from "./aiIcon";
 import { HoverPopover, ItemView, WorkspaceLeaf, TFile, Notice, setIcon, debounce, ViewStateResult, Platform, MarkdownRenderer } from "obsidian";
 import type UNreaderPlugin from "../main";
 import { EngineAdapter, RelocateInfo, RawFoliateView, styleFootnoteView, NavEntryModel, backDebugOn, FrameSwipeInfo, type BookOpenTarget } from "../core/engineAdapter";
-import { createVaultResourceResolver, getBookshelfEntries, isHtmlBookFile, isReaderBookFile, readBookFile, sortBookshelfEntries } from "../core/bookService";
+import { createVaultResourceResolver, getBookshelfEntries, isHtmlBookFile, isReaderBookFile, readBookFileWithBuffer, sortBookshelfEntries, type OpenedBookFile } from "../core/bookService";
 import { isBookExtEnabled, isRssFormatEnabled, filterSidePanelModes } from "../core/readableFormats";
 import { loadBookPreview } from "../core/bookPreview";
 import { createFeedThumbResolver, createNoteThumbResolver } from "../core/cardThumbSources";
@@ -84,9 +84,10 @@ import { DEFAULT_APPEARANCE, activeTheme } from "../types";
 import { resolveActiveColors } from "../core/engineAdapter";
 import {
 	AnnotationFileData,
+	AnnotationReadError,
 	annotationFileFor,
 	annotationFileForFeed,
-	loadAnnotations,
+	readAnnotations,
 	writeAnnotations,
 	sanitizeBookmarkLabel,
 	StoredHighlight,
@@ -276,7 +277,11 @@ export class UNreaderView extends ItemView {
 	private lastCheckpointAt = 0;
 
 	private notePath = "";
+	private bookId: string | null = null;
+	/** 旁车笔记读不到时，禁止用空内存快照覆盖；下一次外部刷新或重新打开再解锁。 */
+	private annotationWriteBlocked = false;
 	private annotations: AnnotationFileData = { highlights: [], bookmarks: [] };
+	private lastAnnotationId = 0;
 	/** 目录跳转处理器：目录面板需在派生标题解析完成后增量重建（onNavDerived） */
 	private navJump: ((entry: NavEntryModel) => void) | null = null;
 	private pendingSelection: PendingSelection | null = null;
@@ -1184,9 +1189,36 @@ export class UNreaderView extends ItemView {
 		void this.plugin.openSidePanel(undefined, this.getNativeSidebarContext());
 	}
 
-	refreshFeedsPanel(): void {
+	refreshFeedsPanel(syncNative = true): void {
+		if (this.feedRef) {
+			const fresh = this.plugin.feedStore.getEntry(this.feedRef.feedId, this.feedRef.entryId);
+			if (fresh) this.currentFeedEntry = fresh;
+		}
 		this.annotationsPanel?.refreshFeeds();
-		this.plugin.refreshNativeSidebarFeeds();
+		this.syncRailButtons();
+		if (syncNative) this.plugin.refreshNativeSidebarFeeds();
+	}
+
+	/** 数据根切换后，同一阅读实例要改投新目录下的笔记与进度存储。 */
+	refreshStorageLocation(): void {
+		if (this.feedRef) {
+			this.bookId = null;
+			this.annotationWriteBlocked = false;
+			this.notePath = annotationFileForFeed(
+				this.feedRef.feedId,
+				this.feedRef.entryId,
+				this.currentFeedEntry?.title,
+			);
+			return;
+		}
+		const path = this.file?.path;
+		if (!path) return;
+		const identity = this.plugin.bookIdentity.getKnown(path);
+		if (!identity) return;
+		this.bookId = identity.id;
+		this.notePath = identity.notePath;
+		this.annotationWriteBlocked = false;
+		this.plugin.progress.bindIdentity(path, identity.id);
 	}
 
 	syncNativeSidebarToolbarButtons(): void { this.syncRailButtons(); }
@@ -1201,9 +1233,19 @@ export class UNreaderView extends ItemView {
 		if (this.currentSourceKey() !== loadedPath) return;
 		const entry = this.currentFeedEntry;
 		const link = entry?.url || entry?.title || this.file?.path || "";
-		const annotations = await loadAnnotations(this.app.vault, notePath, link);
+		let annotations: AnnotationFileData;
+		try {
+			annotations = (await readAnnotations(this.app.vault, notePath, link)).data;
+			this.annotationWriteBlocked = false;
+		} catch (error) {
+			this.annotationWriteBlocked = true;
+			console.error("[UNreader] 外部写入后读取标注失败", error);
+			new Notice("标注暂时无法读取；为避免覆盖原数据，本次会话不会写入标注。");
+			return;
+		}
 		if (this.notePath !== notePath || this.loadedPath !== loadedPath || !this.adapter.hasBook()) return;
 		this.annotations = annotations;
+		this.syncAnnotationIdFloor();
 		this.adapter.replaceHighlights(annotations.highlights);
 		this.syncAnnotationViews();
 		if (entry) {
@@ -1218,6 +1260,27 @@ export class UNreaderView extends ItemView {
 		}
 	}
 
+	/** 临时同步/云盘读失败后的显式恢复入口；成功前绝不清空当前内存标注。 */
+	async retryAnnotationsRead(notify = true): Promise<boolean> {
+		if (!this.notePath) return false;
+		const link = this.currentFeedEntry?.url || this.currentFeedEntry?.title || this.file?.path || "";
+		try {
+			const result = await readAnnotations(this.app.vault, this.notePath, link);
+			this.annotationWriteBlocked = false;
+			this.annotations = result.data;
+			this.syncAnnotationIdFloor();
+			this.adapter.replaceHighlights(result.data.highlights);
+			this.syncAnnotationViews();
+			if (notify) new Notice(t("noticeAnnotationRetrySuccess"));
+			return true;
+		} catch (error) {
+			this.annotationWriteBlocked = true;
+			console.warn("[UNreader] 重试读取标注失败", error);
+			if (notify) new Notice(t("noticeAnnotationRetryFailed"));
+			return false;
+		}
+	}
+
 	/** 预设文件夹被外部（UNagent / 同步）改动后重绘**已打开**的外观面板：
 	 *  面板里的预设下拉是 render 时现算的，不重绘就还是旧列表。面板没开则不做。 */
 	refreshAppearancePanel(): void {
@@ -1228,17 +1291,17 @@ export class UNreaderView extends ItemView {
 	/** 书架排除项 / 收录格式变更后重绘书架（设置页那条路径调过来）。
 	 *  只在书架**正显示**时重绘：其他模式下重绘是白做功，而 `setMode` 到别的模式
 	 *  会把用户从当前列表拽走。同模式重绘保留滚动位置（见 annotationsPanel.setMode）。 */
-	refreshBookshelfPanel(): void {
+	refreshBookshelfPanel(syncNative = true): void {
 		if (this.annotationsPanel?.isOpen() && this.annotationsPanel.getMode() === "bookshelf") {
 			this.annotationsPanel.setMode("bookshelf");
 		}
-		this.plugin.refreshNativeSidebarBookshelf();
+		if (syncNative) this.plugin.refreshNativeSidebarBookshelf();
 	}
 
 	/** Markdown 笔记的最近阅读 / 星标索引变化后重绘「笔记」页；其它页面不动。 */
-	refreshMarkdownNotesPanel(): void {
+	refreshMarkdownNotesPanel(syncNative = true): void {
 		if (this.annotationsPanel?.isOpen() && this.annotationsPanel.getMode() === "notes") this.annotationsPanel.setMode("notes");
-		this.plugin.refreshNativeSidebarNotes();
+		if (syncNative) this.plugin.refreshNativeSidebarNotes();
 	}
 
 	getCurrentFeedSource(): { feedId: string; entryId: string } | null {
@@ -1254,6 +1317,8 @@ export class UNreaderView extends ItemView {
 		this.feedRef = null;
 		this.currentFeedEntry = null;
 		this.activeFeedContentHash = null;
+		this.bookId = null;
+		this.annotationWriteBlocked = false;
 		// 空态同样是「叶子 state 变了」：不请一次保存，磁盘上还留着上一次的 source，
 		// 重启后官方会把那本书/文章原样装回来（报障：关掉页面重开 Obsidian 又弹出来）。
 		this.requestLayoutSave("empty");
@@ -1273,6 +1338,7 @@ export class UNreaderView extends ItemView {
 		this.plugin.updateNativeSidebarContext(null);
 		this.file = null;
 		this.notePath = "";
+		this.bookId = null;
 		this.setReadingKey(null);
 		this.showEmptyState();
 		void this.plugin.openSidePanel(this.panelOriginMode, null);
@@ -1297,6 +1363,12 @@ export class UNreaderView extends ItemView {
 
 	private async refreshFeeds(): Promise<void> {
 		try {
+			if (this.plugin.feedStore.getLoadError()) {
+				await this.plugin.feedStore.init();
+				const retryError = this.plugin.feedStore.getLoadError();
+				if (retryError) throw new Error(retryError);
+				this.refreshFeedsPanel();
+			}
 			new Notice("正在刷新订阅…");
 			const results = await this.plugin.feedService.refreshAll(true);
 			if (!results.length) {
@@ -1343,8 +1415,8 @@ export class UNreaderView extends ItemView {
 		this.syncRailButtons();
 	}
 
-	/** `toggleFeedRead` 已退役（2026-10-13）：卡片上那枚「标记已读 / 未读」按钮取消，
-	 *  读态只由打开文章时自动记录（设置项 `feeds.markReadOnOpen`），没有第二条写入路径。 */
+	/** `toggleFeedRead` 已退役（2026-10-13）：卡片上那枚「标记已读 / 未读」按钮取消。
+	 *  自动读态只在正文成功显示后提交（设置项 `feeds.markReadOnOpen`），打开失败保持未读。 */
 
 	private async fetchFeedFulltext(feedId: string, entryId: string, options?: { auto?: boolean }): Promise<void> {
 		try {
@@ -1767,7 +1839,7 @@ export class UNreaderView extends ItemView {
 		new BookmarkModal(this.app, label => {
 			const finalLabel = sanitizeBookmarkLabel(label) || fallbackLabel;
 			this.annotations.bookmarks.push({
-				id: Date.now(),
+				id: this.nextAnnotationId(),
 				anchor: `audio:${seconds.toFixed(2)}`,
 				label: finalLabel,
 			});
@@ -2112,7 +2184,10 @@ export class UNreaderView extends ItemView {
 	}
 
 	private toggleSidePanel(requestedMode: "annotations" | "bookshelf" | "feeds" | "notes"): void {
-		void this.plugin.openSidePanel(requestedMode, this.getNativeSidebarContext());
+		const mode = requestedMode === "feeds" && !isRssFormatEnabled(this.plugin.settings.disabledFormats)
+			? "bookshelf"
+			: requestedMode;
+		void this.plugin.openSidePanel(mode, this.getNativeSidebarContext());
 	}
 
 	private setBookshelfSortMode(mode: BookshelfSortMode): void {
@@ -2635,6 +2710,8 @@ export class UNreaderView extends ItemView {
 		}
 		const token = ++this.loadingToken;
 		const sourceKey = this.sourceKey(source)!;
+		this.annotationWriteBlocked = false;
+		this.bookId = null;
 		this.toolbarRevealedDuringLoad = false;
 		this.rootEl?.removeClass("is-load-failed");
 		this.sideNav?.setActionsExpanded(false);
@@ -2668,29 +2745,69 @@ export class UNreaderView extends ItemView {
 			let target: BookOpenTarget;
 			let annotations: AnnotationFileData;
 			let saved: BookPosition | undefined;
+			let feedReadCheckpoint: { feedId: string; entryId: string; openedAt: number; readAt: number | null } | null = null;
+			let openedBook: OpenedBookFile | null = null;
+			let pendingFingerprint: { file: TFile; id: string; buffer: ArrayBuffer } | null = null;
 			if (source.kind === "book") {
 				const file = this.file;
 				if (!file) throw new Error("书籍文件不存在");
-				this.notePath = annotationFileFor(file);
+				await this.plugin.bookIdentity?.init();
+				const knownIdentity = this.plugin.bookIdentity?.getKnown(file.path);
+				// 只有“确实有失联身份”时才在开书前读取整包并做指纹确认；普通首次升级不阻塞。
+				if (!knownIdentity && this.plugin.bookIdentity?.hasLostAliases()) {
+					openedBook = await readBookFileWithBuffer(this.app, file);
+				}
+				const identity = await this.plugin.bookIdentity?.resolve(file, openedBook?.buffer).catch(error => {
+					console.warn("[UNreader] 书籍身份暂不可用，本轮退回路径身份", file.path, error);
+					return null;
+				});
+				if (identity) {
+					this.bookId = identity.record.id;
+					this.notePath = identity.record.notePath;
+					if (identity.ambiguousRecovery) {
+						new Notice("检测到多个内容相同的书目，未自动合并阅读进度和标注。");
+					}
+					if (identity.recoveredFrom) {
+						this.plugin.progress?.bindIdentity(identity.recoveredFrom, identity.record.id);
+						await this.plugin.progress?.move(identity.recoveredFrom, file.path).catch(error => {
+							console.warn("[UNreader] 恢复书籍身份后迁移旧进度失败", error);
+						});
+						this.plugin.progress?.bindIdentity(file.path, identity.record.id);
+					} else {
+						this.plugin.progress?.bindIdentity(file.path, identity.record.id);
+					}
+					if (!identity.record.fingerprint) pendingFingerprint = { file, id: identity.record.id, buffer: new ArrayBuffer(0) };
+				} else {
+					this.notePath = annotationFileFor(file);
+				}
 				saved = this.plugin.getPosition(file.path);
-				const [, blobFile, loadedAnnotations] = await Promise.all([
+				const [, loaded, loadedAnnotations] = await Promise.all([
 					this.plugin.refreshCustomFonts().catch(() => undefined),
-					readBookFile(this.app, file),
-					loadAnnotations(this.app.vault, this.notePath, file.path),
+					openedBook ? Promise.resolve(openedBook) : readBookFileWithBuffer(this.app, file),
+					readAnnotations(this.app.vault, this.notePath, file.path)
+						.then(result => result.data)
+						.catch(error => {
+							if (!(error instanceof AnnotationReadError)) console.error("[UNreader] 读取标注失败", error);
+							this.annotationWriteBlocked = true;
+							new Notice("标注暂时无法读取；书籍仍可正常阅读，但本次会话不会覆盖标注文件。");
+							return { highlights: [], bookmarks: [] };
+						}),
 					this.plugin.whenDataReady(),
 					this.applyDevicePreset().then(() => this.syncOuterAppearance()),
 				]);
-					if (token !== this.loadingToken) return;
+				openedBook = loaded;
+				if (pendingFingerprint) pendingFingerprint.buffer = loaded.buffer;
+				if (token !== this.loadingToken) return;
 				// 本地 HTML 与 TXT 一样是「我们先合成 book、再交给 foliate」的形态：
 				// 净化 + 相对资源改写都在 makeHtmlBook 里做完（srcdoc 章节没有 base URL，
 				// 资源 URL 必须烧进 HTML —— 见 core/htmlBook.ts 文件头）。
 				target = isHtmlBookFile(file)
-					? await makeHtmlBook(blobFile, { resolveResource: createVaultResourceResolver(this.app, file.path) })
-					: blobFile;
+					? await makeHtmlBook(loaded.file, { resolveResource: createVaultResourceResolver(this.app, file.path) })
+					: loaded.file;
 				annotations = loadedAnnotations;
 			} else {
 				await this.plugin.whenDataReady();
-					if (token !== this.loadingToken) return;
+				if (token !== this.loadingToken) return;
 				debugLog.info("[restore] feed 分支开始", source.feedId, source.entryId, `storeReady=${this.plugin.feedStore.isReady()}`);
 				await Promise.all([
 					this.plugin.refreshCustomFonts().catch(() => undefined),
@@ -2710,14 +2827,21 @@ export class UNreaderView extends ItemView {
 				const openedAt = Date.now();
 				await this.plugin.feedStore.updateEntryState(entry.feedId, entry.id, {
 					openedAt,
-					readAt: entry.state.readAt ?? (this.plugin.settings.feeds.markReadOnOpen !== false ? openedAt : null),
 				});
-					if (token !== this.loadingToken) return;
+				feedReadCheckpoint = { feedId: entry.feedId, entryId: entry.id, openedAt, readAt: entry.state.readAt };
+				if (token !== this.loadingToken) return;
 				this.currentFeedEntry = this.plugin.feedStore.getEntry(entry.feedId, entry.id) ?? entry;
 				saved = this.currentFeedEntry.state.position ?? undefined;
 				this.notePath = annotationFileForFeed(entry.feedId, entry.id, entry.title);
-				annotations = await loadAnnotations(this.app.vault, this.notePath, entry.url || entry.title);
-					if (token !== this.loadingToken) return;
+				annotations = await readAnnotations(this.app.vault, this.notePath, entry.url || entry.title)
+					.then(result => result.data)
+					.catch(error => {
+						if (!(error instanceof AnnotationReadError)) console.error("[UNreader] 读取文章标注失败", error);
+						this.annotationWriteBlocked = true;
+						new Notice("文章标注暂时无法读取；本次会话不会用空数据覆盖原文件。");
+						return { highlights: [], bookmarks: [] };
+					});
+				if (token !== this.loadingToken) return;
 				const selectedContent = activeFeedContent(this.currentFeedEntry);
 				const contentHtml = selectedContent.html;
 				this.activeFeedContentHash = selectedContent.hash;
@@ -2738,6 +2862,7 @@ export class UNreaderView extends ItemView {
 			}
 			if (token !== this.loadingToken) return;
 			this.annotations = annotations;
+			this.syncAnnotationIdFloor();
 
 			try { this.adapter.destroy(); } catch (e) { console.warn("[UNreader] destroy warn", e); }
 			this.contentHost.empty();
@@ -2791,11 +2916,11 @@ export class UNreaderView extends ItemView {
 			this.renderNavPanel();
 			this.adapter.restoreHighlights(this.annotations.highlights);
 			if (this.isFeedSource()) await this.reconcileFeedAnnotations();
-				if (token !== this.loadingToken) return;
+			if (token !== this.loadingToken) return;
+			if (this.isFeedSource()) this.annotationsPanel.setMode("annotations");
 			this.annotationsPanel.render(this.annotations);
 			if (this.isFeedSource()) {
 				this.sideNav.closePanel();
-				this.annotationsPanel.refreshFeeds();
 			}
 			// 星标按钮的状态源是「当前文章」，换书/换文章/刷新后都要重算一次
 			this.syncRailButtons();
@@ -2817,6 +2942,21 @@ export class UNreaderView extends ItemView {
 			this.emptyEl.hide();
 			this.loadingEl.hide();
 			this.syncNativeHeader();
+			if (pendingFingerprint && pendingFingerprint.buffer.byteLength > 0) {
+				void this.plugin.bookIdentity.ensureFingerprint(
+					pendingFingerprint.file,
+					pendingFingerprint.id,
+					pendingFingerprint.buffer,
+				).catch(error => console.warn("[UNreader] 后台计算书籍指纹失败", error));
+			}
+			if (feedReadCheckpoint && this.plugin.settings.feeds.markReadOnOpen !== false && feedReadCheckpoint.readAt == null) {
+				const updated = await this.plugin.feedStore.updateEntryState(feedReadCheckpoint.feedId, feedReadCheckpoint.entryId, {
+					readAt: feedReadCheckpoint.openedAt,
+				});
+				if (updated && this.currentFeedEntry?.feedId === updated.feedId && this.currentFeedEntry.id === updated.id) {
+					this.currentFeedEntry = updated;
+				}
+			}
 			// 装载落定后再请一次保存：`applyReaderSource` 那次请的是「换了源」，
 			// 而叶子存盘的 title 现读 `currentFeedEntry`（装载期才填），晚一拍落盘
 			// 才能把文章标题也写进去 —— 否则恢复出的标签页名字只有 "UNreader"。
@@ -3093,9 +3233,9 @@ export class UNreaderView extends ItemView {
 		// 编辑区被 display:none 摘掉 → 输入框 blur → 软键盘刚弹起就被压回去；
 		// 即便键盘侥幸留住，下面清掉的 `pendingSelection` 也会让「保存」报
 		// 「无法定位选区」（applyHighlightWithComment 靠它取 CFI）。
-		if (!this.isEditingComment() && !this.mobileSelection.active) {
-			this.selectionToolbar.hide();
-			this.highlightPopover.hide();
+		if (!this.isEditingComment() && !this.mobileSelection?.active) {
+			this.selectionToolbar?.hide();
+			this.highlightPopover?.hide();
 			this.pendingSelection = null;
 			this.lastExcerpt = null;
 			this.clearMirrorSelection();
@@ -3857,7 +3997,10 @@ export class UNreaderView extends ItemView {
 			}
 		});
 		// 阅读器内部不再弹第二套标注抽屉；内容列表与标注统一由原生侧栏承载。
-		this.annotationsPanel.openPickerPage(this.panelOriginMode);
+			// feed 文章恢复时先把侧栏停在标注层，等正文真正落定后再由返回按钮/页签切列表；
+			// 首帧去读订阅列表会让重开应用先闪一整页 RSS 卡片并提前依赖 FeedStore。
+			if (this.getReaderSource()?.kind === "feed-entry") this.annotationsPanel.openAnnotationsPage();
+			else this.annotationsPanel.openPickerPage(this.panelOriginMode);
 		// 沉浸模式拉绳开关：直接挂在 root 上，不随 chrome-hidden/工具轨隐藏。
 		// 图形完全由 CSS 绘制，避免 iPad / 旧版本图标集缺名时只剩系统按钮底框。
 		// 官方 button 皮肤选择器带 :not(.clickable-icon)，特异性高于单类；样式侧必须用
@@ -4822,6 +4965,16 @@ export class UNreaderView extends ItemView {
 
 	/* ---------------- annotations: shared helpers ---------------- */
 
+	private nextAnnotationId(): number {
+		this.lastAnnotationId = Math.max(Date.now(), this.lastAnnotationId + 1);
+		return this.lastAnnotationId;
+	}
+
+	private syncAnnotationIdFloor(): void {
+		for (const item of this.annotations.highlights) this.lastAnnotationId = Math.max(this.lastAnnotationId, item.id);
+		for (const item of this.annotations.bookmarks) this.lastAnnotationId = Math.max(this.lastAnnotationId, item.id);
+	}
+
 	/** Feed 正文刷新后先按原文迁移高亮，再提交待处理快照；找不到的高亮只标记失效。 */
 	private async reconcileFeedAnnotations(): Promise<void> {
 		const entry = this.currentFeedEntry;
@@ -4840,9 +4993,13 @@ export class UNreaderView extends ItemView {
 	}
 
 	private async persistAnnotations(): Promise<boolean> {
+		if (this.annotationWriteBlocked) {
+			new Notice("标注文件暂时无法读取，已停止写入以避免覆盖原数据。");
+			return false;
+		}
 		try {
 			const link = this.currentFeedEntry?.url || this.currentFeedEntry?.title || this.file?.path || "";
-			await writeAnnotations(this.app.vault, this.notePath, link, this.annotations);
+			await writeAnnotations(this.app.vault, this.notePath, link, this.annotations, undefined, this.bookId ?? undefined);
 			if (this.currentFeedEntry) {
 				await this.plugin.feedStore.updateEntryState(this.currentFeedEntry.feedId, this.currentFeedEntry.id, {
 					hasAnnotations: this.annotations.highlights.length > 0 || this.annotations.bookmarks.length > 0,
@@ -4932,7 +5089,7 @@ export class UNreaderView extends ItemView {
 		}
 		sel.doc.getSelection()?.removeAllRanges();
 		const item: StoredHighlight = {
-			id: Date.now(),
+			id: this.nextAnnotationId(),
 			color: colorName,
 			anchor: sel.cfi,
 			text: sel.text.slice(0, 500),
@@ -4955,7 +5112,7 @@ export class UNreaderView extends ItemView {
 		sel.doc.getSelection()?.removeAllRanges();
 
 		const item: StoredHighlight = {
-			id: Date.now(),
+			id: this.nextAnnotationId(),
 			color: colorName,
 			anchor: sel.cfi,
 			text: text.slice(0, 500),
@@ -5014,7 +5171,7 @@ export class UNreaderView extends ItemView {
 		new BookmarkModal(this.app, label => {
 			const anchor = this.lastRelocate!.cfi;
 			this.annotations.bookmarks.push({
-				id: Date.now(),
+				id: this.nextAnnotationId(),
 				anchor,
 				// 与重命名同一条安全化通道：章节标题里也可能带 `|`，同样会切错笔记分列
 				label: sanitizeBookmarkLabel(label) || sanitizeBookmarkLabel(defaultLabel) || "书签",

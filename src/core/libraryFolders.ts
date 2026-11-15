@@ -17,7 +17,7 @@
  *
  * ### ① 健康判据不能只看「目录里有没有东西」
  *
- * `ensureLibraryFolders` 会凭空建出 `UNreader/Data/` + 六个数据子目录。初版把
+ * `ensureLibraryFolders` 会凭空建出 `UNreader/Data/` + 八个数据子目录。初版把
  * 「常量路径下存在 `Books|Fonts|Presets|Progress|Notes` 之一」当健康判据，于是**空壳自己
  * 就带着两个证据，heal 每次启动都在第一行早退，用户的进度/预设/高亮永久搁浅**。
  * 而且这个空壳一定会落盘：`refreshCustomFonts`（`onLayoutReady` 后）会调
@@ -43,15 +43,9 @@
  *
  * ## 只搬内部数据，**永不搬 Books**
  *
- * 书放在库里任何位置都能读（`bookService.getBookFiles` 不按文件夹过滤），而进度文件名是
- * **书籍完整路径**的 djb2 hash（`progressStore.fileNameFor`）—— **移动一本书 = 视为新书 =
- * 进度归零**，这条隐性契约是仓库明写在案的（`AGENTS.md` 的「库内路径已收敛为常量」条 ③）。
- * 所以自愈绝不碰用户的书籍文件：它只把**插件自己的**数据搬回约定位置。
- *
- * 代价说清楚：如果用户是「刚改名、还没继续读」就撞上自愈，那批进度键仍是旧路径、依旧对不上
- * （与**不装自愈时的结果完全相同**，不是新增的损失）；而只要用户在改名期间读过，他的最新
- * 位置就是按当前书路径存的，自愈反而让它重新可见。要彻底消掉这个歧义只能换身份键（按书籍
- * 内容 hash 而非路径），代价见 `AGENTS.md` 同一处提到的「身份键」方案评估，不在本轮范围。
+ * 书放在库里任何位置都能读（`bookService.getBookFiles` 不按文件夹过滤）；进度与标注
+ * 由 `Data/Identity/books.json` 的稳定书籍 ID 管理。自愈仍绝不碰用户的书籍文件：
+ * 它只把**插件自己的**数据搬回约定位置，路径移动交给身份别名表处理。
  *
  * ## 跨端同步的终态（不是 bug，但必须告知用户）
  *
@@ -82,7 +76,7 @@
  */
 import { App, Notice, TFolder } from "obsidian";
 import * as debugLog from "./debugLog";
-import { BOOKS_DIR_NAME, DATA_DIR_NAME, DEFAULT_ROOT, FEEDS_FOLDER, FONTS_FOLDER, IMAGES_FOLDER, NOTES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, RESOURCES_FOLDER, UNREADER_ROOT } from "./paths";
+import { BOOKS_DIR_NAME, DATA_DIR_NAME, DEFAULT_ROOT, FEEDS_FOLDER, FONTS_FOLDER, IDENTITY_FOLDER, IMAGES_FOLDER, NOTES_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, RESOURCES_FOLDER, STATS_FOLDER, UNREADER_ROOT } from "./paths";
 
 /** 子目录**名字**（相对 `UNREADER_ROOT`）。paths 里是完整路径，这里只要末段 */
 function nameOf(path: string): string {
@@ -93,7 +87,7 @@ function nameOf(path: string): string {
  *  （理由见文件头）。每次调用读 `paths.ts` 的**活绑定** —— 数据根可配置（`setLibraryRoot`），
  *  在模块顶层缓存这份清单，换根之后就会拿着旧目录名去找。 */
 function movableNames(): string[] {
-	return [FONTS_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER, RESOURCES_FOLDER, FEEDS_FOLDER].map(nameOf);
+	return [FONTS_FOLDER, PRESETS_FOLDER, PROGRESS_FOLDER, NOTES_FOLDER, RESOURCES_FOLDER, FEEDS_FOLDER, STATS_FOLDER, IDENTITY_FOLDER].map(nameOf);
 }
 
 /** 进度文件名形如 `<书名清洗>-<djb2 8 位 hex>.json`（见 progressStore.fileNameFor） */
@@ -141,7 +135,7 @@ async function listFolders(app: App, path: string): Promise<string[]> {
 /**
  * 这个目录里**有没有我们的数据**。看内容、不看目录名 —— 理由见文件头 ②。
  *
- * 六个子目录任一命中即可：进度 JSON 的 hash 文件名、预设的 `preset.json`、旁车笔记的
+ * 八个子目录任一命中即可：进度 JSON 的 hash 文件名、预设的 `preset.json`、旁车笔记的
  * `## 高亮`/`## 书签` 段、书籍扩展名、字体扩展名。这些都是插件自己产出的形态，
  * 用户碰巧撞上的概率极低，而「目录名恰好叫 Notes」的概率不低。
  */
@@ -193,6 +187,14 @@ async function hasOurContentAt(app: App, base: string): Promise<boolean> {
 	if (has(nameOf(FEEDS_FOLDER))) {
 		const files = await listFiles(app, at(nameOf(FEEDS_FOLDER)));
 		if (files.some(f => /\/index\.json$/i.test(f) || /\/[0-9a-f-]+\.json$/i.test(f))) return true;
+	}
+	if (has(nameOf(IDENTITY_FOLDER))) {
+		const files = await listFiles(app, at(nameOf(IDENTITY_FOLDER)));
+		if (files.some(f => /\/books(?:\.bak|\.corrupt-\d+)?\.json$/i.test(f))) return true;
+	}
+	if (has(nameOf(STATS_FOLDER))) {
+		const files = await listFiles(app, at(nameOf(STATS_FOLDER)));
+		if (files.some(f => /\/reading\.json$/i.test(f))) return true;
 	}
 	return false;
 }

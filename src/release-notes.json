@@ -1,4 +1,32 @@
 {
+	"1.0.11": {
+		"title": {
+			"zh": "阅读进度与数据保护",
+			"en": "Reading progress and data protection"
+		},
+		"summary": {
+			"zh": "书籍移动或改名后继续保留进度与标注；标注和订阅数据读取失败时停止覆盖，并可在恢复后重新读取。",
+			"en": "Keep progress and annotations when books move or are renamed, stop overwriting unreadable annotation or feed data, and reload it after recovery."
+		},
+		"items": {
+			"zh": [
+				"书籍改名、移动或通过同步换到新路径后，阅读进度和高亮仍会跟随同一本书；同名书也不会再共用标注笔记。",
+				"标注文件暂时读不到时不再显示成空标注或覆盖原文件，并新增“重试读取当前标注”命令。",
+				"RSS 索引或单个订阅损坏时进入只读保护，刷新、状态更新和删除失败不会再用空数据覆盖原记录。",
+				"切换数据文件夹时会一并保存和迁移书籍身份、阅读统计、订阅和标注，并刷新已打开的阅读标签。",
+				"打开书籍只读取一次文件内容，书籍内容指纹延后计算；多标签的书架、订阅、笔记和标注刷新也更快更一致。",
+				"面向 UNagent 的自动化接口保持稳定，数据目录切换后仍会继续指向当前存储。"
+			],
+			"en": [
+				"Reading progress and highlights now follow a book after renames, moves, and synced path changes. Books with the same name no longer share one annotation note.",
+				"Unreadable annotation files are no longer treated as empty or overwritten, and a new command lets you retry loading the current annotations.",
+				"Damaged feed indexes or subscriptions enter read-only protection so refreshes, state updates, and failed removals cannot replace existing records with empty data.",
+				"Changing the data folder now saves and migrates book identities, reading statistics, feeds, and annotations together, then refreshes open reader tabs.",
+				"Book files are read once when opened and content fingerprints are calculated later. Shelf, feed, note, and annotation refreshes also stay consistent across multiple tabs.",
+				"The automation API used by UNagent remains stable and follows the active storage after a data-folder change."
+			]
+		}
+	},
 	"1.0.1": {
 		"title": {
 			"zh": "阅读显隐与交互修复",

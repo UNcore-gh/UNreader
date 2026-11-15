@@ -245,16 +245,21 @@ function collectBookFiles(plugin: UNreaderPlugin, alphabetical: boolean): TFile[
 
 /** EPUB 文件缓存：重开同一本书跳过整包重读（移动端读几 MB 压缩包要 1-2s）。
  *  以 path+mtime+size 判定有效性，LRU 上限 2 本防移动端内存压力。 */
-const bookFileCache = new Map<string, { mtime: number; size: number; file: File }>()
+const bookFileCache = new Map<string, { mtime: number; size: number; file: File; buffer: ArrayBuffer }>()
 
-export async function readBookFile(app: App, file: TFile): Promise<File> {
+export interface OpenedBookFile {
+	file: File
+	buffer: ArrayBuffer
+}
+
+export async function readBookFileWithBuffer(app: App, file: TFile): Promise<OpenedBookFile> {
 	const c = bookFileCache.get(file.path);
-	if (c && c.mtime === file.stat.mtime && c.size === file.stat.size) return c.file;
+	if (c && c.mtime === file.stat.mtime && c.size === file.stat.size) return { file: c.file, buffer: c.buffer };
 	const buf = await app.vault.readBinary(file);
 	const ext = file.extension.toLowerCase();
 	const mime = BOOK_MIME[ext] ?? "application/octet-stream";
 	const f = new File([buf], file.name, { type: mime });
-	bookFileCache.set(file.path, { mtime: file.stat.mtime, size: file.stat.size, file: f });
+	bookFileCache.set(file.path, { mtime: file.stat.mtime, size: file.stat.size, file: f, buffer: buf });
 	while (bookFileCache.size > 2) {
 		const next = bookFileCache.keys().next();
 		if (next.done) break;
@@ -262,5 +267,9 @@ export async function readBookFile(app: App, file: TFile): Promise<File> {
 		if (oldest === file.path) break;
 		bookFileCache.delete(oldest);
 	}
-	return f;
+	return { file: f, buffer: buf };
+}
+
+export async function readBookFile(app: App, file: TFile): Promise<File> {
+	return (await readBookFileWithBuffer(app, file)).file;
 }

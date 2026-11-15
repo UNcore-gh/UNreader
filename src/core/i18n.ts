@@ -305,6 +305,7 @@ const STRINGS = {
 		releaseNotesTitle: "更新说明",
 		cmdOpenBook: "全库：选择并打开书籍",
 		cmdToggleAnnotations: "当前阅读器：切换标注侧栏",
+		cmdRetryAnnotations: "当前阅读器：重试读取标注",
 		cmdToggleBookshelf: "当前阅读器：切换书架侧栏",
 		cmdToggleFeeds: "当前阅读器：切换订阅侧栏",
 		cmdToggleSidebarSide: "侧栏位置：在左侧 / 右侧之间切换（没打开时落在右侧）",
@@ -323,6 +324,8 @@ const STRINGS = {
 
 		/* ── 命令执行时的提示 ─────────────────────────────────── */
 		noticeNoActiveReader: "未找到正在使用的阅读器：请先打开一本书再执行此命令",
+		noticeAnnotationRetrySuccess: "标注已重新读取",
+		noticeAnnotationRetryFailed: "标注仍无法读取；原文件未被修改",
 		noticeMdOverlayOff: "笔记沉浸阅读已在笔记阅读视图的外观面板中关闭",
 		noticeNoMdReadingView: "未找到处于阅读模式的 markdown 笔记（此命令只作用于阅读视图）",
 		noticeUnsupportedFile: "《{name}》不是 UNreader 支持的格式（EPUB / MOBI / AZW3 / TXT / HTML），已阻止打开",
@@ -782,6 +785,7 @@ const STRINGS = {
 		releaseNotesTitle: "Release notes",
 		cmdOpenBook: "Vault: choose and open a book",
 		cmdToggleAnnotations: "Current reader: toggle annotations sidebar",
+		cmdRetryAnnotations: "Current reader: retry loading annotations",
 		cmdToggleBookshelf: "Current reader: toggle bookshelf sidebar",
 		cmdToggleFeeds: "Current reader: toggle feeds sidebar",
 		cmdToggleSidebarSide: "Sidebar position: toggle between left and right (opens on the right when hidden)",
@@ -801,6 +805,8 @@ const STRINGS = {
 		/* ── Notices raised while running a command ──────────── */
 		noticeNoActiveReader:
 			"No reader in use: open a book first, then run this command",
+		noticeAnnotationRetrySuccess: "Annotations reloaded",
+		noticeAnnotationRetryFailed: "Annotations still cannot be read; the original file was not modified",
 		noticeMdOverlayOff:
 			"Immersive note reading is turned off in the note reading view's appearance panel",
 		noticeNoMdReadingView:

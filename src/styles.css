@@ -5692,7 +5692,7 @@ body .unreader-root .unreader-actions.is-expanded,
 body .unreader-md-root .unreader-actions,
 body .unreader-md-root .unreader-actions:hover,
 body .unreader-md-root .unreader-actions.is-expanded {
-	background-color: var(--background-secondary);
+	background-color: var(--background-secondary, var(--ur-surface-soft));
 	border: none;
 	border-radius: var(--ur-radius-lg);
 	box-shadow: var(--ur-panel-shadow);

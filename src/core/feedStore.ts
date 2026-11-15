@@ -170,6 +170,10 @@ export class FeedStore {
 	private saveTimers = new Map<string, number>();
 	/** 订阅级（索引）变更标记：flush 只在确实动过订阅列表时才重写 index.json。 */
 	private indexDirty = false;
+	/** 索引或单订阅元数据读失败时锁定写入，避免把“读不到”覆盖成空数据。 */
+	private indexBlocked = false;
+	private blockedFeeds = new Set<string>();
+	private loadError: string | null = null;
 
 	/** `pluginDir` = 插件目录的**库内相对路径**（`.obsidian/plugins/unreader`），由 `main.ts`
 	 *  从 `manifest.dir` 解析后注入 —— 正文缓存的落点由它派生，见 `contentRoot()`。
@@ -196,15 +200,48 @@ export class FeedStore {
 		this.hydration.clear();
 		this.dirty.clear();
 		this.indexDirty = false;
+		this.indexBlocked = false;
+		this.blockedFeeds.clear();
+		this.loadError = null;
 		for (const timer of this.saveTimers.values()) window.clearTimeout(timer);
 		this.saveTimers.clear();
-		const index = await this.readJson<Partial<FeedIndexFile>>(`${FEEDS_FOLDER}/${INDEX_FILE}`);
+		const indexRead = await this.readJsonResult<Partial<FeedIndexFile>>(`${FEEDS_FOLDER}/${INDEX_FILE}`);
+		if (indexRead.status === "error") {
+			this.indexBlocked = true;
+			this.loadError = `无法读取订阅索引：${indexRead.error}`;
+			this.initialized = true;
+			return;
+		}
+		const index = indexRead.value;
+		if (indexRead.status === "ok"
+			&& (!index || typeof index !== "object" || !Array.isArray(index.feeds))) {
+			this.indexBlocked = true;
+			this.loadError = "订阅索引格式不正确";
+			this.initialized = true;
+			return;
+		}
 		for (const raw of Array.isArray(index?.feeds) ? index.feeds : []) {
 			const feed = normalizeSubscription(raw);
 			if (feed) this.feeds.set(feed.id, feed);
 		}
 		const loads = [...this.feeds.values()].map(async feed => {
-			const data = await this.readJson<Partial<FeedFileData>>(`${FEEDS_FOLDER}/${feedFileName(feed.id)}`);
+			const dataRead = await this.readJsonResult<Partial<FeedFileData>>(`${FEEDS_FOLDER}/${feedFileName(feed.id)}`);
+			if (dataRead.status === "error") {
+				this.blockedFeeds.add(feed.id);
+				this.loadError ??= `无法读取订阅「${feed.title}」`;
+				this.entries.set(feed.id, new Map());
+				this.loadedContent.set(feed.id, new Set());
+				return;
+			}
+			const data = dataRead.value;
+			if (dataRead.status === "ok"
+				&& (!data || typeof data !== "object" || !Array.isArray(data.entries))) {
+				this.blockedFeeds.add(feed.id);
+				this.loadError ??= `订阅「${feed.title}」的文件格式不正确`;
+				this.entries.set(feed.id, new Map());
+				this.loadedContent.set(feed.id, new Set());
+				return;
+			}
 			const map = new Map<string, FeedEntry>();
 			const inline = new Set<string>();
 			for (const raw of Array.isArray(data?.entries) ? data.entries : []) {
@@ -233,6 +270,10 @@ export class FeedStore {
 
 	isReady(): boolean {
 		return this.initialized;
+	}
+
+	getLoadError(): string | null {
+		return this.loadError;
 	}
 
 	listFeeds(): FeedSubscription[] {
@@ -278,6 +319,7 @@ export class FeedStore {
 		title?: string
 		description?: string
 	}): Promise<FeedSubscription> {
+		this.assertIndexWritable();
 		const feedUrl = input.feedUrl.trim();
 		const id = stableFeedId(feedUrl);
 		const existing = this.feeds.get(id);
@@ -307,17 +349,40 @@ export class FeedStore {
 	}
 
 	async removeSubscription(feedId: string): Promise<void> {
-		if (!this.feeds.delete(feedId)) return;
+		// 删除是用户明确的修复出口：订阅正文损坏时仍应允许移除该订阅。
+		this.assertIndexWritable();
+		const feed = this.feeds.get(feedId);
+		if (!feed) return;
 		const map = this.entries.get(feedId);
+		const loaded = this.loadedContent.get(feedId);
+		const hydration = this.hydration.get(feedId);
+		const wasDirty = this.dirty.has(feedId);
+		const wasBlocked = this.blockedFeeds.has(feedId);
+		const previousIndexDirty = this.indexDirty;
+		this.feeds.delete(feedId);
 		this.entries.delete(feedId);
 		this.loadedContent.delete(feedId);
 		this.hydration.delete(feedId);
 		this.dirty.delete(feedId);
+		this.blockedFeeds.delete(feedId);
 		const timer = this.saveTimers.get(feedId);
 		if (timer) window.clearTimeout(timer);
 		this.saveTimers.delete(feedId);
 		this.indexDirty = true;
-		await this.writeIndex();
+		try {
+			await this.writeIndex();
+		} catch (error) {
+			// 索引没落盘时恢复内存现场；否则界面会“删掉了”，重启后又回来。
+			this.feeds.set(feedId, feed);
+			if (map) this.entries.set(feedId, map);
+			if (loaded) this.loadedContent.set(feedId, loaded);
+			if (hydration) this.hydration.set(feedId, hydration);
+			if (wasDirty) this.dirty.add(feedId);
+			if (wasBlocked) this.blockedFeeds.add(feedId);
+			this.indexDirty = previousIndexDirty;
+			if (wasDirty) this.scheduleFeedWrite(feedId);
+			throw error;
+		}
 		try {
 			await this.vault.adapter.remove(normalizePath(`${FEEDS_FOLDER}/${feedFileName(feedId)}`));
 		} catch { /* 文件可能尚未创建 */ }
@@ -331,28 +396,42 @@ export class FeedStore {
 	}
 
 	async renameSubscription(feedId: string, title: string): Promise<void> {
-		const feed = this.feeds.get(feedId);
-		if (!feed) return;
-		feed.title = title.trim() || feed.title;
-		feed.updatedAt = Date.now();
-		this.indexDirty = true;
-		await Promise.all([this.writeIndex(), this.writeFeed(feedId)]);
+		await this.updateSubscription(feedId, { title });
 	}
 
 	/** 启用 / 停用订阅。停用只改索引里的一位（文章快照原样保留，随时可再启用）。 */
 	async setSubscriptionEnabled(feedId: string, enabled: boolean): Promise<void> {
+		await this.updateSubscription(feedId, { enabled });
+	}
+
+	/** 自动化接口组合修改标题与启用状态：两项都在 index.json，一次写盘提交。 */
+	async updateSubscription(feedId: string, patch: { title?: string; enabled?: boolean }): Promise<FeedSubscription | null> {
+		this.assertFeedWritable(feedId);
 		const feed = this.feeds.get(feedId);
-		if (!feed || feed.enabled === enabled) return;
-		feed.enabled = enabled;
+		if (!feed) return null;
+		const before = { title: feed.title, enabled: feed.enabled, updatedAt: feed.updatedAt };
+		const previousIndexDirty = this.indexDirty;
+		if (patch.title !== undefined) feed.title = patch.title.trim() || feed.title;
+		if (patch.enabled !== undefined) feed.enabled = patch.enabled;
 		feed.updatedAt = Date.now();
 		this.indexDirty = true;
-		await this.writeIndex();
+		try {
+			await this.writeIndex();
+			return feed;
+		} catch (error) {
+			feed.title = before.title;
+			feed.enabled = before.enabled;
+			feed.updatedAt = before.updatedAt;
+			this.indexDirty = previousIndexDirty;
+			throw error;
+		}
 	}
 
 	async updateFetchMetadata(
 		feedId: string,
 		patch: Partial<Pick<FeedSubscription, "title" | "siteUrl" | "description" | "lastFetchedAt" | "lastError" | "etag" | "lastModified">>,
 	): Promise<void> {
+		this.assertFeedWritable(feedId);
 		const feed = this.feeds.get(feedId);
 		if (!feed) return;
 		Object.assign(feed, patch, { updatedAt: Date.now() });
@@ -361,6 +440,7 @@ export class FeedStore {
 	}
 
 	async mergeFeedEntries(feedId: string, parsed: ParsedFeedEntry[], limit: number): Promise<FeedEntry[]> {
+		this.assertFeedWritable(feedId);
 		const map = this.entries.get(feedId) ?? new Map<string, FeedEntry>();
 		const now = Date.now();
 		const beforeFingerprint = persistenceFingerprint(map);
@@ -411,6 +491,7 @@ export class FeedStore {
 	}
 
 	async updateEntryState(feedId: string, entryId: string, patch: Partial<FeedEntryState>): Promise<FeedEntry | null> {
+		this.assertFeedWritable(feedId);
 		const entry = this.entries.get(feedId)?.get(entryId);
 		if (!entry) return null;
 		const next: FeedEntryState = {
@@ -429,6 +510,7 @@ export class FeedStore {
 	/** 只更新内存 + 本机热缓存，不等待订阅文件写盘。
 	 *  供阅读视图每次可信 relocate 调用，避免 800ms/异步写窗口里闪退丢位置。 */
 	checkpointEntryState(feedId: string, entryId: string, patch: Partial<FeedEntryState>): void {
+		if (this.indexBlocked || this.blockedFeeds.has(feedId)) return;
 		const entry = this.entries.get(feedId)?.get(entryId);
 		if (!entry) return;
 		const next: FeedEntryState = {
@@ -443,6 +525,7 @@ export class FeedStore {
 
 	/** 一次写入多条阅读状态，供播客进度等高频小更新合并落盘。 */
 	async updateEntriesState(feedId: string, patches: Array<{ entryId: string; patch: Partial<FeedEntryState> }>): Promise<void> {
+		this.assertFeedWritable(feedId);
 		const map = this.entries.get(feedId);
 		if (!map || !patches.length) return;
 		let changed = false;
@@ -469,6 +552,7 @@ export class FeedStore {
 		contentHash: string,
 		metadata?: { title?: string; author?: string },
 	): Promise<FeedEntry | null> {
+		this.assertFeedWritable(feedId);
 		const entries = this.entries.get(feedId);
 		const entry = entries?.get(entryId);
 		if (!entry || !entries) return null;
@@ -503,6 +587,7 @@ export class FeedStore {
 
 	/** 完成一次正文更新：只有当前待处理哈希仍匹配时才提交，避免两个刷新结果互相覆盖。 */
 	async commitPendingContent(feedId: string, entryId: string, expectedHash: string): Promise<FeedEntry | null> {
+		this.assertFeedWritable(feedId);
 		const entry = this.entries.get(feedId)?.get(entryId);
 		if (!entry || !entry.pendingContentHtml || entry.pendingContentHash !== expectedHash) return entry ?? null;
 		entry.contentHtml = entry.pendingContentHtml;
@@ -613,18 +698,35 @@ export class FeedStore {
 	}
 
 	async flush(): Promise<void> {
+		await this.flushOrThrow().catch(() => undefined);
+	}
+
+	/** 自动化与迁移需要知道是否真的落盘；普通后台保存继续用宽松 flush。 */
+	async flushOrThrow(): Promise<void> {
 		for (const timer of this.saveTimers.values()) window.clearTimeout(timer);
 		this.saveTimers.clear();
-		await Promise.all([...this.dirty].map(feedId => this.writeFeed(feedId).catch(() => undefined)));
+		await Promise.all([...this.dirty].map(feedId => this.writeFeed(feedId)));
 		if (this.indexDirty && (this.feeds.size > 0 || this.initialized)) await this.writeIndex();
 	}
 
-	private async readJson<T>(path: string): Promise<T | null> {
+	private async readJsonResult<T>(path: string): Promise<
+		| { status: "ok"; value: T }
+		| { status: "missing"; value: null }
+		| { status: "error"; value: null; error: string }
+	> {
+		const normalized = normalizePath(path);
 		try {
-			const raw = await this.vault.adapter.read(normalizePath(path));
-			return JSON.parse(raw) as T;
-		} catch {
-			return null;
+			const raw = await this.vault.adapter.read(normalized);
+			try {
+				return { status: "ok", value: JSON.parse(raw) as T };
+			} catch (error) {
+				return { status: "error", value: null, error: error instanceof Error ? error.message : String(error) };
+			}
+		} catch (error) {
+			const exists = await this.vault.adapter.exists(normalized).catch(() => true);
+			return exists
+				? { status: "error", value: null, error: error instanceof Error ? error.message : String(error) }
+				: { status: "missing", value: null };
 		}
 	}
 
@@ -766,6 +868,7 @@ export class FeedStore {
 	}
 
 	private scheduleFeedWrite(feedId: string): void {
+		if (this.indexBlocked || this.blockedFeeds.has(feedId)) return;
 		this.dirty.add(feedId);
 		const timer = this.saveTimers.get(feedId);
 		if (timer) window.clearTimeout(timer);
@@ -776,6 +879,7 @@ export class FeedStore {
 	}
 
 	private async writeIndex(): Promise<void> {
+		this.assertIndexWritable();
 		await this.ensureFolder();
 		const payload: FeedIndexFile = {
 			version: 1,
@@ -788,6 +892,7 @@ export class FeedStore {
 
 	/** 订阅元数据写盘（瘦格式，不含正文 HTML）。 */
 	private async writeFeed(feedId: string): Promise<void> {
+		this.assertFeedWritable(feedId);
 		await this.ensureFolder();
 		const payload: FeedFileData = {
 			version: 2,
@@ -800,5 +905,14 @@ export class FeedStore {
 			JSON.stringify(payload, null, "\t"),
 		);
 		this.dirty.delete(feedId);
+	}
+
+	private assertIndexWritable(): void {
+		if (this.indexBlocked) throw new Error(this.loadError ?? "订阅索引暂时无法读取");
+	}
+
+	private assertFeedWritable(feedId: string): void {
+		this.assertIndexWritable();
+		if (this.blockedFeeds.has(feedId)) throw new Error(`订阅「${this.feeds.get(feedId)?.title ?? feedId}」暂时无法读取`);
 	}
 }

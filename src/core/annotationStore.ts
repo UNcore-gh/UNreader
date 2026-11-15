@@ -31,13 +31,34 @@ export interface AnnotationFileData {
 
 const HEAD_HL = "## 高亮";
 const HEAD_BM = "## 书签";
+const MANAGED_START = "<!-- unreader:annotations:start -->";
+const MANAGED_END = "<!-- unreader:annotations:end -->";
+
+export interface AnnotationReadResult {
+	data: AnnotationFileData
+	/** 本次读到的原文；写入时会以它为三方合并基线。 */
+	raw: string
+	exists: boolean
+}
+
+export class AnnotationReadError extends Error {
+	constructor(readonly path: string, readonly cause: unknown) {
+		super(`无法读取标注笔记：${path}`);
+		this.name = "AnnotationReadError";
+	}
+}
+
+export class AnnotationConflictError extends Error {
+	constructor(readonly path: string) {
+		super("标注已在其他位置发生变化，请刷新后重试");
+		this.name = "AnnotationConflictError";
+	}
+}
 
 /** 旁车笔记目录：固定在插件目录下（见 core/paths.ts 的 NOTES_FOLDER 注释）。
  *
- *  **为什么不再跟随书籍位置**：书允许放在库里任意位置之后，「笔记跟着书走」就没有
- *  确定解 —— 同名不同目录的两本书会撞同一个笔记文件；而按路径 hash 命名又会把
- *  「UNreader/Data/Notes/书名.md」这种可读、可手动编辑的形态毁掉。代价是多本同名书共用
- *  一份笔记（此前同一个笔记文件夹内也有同样的问题）。
+ *  书允许放在库里任意位置，因此笔记不跟随路径。稳定书籍身份负责把移动/改名后的书
+ *  继续指向同一条笔记；真正同名时由 bookIdentity 追加短 ID，绝不再让两本书共用一份。
  *
  *  该目录默认登记进官方的「排除文件」（见 `core/exclusions.ts`）：它只是不参与搜索/
  *  图谱，**文件本身与所有读写路径都不受影响**（本模块按路径 `getFileByPath` 取文件）。
@@ -46,9 +67,10 @@ function notesDirFor(): string {
 	return NOTES_FOLDER;
 }
 
-export function annotationFileFor(bookFile: TFile): string {
+export function annotationFileFor(bookFile: TFile, bookId?: string): string {
 	const base = bookFile.basename.replace(/[\\/:*?"<>|#^[\]]/g, "_");
-	return normalizePath(`${notesDirFor()}/${base}.md`);
+	const suffix = bookId ? `--${bookId.replace(/^book-/, "").replace(/[^a-z0-9]/gi, "").slice(0, 12)}` : "";
+	return normalizePath(`${notesDirFor()}/${base}${suffix}.md`);
 }
 
 /** Feed 文章旁车笔记的稳定路径：只由 feedId + entryId 派生，标题变化不会换文件。 */
@@ -99,7 +121,12 @@ export function parseAnnotations(raw: string): AnnotationFileData {
 	const result: AnnotationFileData = { highlights: [], bookmarks: [] };
 	let section: "hl" | "bm" | null = null;
 	let lastHighlight: StoredHighlight | null = null;
-	for (const line of raw.split(/\r?\n/)) {
+	const start = raw.indexOf(MANAGED_START);
+	const end = start < 0 ? -1 : raw.indexOf(MANAGED_END, start + MANAGED_START.length);
+	const source = start >= 0 && end > start
+		? raw.slice(start + MANAGED_START.length, end)
+		: raw;
+	for (const line of source.split(/\r?\n/)) {
 		const trimmed = line.trim();
 		if (trimmed === HEAD_HL) {
 			section = "hl";
@@ -156,8 +183,8 @@ export function parseAnnotations(raw: string): AnnotationFileData {
 	return result;
 }
 
-function serialize(data: AnnotationFileData, bookLink: string): string {
-	const lines: string[] = ["---", `book: "[[${bookLink}]]"`, "---", ""];
+function managedBody(data: AnnotationFileData): string {
+	const lines: string[] = [MANAGED_START];
 	lines.push(HEAD_HL, "");
 	for (const h of data.highlights) {
 		lines.push(`- ${h.id} | ${h.color} | ${h.anchor} | ${h.text} ^hl${h.id}${h.contentHash ? ` | ${h.contentHash}` : ""}`);
@@ -167,11 +194,222 @@ function serialize(data: AnnotationFileData, bookLink: string): string {
 	for (const b of data.bookmarks) {
 		lines.push(`- ${b.id} | ${b.anchor} | ${b.label} ^bm${b.id}${b.contentHash ? ` | ${b.contentHash}` : ""}`);
 	}
-	lines.push("");
+	lines.push("", MANAGED_END);
 	return lines.join("\n");
 }
 
-async function ensureNote(vault: Vault, path: string, bookLink: string): Promise<TFile | null> {
+interface NoteParts {
+	before: string
+	after: string
+	frontmatter: string[]
+	bodyLines: string[]
+}
+
+function splitNote(raw: string): NoteParts {
+	const lines = raw.replace(/\r\n?/g, "\n").split("\n");
+	const frontmatter: string[] = [];
+	let bodyStart = 0;
+	if (lines[0]?.trim() === "---") {
+		const end = lines.findIndex((line, index) => index > 0 && line.trim() === "---");
+		if (end > 0) {
+			frontmatter.push(...lines.slice(0, end + 1));
+			bodyStart = end + 1;
+		}
+	}
+	const bodyLines = lines.slice(bodyStart);
+	const start = bodyLines.findIndex(line => line.trim() === MANAGED_START);
+	const end = start < 0 ? -1 : bodyLines.findIndex((line, index) => index > start && line.trim() === MANAGED_END);
+	if (start >= 0 && end > start) {
+		return {
+			before: bodyLines.slice(0, start).join("\n").trimEnd(),
+			after: bodyLines.slice(end + 1).join("\n").trimStart(),
+			frontmatter,
+			bodyLines,
+		};
+	}
+
+	// 旧版没有标记：只移除由本插件生成的标题、条目和评论行。其余内容视为用户正文，
+	// 原样保留在受管理区域之外，避免升级后的第一次保存把用户手写内容抹掉。
+	const before: string[] = [];
+	const preserved: string[] = [];
+	let inManagedSection = false;
+	let lastWasHighlight = false;
+	for (const line of bodyLines) {
+		const trimmed = line.trim();
+		if (trimmed === HEAD_HL) {
+			inManagedSection = true;
+			lastWasHighlight = false;
+			continue;
+		}
+		if (trimmed === HEAD_BM) {
+			inManagedSection = true;
+			lastWasHighlight = false;
+			continue;
+		}
+		if (!inManagedSection) {
+			before.push(line);
+			continue;
+		}
+		if (HL_LINE.test(trimmed)) {
+			lastWasHighlight = true;
+			continue;
+		}
+		if (BM_LINE.test(trimmed)) {
+			lastWasHighlight = false;
+			continue;
+		}
+		if (lastWasHighlight && COMMENT_LINE.test(line) && /^[ \t]/.test(line)) continue;
+		if (!trimmed) continue;
+		preserved.push(line);
+	}
+	return {
+		before: before.join("\n").trimEnd(),
+		after: preserved.join("\n").trimStart(),
+		frontmatter,
+		bodyLines,
+	};
+}
+
+function frontmatterWithIdentity(existing: readonly string[], bookLink: string, bookId?: string): string[] {
+	if (!existing.length) {
+		return [
+			"---",
+			`book: "[[${bookLink}]]"`,
+			...(bookId ? [`unreader-book-id: "${bookId}"`] : []),
+			"---",
+		];
+	}
+	const out = [...existing];
+	let bookIndex = -1;
+	let idIndex = -1;
+	for (let i = 1; i < out.length - 1; i++) {
+		const line = out[i] ?? "";
+		if (/^book\s*:/.test(line)) {
+			if (bookIndex < 0) bookIndex = i;
+			else out.splice(i--, 1);
+		} else if (/^unreader-book-id\s*:/.test(line)) {
+			if (idIndex >= 0) out.splice(i--, 1);
+			else idIndex = i;
+		}
+	}
+	const bookLine = `book: "[[${bookLink}]]"`;
+	if (bookIndex >= 0) {
+		out[bookIndex] = bookLine;
+	} else {
+		bookIndex = Math.max(1, out.length - 1);
+		out.splice(bookIndex, 0, bookLine);
+		if (idIndex >= bookIndex) idIndex++;
+	}
+	// 未传 bookId 时只更新书籍链接，不能顺手删掉别处已经写入的身份字段。
+	// Feed 笔记本来就没有该字段；书籍调用方漏传时也必须保持幂等。
+	if (bookId !== undefined) {
+		const line = `unreader-book-id: "${bookId}"`;
+		if (idIndex >= 0) out[idIndex] = line;
+		else out.splice(Math.max(1, out.length - 1), 0, line);
+	}
+	return out;
+}
+
+function renderNote(raw: string, data: AnnotationFileData, bookLink: string, bookId?: string): string {
+	const parts = splitNote(raw);
+	const chunks = [
+		frontmatterWithIdentity(parts.frontmatter, bookLink, bookId).join("\n"),
+		parts.before,
+		managedBody(data),
+		parts.after,
+	].filter(chunk => chunk.trim().length > 0);
+	return `${chunks.join("\n\n")}\n`;
+}
+
+/** 从旁车笔记 frontmatter 取书籍链接；书籍身份迁移用。 */
+export function annotationBookLinkFromRaw(raw: string): string | null {
+	const match = /^book\s*:\s*"\[\[([^\]|]+)(?:\|[^\]]+)?\]\]"\s*$/m.exec(raw);
+	return match?.[1]?.trim() || null;
+}
+
+export function annotationBookIdFromRaw(raw: string): string | null {
+	const match = /^unreader-book-id\s*:\s*"([^"]+)"\s*$/m.exec(raw);
+	return match?.[1]?.trim() || null;
+}
+
+const baselines = new WeakMap<Vault, Map<string, string>>();
+const BASELINE_LIMIT = 128;
+
+function baselineFor(vault: Vault): Map<string, string> {
+	let map = baselines.get(vault);
+	if (!map) {
+		map = new Map();
+		baselines.set(vault, map);
+	}
+	return map;
+}
+
+function rememberBaseline(vault: Vault, path: string, raw: string): void {
+	const map = baselineFor(vault);
+	map.delete(path);
+	map.set(path, raw);
+	while (map.size > BASELINE_LIMIT) {
+		const oldest = map.keys().next().value;
+		if (typeof oldest !== "string") break;
+		map.delete(oldest);
+	}
+}
+
+function itemEqual<T extends { id: number }>(a: T | undefined, b: T | undefined): boolean {
+	if (!a || !b) return a === b;
+	const normalize = (item: T): unknown => {
+		const { stale: _stale, ...rest } = item as T & { stale?: boolean };
+		return rest;
+	};
+	return JSON.stringify(normalize(a)) === JSON.stringify(normalize(b));
+}
+
+function mergeItems<T extends { id: number }>(
+	base: readonly T[],
+	desired: readonly T[],
+	current: readonly T[],
+): T[] {
+	const ids = new Set<number>([
+		...base.map(item => item.id),
+		...desired.map(item => item.id),
+		...current.map(item => item.id),
+	]);
+	const baseMap = new Map(base.map(item => [item.id, item] as const));
+	const desiredMap = new Map(desired.map(item => [item.id, item] as const));
+	const currentMap = new Map(current.map(item => [item.id, item] as const));
+	const merged = new Map<number, T>();
+	for (const id of ids) {
+		const b = baseMap.get(id);
+		const d = desiredMap.get(id);
+		const c = currentMap.get(id);
+		if (itemEqual(d, b)) {
+			if (c) merged.set(id, c);
+			continue;
+		}
+		if (itemEqual(c, b) || itemEqual(c, d)) {
+			if (d) merged.set(id, d);
+			continue;
+		}
+		throw new AnnotationConflictError("");
+	}
+	const order = [
+		...desired.map(item => item.id),
+		...current.map(item => item.id).filter(id => !desiredMap.has(id)),
+	];
+	return [...new Set(order)].flatMap(id => {
+		const item = merged.get(id);
+		return item ? [item] : [];
+	});
+}
+
+function mergeAnnotationData(base: AnnotationFileData, desired: AnnotationFileData, current: AnnotationFileData): AnnotationFileData {
+	return {
+		highlights: mergeItems(base.highlights, desired.highlights, current.highlights),
+		bookmarks: mergeItems(base.bookmarks, desired.bookmarks, current.bookmarks),
+	};
+}
+
+async function ensureNote(vault: Vault, path: string, bookLink: string, bookId?: string): Promise<TFile> {
 	const existing = vault.getFileByPath(path);
 	if (existing) return existing;
 	const dir = path.includes("/") ? path.slice(0, path.lastIndexOf("/")) : "/";
@@ -181,10 +419,13 @@ async function ensureNote(vault: Vault, path: string, bookLink: string): Promise
 		// already exists
 	}
 	try {
-		return await vault.create(path, serialize({ highlights: [], bookmarks: [] }, bookLink));
+		const file = await vault.create(path, renderNote("", { highlights: [], bookmarks: [] }, bookLink, bookId));
+		rememberBaseline(vault, path, await vault.read(file));
+		return file;
 	} catch (e) {
-		console.error("[UNreader] create annotation note failed", e);
-		return null;
+		const raced = vault.getFileByPath(path);
+		if (raced) return raced;
+		throw new AnnotationReadError(path, e);
 	}
 }
 
@@ -194,31 +435,70 @@ export async function writeAnnotations(
 	path: string,
 	bookLink: string,
 	data: AnnotationFileData,
+	expectedRaw?: string,
+	bookId?: string,
 ): Promise<void> {
-	const file = await ensureNote(vault, path, bookLink);
+	const known = vault.getFileByPath(path);
+	const file = expectedRaw === undefined && !known
+		? await ensureNote(vault, path, bookLink, bookId)
+		: known;
 	if (!file) throw new Error("annotation note unavailable");
-	await vault.process(file, () => serialize(data, bookLink));
+	const baseRaw = expectedRaw ?? baselineFor(vault).get(path) ?? await vault.read(file).catch(error => {
+		throw new AnnotationReadError(path, error);
+	});
+	const baseData = parseAnnotations(baseRaw);
+	let written = "";
+	await vault.process(file, raw => {
+		let merged: AnnotationFileData;
+		try {
+			merged = mergeAnnotationData(baseData, data, parseAnnotations(raw));
+		} catch (error) {
+			if (error instanceof AnnotationConflictError) throw new AnnotationConflictError(path);
+			throw error;
+		}
+		written = renderNote(raw, merged, bookLink, bookId);
+		return written;
+	});
+	rememberBaseline(vault, path, written);
 }
 
+export async function readAnnotations(
+	vault: Vault,
+	path: string,
+	bookLink: string,
+): Promise<AnnotationReadResult> {
+	const file = vault.getFileByPath(path);
+	if (!file) {
+		rememberBaseline(vault, path, "");
+		return { data: { highlights: [], bookmarks: [] }, raw: "", exists: false };
+	}
+	try {
+		const raw = await vault.read(file);
+		rememberBaseline(vault, path, raw);
+		const data = parseAnnotations(raw);
+		// 老笔记的条目行可能没有 `^hl` / `^bm` 块锚点。解析仍能读出来，但原生预览
+		// 无法定位到目标块；沿用旧版的自动迁移，并且写盘仍走受管理区块与三方合并，
+		// 不覆盖用户正文。
+		const needsRewrite = (data.highlights.length > 0 && !/\^hl\d+/.test(raw))
+			|| (data.bookmarks.length > 0 && !/\^bm\d+/.test(raw));
+		if (needsRewrite) {
+			const bookId = annotationBookIdFromRaw(raw) ?? undefined;
+			queueMicrotask(() => {
+				void writeAnnotations(vault, path, bookLink, data, raw, bookId)
+					.catch(error => console.warn("[UNreader] 迁移旧标注块锚点失败", error));
+			});
+		}
+		return { data, raw, exists: true };
+	} catch (e) {
+		throw new AnnotationReadError(path, e);
+	}
+}
+
+/** 兼容入口：读失败现在会明确抛出，不再伪装成“没有标注”。 */
 export async function loadAnnotations(
 	vault: Vault,
 	path: string,
 	bookLink: string,
 ): Promise<AnnotationFileData> {
-	try {
-		const file = vault.getFileByPath(path);
-		if (!file) return { highlights: [], bookmarks: [] };
-		const raw = await vault.read(file);
-		const parsed = parseAnnotations(raw);
-		// 迁移：老笔记缺少块锚点（^hl/^bm）时自动重写，避免原生预览无法定位到目标块
-		const hasHL = /\^hl\d+/.test(raw);
-		const needsRewrite = (parsed.highlights.length > 0 && !hasHL) || (parsed.bookmarks.length > 0 && !/\^bm\d+/.test(raw));
-		if (needsRewrite) {
-			queueMicrotask(() => void writeAnnotations(vault, path, bookLink, parsed).catch(e => console.error("[UNreader] migrate block anchors failed", e)));
-		}
-		return parsed;
-	} catch (e) {
-		console.error("[UNreader] load annotations failed", e);
-		return { highlights: [], bookmarks: [] };
-	}
+	return (await readAnnotations(vault, path, bookLink)).data;
 }

@@ -44,6 +44,9 @@ import { countWords } from "./core/wordCount";
 import { annotationFileFor, annotationFileForFeed, loadAnnotations, sanitizeBookmarkLabel, writeAnnotations, type AnnotationFileData, type StoredHighlight } from "./core/annotationStore";
 import { collectHighlights } from "./core/mdSelectionMap";
 import { applyEditPlan, applyVaultEditPlan } from "./core/mdHighlightWrite";
+import { createStableAutomationFacade, createUnreaderAutomationApi, type UnreaderAutomationApi } from "./core/automationApi";
+import { BookIdentityStore } from "./core/bookIdentity";
+import { publishReaderDataChange, subscribeReaderDataChanges, type ReaderDataChange } from "./core/readerDataEvents";
 import { normalizeNativeSidebarMode, resolveNativeSidebarCardIntent, resolveNativeSidebarPickerMode, selectNativeSidebarKeeperIndex, selectPreferredReaderIndex, shouldMigrateNativeSidebarGroup } from "./core/nativeSidebarState";
 import { releaseNoteForVersion, releaseNoteVersionsNewestFirst, shouldPromptReleaseNotes } from "./core/releaseNotes";
 import { VIEW_TYPE_UNREADER_SIDEBAR, UNreaderSidebarView } from "./ui/nativeSidebarView";
@@ -77,6 +80,7 @@ interface NativeAnnotationBrowseInfo {
 	filePath: string
 	annotationPath: string
 	bookLink: string
+	bookId?: string
 	feedRef?: { feedId: string; entryId: string; kind?: FeedEntryKind }
 }
 
@@ -174,6 +178,8 @@ export default class UNreaderPlugin extends Plugin {
 	settings!: UNreaderSettings;
 	/** 阅读进度库：每书一个小 JSON 文件（UNreader/Data/Progress/），随库同步到各端 */
 	progress!: ProgressStore;
+	/** 书籍稳定身份：路径只是别名，移动和改名不改变进度/标注身份。 */
+	bookIdentity!: BookIdentityStore;
 	/** 外观预设库：每个预设一个文件夹（UNreader/Data/Presets/<名>/），随库同步到各端 */
 	presetStore!: PresetStore;
 	/** 共享资源库：字体与图片只存一份，预设/设备保存引用 */
@@ -197,6 +203,7 @@ export default class UNreaderPlugin extends Plugin {
 
 	private saveTimer: number | null = null;
 	private saving = false;
+	private saveChain: Promise<void> = Promise.resolve();
 	/** 字体 blob 缓存：路径 → (mtime, size, blob URL, format)，避免每次开书重读字体文件 */
 	private fontBlobCache = new Map<string, { mtime: number; size: number; uri: string; format: string }>();
 	private fontRegistrySig = "";
@@ -215,6 +222,9 @@ export default class UNreaderPlugin extends Plugin {
 	// Obsidian 的 getActiveViewOfType 可能解析不到活动视图（表现为命令面板
 	// 首次回车不执行、点过书页后又失效），用自跟踪视图做兜底
 	private lastReader: UNreaderView | null = null;
+	private automationApi: UnreaderAutomationApi | null = null;
+	/** 对第三方保持同一个对象；内部在数据目录切换后重建代理。 */
+	private automationFacade: UnreaderAutomationApi | null = null;
 	private nativeSidebarContext: NativeSidebarContext | null = null;
 	private nativeSidebarAnnotationTarget: NativeSidebarContext | null = null;
 	private nativeSidebarAnnotationSequence = 0;
@@ -345,6 +355,7 @@ export default class UNreaderPlugin extends Plugin {
 
 		// 阅读进度库：加载库内进度文件（开书取位置需要），并把旧 data.json positions 迁移为文件
 		this.progress = new ProgressStore(this.app.vault, PROGRESS_FOLDER, this.deviceScope());
+		this.bookIdentity = new BookIdentityStore(this.app.vault);
 
 		// 阅读统计库（阅读时长）。**不必 await**：卡片渲染时读不到就显示「暂无统计」，
 		// 读完后下一次刷新自然补上（与进度库不同，统计不是开书的前置条件）。
@@ -362,6 +373,11 @@ export default class UNreaderPlugin extends Plugin {
 		this.feedStore = new FeedStore(this.app.vault, this.deviceScope(), this.feedCachePluginDir());
 		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
 		this.feedMediaStore = new FeedMediaStore(() => this.settings.feeds);
+		this.register(subscribeReaderDataChanges(change => {
+			void this.onReaderDataChange(change).catch(error => {
+				console.error("[UNreader] 处理阅读数据变更失败", change.kind, error);
+			});
+		}));
 
 		// ⚠️ 这里**绝不能再 await**（2026-09-11 性能回归点）。
 		// 进度库 + 预设库合计 20+ 次文件读取（实测本机：14 个进度文件 + 5 个预设），
@@ -417,7 +433,7 @@ export default class UNreaderPlugin extends Plugin {
 			} catch (e) {
 				console.warn("[UNreader] 旧版数据文件夹整理失败（继续读存储）", e);
 			}
-			// ③ 容器化整理（2026-09-19）：旧版把六个数据目录平铺在数据根下
+			// ③ 容器化整理（2026-09-19）：旧版把数据目录平铺在数据根下
 			//    （`UNreader/Progress/…`），现在统一收进 `Data/`。必须排在 heal 之前：
 			//    heal 的内容证据要按收敛后的布局落位，刚搬回来的目录才不会再散一次。
 			//    失败不阻断后续（数据仍在原地，只是布局没收敛，下次启动再试）。
@@ -492,6 +508,9 @@ export default class UNreaderPlugin extends Plugin {
 			const msIdle = Date.now() - tIdle;
 			const tRead = Date.now();
 			await Promise.all([
+				this.bookIdentity.init().catch(e => {
+					console.warn("[UNreader] 书籍身份索引初始化失败", e);
+				}),
 				this.resourceStore.init().catch(e => {
 					console.warn("[UNreader] 共享资源库初始化失败", e);
 				}),
@@ -518,6 +537,11 @@ export default class UNreaderPlugin extends Plugin {
 					console.warn("[UNreader] 阅读统计初始化失败", e);
 				}),
 			]);
+				const feedLoadError = this.feedStore.getLoadError();
+				if (feedLoadError) {
+					console.warn("[UNreader] 订阅数据进入只读保护", feedLoadError);
+					new Notice(`${feedLoadError}。为保护原数据，已暂停订阅写入；可从订阅刷新入口重试。`);
+				}
 			await this.migrateLegacyImageResources().catch(e => {
 				console.warn("[UNreader] 迁移共享图片资源失败", e);
 			});
@@ -563,6 +587,7 @@ export default class UNreaderPlugin extends Plugin {
 		this.registerEvent(this.app.vault.on("delete", f => {
 			const bookshelfChanged = this.pruneBookshelfPaths(f.path);
 			const notesChanged = this.pruneMarkdownNotePaths(f.path);
+			this.bookIdentity.detach(f.path);
 			if (!bookshelfChanged && !notesChanged) return;
 			void this.persistData();
 			if (bookshelfChanged) this.refreshBookshelfPanels();
@@ -574,6 +599,27 @@ export default class UNreaderPlugin extends Plugin {
 		this.registerEvent(this.app.vault.on("rename", (f, oldPath) => {
 			const bookshelfChanged = this.migrateBookshelfPaths(oldPath, f.path);
 			const notesChanged = this.migrateMarkdownNotePaths(oldPath, f.path);
+			const annotationNoteChanged = this.bookIdentity.remapNotePath(oldPath, f.path);
+			const identityMoves = this.bookIdentity.remap(oldPath, f.path);
+			if (identityMoves.length) {
+				void (async () => {
+					for (const move of identityMoves) {
+						this.progress.bindIdentity(move.oldPath, move.id);
+						await this.progress.move(move.oldPath, move.newPath).catch(e => {
+							console.warn("[UNreader] 书籍改名后迁移进度失败", move.oldPath, move.newPath, e);
+						});
+					}
+				})();
+			}
+			if (annotationNoteChanged) {
+				for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+					if (!(leaf.view instanceof UNreaderView)) continue;
+					leaf.view.refreshStorageLocation();
+					void leaf.view.retryAnnotationsRead(false);
+				}
+				const annotationTargetKey = this.nativeSidebarAnnotationTarget?.key;
+				if (annotationTargetKey) this.refreshNativeSidebarAnnotations(annotationTargetKey);
+			}
 			if (!bookshelfChanged && !notesChanged) return;
 			void this.persistData();
 			if (bookshelfChanged) this.refreshBookshelfPanels();
@@ -798,6 +844,11 @@ this.registerCommands();
 			id: "toggle-annotations",
 			name: t("cmdToggleAnnotations"),
 			callback: () => withReader(view => view.toggleAnnotations()),
+		});
+		this.addCommand({
+			id: "retry-annotations",
+			name: t("cmdRetryAnnotations"),
+			callback: () => withReader(view => { void view.retryAnnotationsRead(); }),
 		});
 		this.addCommand({
 			id: "toggle-bookshelf",
@@ -1032,6 +1083,7 @@ this.registerCommands();
 		// 可能还没把这一拍的位置递给进度库，而下面那行只 flush「已经进库的」
 		// —— 少了这一步，「读到一半直接退出 Obsidian」就丢掉最后那段阅读位置。
 		try { this.lastReader?.forceFlushPosition(); } catch { /* ignore */ }
+		void this.bookIdentity?.flush();
 		// 待写盘的进度立即落库（卸载后没有机会再写）
 		void this.progress?.flush();
 		// 阅读计时：先停表结算（把最后这一段补进统计），再落盘。
@@ -1198,13 +1250,12 @@ this.registerCommands();
 	 *  `migrate=false` 时只切不搬（用户明确选择「文件我自己处理」）。
 	 *
 	 *  **书籍一律不搬**：书放在库里任何位置都能读（`bookService.getBookFiles` 全库扫描），
-	 *  所以进度键（书籍完整路径的 djb2 hash）、书架顺序 / 置顶、笔记 frontmatter 里的
-	 *  书籍链接、他端的同步身份**全都不需要改** —— 这正是「只搬数据」比「搬书」简单
-	 *  且安全的地方。搬的是 `paths.ts` 里的 `DATA_SUBFOLDERS`：
-	 *  Progress / Presets / Fonts / Resources / Notes。
+	 *  所以书架顺序 / 置顶、笔记 frontmatter 里的书籍链接、他端的同步身份**全都不需要改**
+	 *  —— 这正是「只搬数据」比「搬书」简单且安全的地方。搬的是 `paths.ts` 里的
+	 *  `DATA_SUBFOLDERS`：Progress / Presets / Fonts / Resources / Notes / Feeds / Stats / Identity。
 	 *
 	 *  顺序有硬约束（每一步都是为了上一步的结果不被下面覆盖）：
-	 *   ① 先把两份存储的去抖写入 `flush` 到**旧根** —— 它们构造时就捕获了旧目录，
+	 *   ① 先把各份存储的去抖写入 `flush` 到**旧根** —— 它们构造时就捕获了旧目录，
 	 *      下面重建后未落盘的改动会写到新根（落错地方）甚至丢失；
 	 *   ② 迁移（`migrate=false` 时跳过）；失败即中止，**不切根**，保持旧状态可用；
 	 *   ③ `setConfiguredDataFolder` —— 活绑定生效，此后所有路径读取立刻指向新根；
@@ -1228,6 +1279,15 @@ this.registerCommands();
 		await this.whenDataReady().catch(() => undefined);
 		await this.progress.flush().catch(() => undefined);
 		await this.presetStore.flush().catch(() => undefined);
+		try {
+			await Promise.all([
+				this.bookIdentity.flush(),
+				this.feedStore.flushOrThrow(),
+				this.readingStats.flush(),
+			]);
+		} catch (error) {
+			return failed(`保存当前书籍身份、订阅或阅读统计失败，已取消切换：${error instanceof Error ? error.message : String(error)}`);
+		}
 
 		let moved = 0;
 		let removedEmpty = 0;
@@ -1271,6 +1331,7 @@ this.registerCommands();
 	private async rebuildStores(): Promise<void> {
 		try { this.resourceStore?.dispose(); } catch { /* ignore */ }
 		this.progress = new ProgressStore(this.app.vault, PROGRESS_FOLDER, this.deviceScope());
+		this.bookIdentity = new BookIdentityStore(this.app.vault);
 		// 统计库同样在构造期捕获目录 ⇒ 一起重建；重建前先把旧根那份待写盘的数据落地。
 		try { await this.readingStats?.flush(); } catch { /* ignore */ }
 		this.readingStats = new ReadingStatsStore(this.app.vault, STATS_FOLDER, this.deviceScope());
@@ -1282,6 +1343,7 @@ this.registerCommands();
 		this.feedService = new FeedService(this.feedStore, () => this.settings.feeds);
 		this.feedMediaStore = new FeedMediaStore(() => this.settings.feeds);
 		await Promise.all([
+			this.bookIdentity.init().catch(e => console.warn("[UNreader] 书籍身份索引重建失败", e)),
 			this.progress.init(this.settings.positions).then(n => {
 				// 与 onload 的链首同一口径：迁移完就清空旧字段（见那里的长注释）
 				if (n > 0) {
@@ -1293,6 +1355,16 @@ this.registerCommands();
 			this.resourceStore.init().catch(e => console.warn("[UNreader] 共享资源库重建失败", e)),
 			this.feedStore.init().catch(e => console.warn("[UNreader] 订阅库重建失败", e)),
 		]);
+		this.automationApi = null;
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (!(leaf.view instanceof UNreaderView)) continue;
+			const path = leaf.view.file?.path;
+			if (!path) continue;
+			const identity = this.bookIdentity.getKnown(path);
+			if (identity) this.progress.bindIdentity(path, identity.id);
+			leaf.view.refreshStorageLocation();
+			void leaf.view.retryAnnotationsRead(false);
+		}
 		// 字体文件路径全变了：重扫会把新路径建成新 blob，并回收旧路径的缓存（见 doRefreshCustomFonts）
 		await this.refreshCustomFonts().catch(e => console.warn("[UNreader] 字体重扫失败", e));
 	}
@@ -1661,7 +1733,12 @@ this.registerCommands();
 			const filePath = key.slice("book:".length);
 			const file = this.app.vault.getFileByPath(filePath);
 			if (!(file instanceof TFile) || !isReaderBookFile(file) || !isBookExtEnabled(file.extension, this.settings.disabledFormats)) return null;
-			return { key, kind: "book", title: file.basename, pickerMode: "bookshelf", filePath: file.path, annotationPath: annotationFileFor(file), bookLink: file.path };
+			const identity = this.bookIdentity.getKnown(file.path);
+			return {
+				key, kind: "book", title: file.basename, pickerMode: "bookshelf", filePath: file.path,
+				annotationPath: identity?.notePath ?? annotationFileFor(file), bookLink: file.path,
+				bookId: identity?.id,
+			};
 		}
 		if (key.startsWith("markdown:")) {
 			const filePath = key.slice("markdown:".length);
@@ -1685,6 +1762,31 @@ this.registerCommands();
 			};
 		}
 		return null;
+	}
+
+	/** 书籍标注入口需要先完成稳定身份解析；否则同名书会在“尚未打开正文”时仍落到同一条旧笔记。 */
+	private async resolvedNativeAnnotationBrowseInfo(key: string): Promise<NativeAnnotationBrowseInfo | null> {
+		const info = this.nativeAnnotationBrowseInfo(key);
+		if (!info || info.kind !== "book") return info;
+		await this.bookIdentity.init().catch(() => undefined);
+		const file = this.app.vault.getFileByPath(info.filePath);
+		if (!(file instanceof TFile)) return info;
+		try {
+			const identity = await this.bookIdentity.resolve(file);
+			if (identity.recoveredFrom) {
+				this.progress.bindIdentity(identity.recoveredFrom, identity.record.id);
+				await this.progress.move(identity.recoveredFrom, file.path).catch(() => undefined);
+			}
+			this.progress.bindIdentity(file.path, identity.record.id);
+			return {
+				...info,
+				annotationPath: identity.record.notePath,
+				bookId: identity.record.id,
+			};
+		} catch (error) {
+			console.warn("[UNreader] 解析书籍标注身份失败，暂时使用旧笔记路径", file.path, error);
+			return info;
+		}
 	}
 
 	private markdownAnnotationData(source: string): AnnotationFileData {
@@ -1804,7 +1906,7 @@ this.registerCommands();
 				await this.refreshNativeSidebarAnnotationTarget(info.key);
 				return;
 			}
-			await writeAnnotations(this.app.vault, info.annotationPath, info.bookLink, fresh);
+				await writeAnnotations(this.app.vault, info.annotationPath, info.bookLink, fresh, undefined, info.bookId);
 			if (info.kind === "feed" && info.feedRef) {
 				await this.feedStore.updateEntryState(info.feedRef.feedId, info.feedRef.entryId, {
 					hasAnnotations: fresh.highlights.length > 0 || fresh.bookmarks.length > 0,
@@ -1873,7 +1975,7 @@ this.registerCommands();
 	private async refreshNativeSidebarAnnotationTarget(key: string): Promise<void> {
 		if (this.nativeSidebarAnnotationTarget?.key !== key) return;
 		const sequence = this.nativeSidebarAnnotationSequence;
-		const info = this.nativeAnnotationBrowseInfo(key);
+		const info = await this.resolvedNativeAnnotationBrowseInfo(key);
 		if (!info) return;
 		try {
 			const target = await this.loadNativeAnnotationBrowseTarget(info);
@@ -2300,7 +2402,7 @@ this.registerCommands();
 
 	async openAnnotationsFromNativeSidebar(key: string): Promise<void> {
 		const sequence = ++this.nativeSidebarAnnotationSequence;
-		const info = this.nativeAnnotationBrowseInfo(key);
+		const info = await this.resolvedNativeAnnotationBrowseInfo(key);
 		if (!info) {
 			new Notice("内容不存在或对应格式已关闭，请刷新侧栏");
 			return;
@@ -2379,6 +2481,56 @@ this.registerCommands();
 	getCurrentReaderTitle(): string | null { return this.getActiveReader()?.getDisplayText() ?? null; }
 	getCurrentBookPath(): string | null { return this.getActiveReader()?.file?.path ?? null; }
 	getCurrentFeedRef(): { feedId: string; entryId: string } | null { return this.getActiveReader()?.getCurrentFeedRef() ?? null; }
+
+	/** UNcore 插件自动化接口：给 UNagent 等可信同库插件统一管理订阅、文章状态、
+	 *  书架、进度和标注。接口只返回结构化数据，不暴露 settings / data.json。 */
+	getAutomationAPI(): UnreaderAutomationApi {
+		if (!this.automationFacade) {
+			this.automationFacade = createStableAutomationFacade(() => this.currentAutomationApi());
+		}
+		return this.automationFacade;
+	}
+
+	/** 当前数据根对应的实现。UNagent 持有的是上面的稳定 facade，所以切目录后
+	 *  即使它还拿着旧对象，下一次 run 也会转发到新存储。 */
+	private currentAutomationApi(): UnreaderAutomationApi {
+		if (!this.automationApi) {
+			this.automationApi = createUnreaderAutomationApi({
+				app: this.app,
+				version: this.manifest.version,
+				getSettings: () => this.settings,
+				feedStore: this.feedStore,
+				feedService: this.feedService,
+				progress: this.progress,
+				identity: this.bookIdentity,
+				persistData: () => this.persistDataOrThrow(),
+				refreshFeedsPanels: () => this.refreshFeedsPanels(),
+				refreshBookshelfPanels: () => this.refreshBookshelfPanels(),
+				refreshAnnotations: async paths => {
+					for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+						if (leaf.view instanceof UNreaderView) {
+							await leaf.view.refreshAnnotationsFromExternalWrite([...paths]);
+						}
+					}
+				},
+				afterFeedRemoved: feedId => {
+					for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+						if (leaf.view instanceof UNreaderView && leaf.view.getCurrentFeedSource()?.feedId === feedId) {
+							leaf.view.showEmptyState();
+						}
+					}
+				},
+				openBook: async path => {
+					const file = this.app.vault.getFileByPath(normalizePath(path));
+					if (!(file instanceof TFile)) return false;
+					return !!(await this.openBook(file));
+				},
+				openFeed: async (feedId, entryId) => !!(await this.openFeedEntry(feedId, entryId)),
+			});
+		}
+		return this.automationApi;
+	}
+
 	/** 用阅读视图打开一本书。
 	 *
 	 *  常规路径是 `leaf.openFile(file)` —— 它按**扩展名注册表**路由到本视图。
@@ -2745,11 +2897,12 @@ this.registerCommands();
 		// 外观刷新必须**先于** reader 判空：他端同步来的字体 / 预设到齐后，纯 markdown
 		// 读者（没有活动阅读器）也要把抽屉排版刷新过来，否则会停在 --font-text 回落值上。
 		if (touchesPresets || touchesResources) this.refreshAppearanceEverywhere();
-		const reader = this.getActiveReader();
-		if (!reader) return;
-		if (touchesPresets || touchesResources) reader.refreshAppearancePanel();
-		if (touchesFeeds) reader.refreshFeedsPanel();
-		if (touchesNotes) await reader.refreshAnnotationsFromExternalWrite(paths);
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (!(leaf.view instanceof UNreaderView)) continue;
+			if (touchesPresets || touchesResources) leaf.view.refreshAppearancePanel();
+			if (touchesNotes) await leaf.view.refreshAnnotationsFromExternalWrite(paths);
+		}
+		if (touchesFeeds) this.refreshFeedsPanels();
 	}
 
 	promptAddFeed(): void {
@@ -2943,26 +3096,57 @@ this.registerCommands();
 		new BookshelfCategoryManagerModal(this.app, this).open();
 	}
 
+	private async onReaderDataChange(change: ReaderDataChange): Promise<void> {
+		if (change.kind === "feeds") {
+			this.applyFeedsPanelRefresh();
+			return;
+		}
+		if (change.kind === "bookshelf") {
+			this.applyBookshelfPanelRefresh();
+			return;
+		}
+		if (change.kind === "markdown-notes") {
+			this.applyMarkdownNotePanelRefresh();
+			return;
+		}
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (leaf.view instanceof UNreaderView) await leaf.view.refreshAnnotationsFromExternalWrite(change.paths);
+		}
+	}
+
 	private refreshBookshelfPanels(): void {
-		const reader = this.getActiveReader();
-		if (reader) reader.refreshBookshelfPanel();
-		else this.refreshNativeSidebarBookshelf();
+		publishReaderDataChange({ kind: "bookshelf" });
+	}
+
+	private applyBookshelfPanelRefresh(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (leaf.view instanceof UNreaderView) leaf.view.refreshBookshelfPanel(false);
+		}
+		this.refreshNativeSidebarBookshelf();
 	}
 
 	/** 星标/最近索引变化后刷新所有已挂载阅读器的「笔记」页；没有阅读器时是无操作。 */
 	private refreshMarkdownNotePanels(): void {
-		let hasReader = false;
+		publishReaderDataChange({ kind: "markdown-notes" });
+	}
+
+	private applyMarkdownNotePanelRefresh(): void {
 		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
 			const view = leaf.view;
-			if (view instanceof UNreaderView) { hasReader = true; view.refreshMarkdownNotesPanel(); }
+			if (view instanceof UNreaderView) view.refreshMarkdownNotesPanel(false);
 		}
-		if (!hasReader) this.refreshNativeSidebarNotes();
+		this.refreshNativeSidebarNotes();
 	}
 
 	private refreshFeedsPanels(): void {
-		const reader = this.getActiveReader();
-		if (reader) reader.refreshFeedsPanel();
-		else this.refreshNativeSidebarFeeds();
+		publishReaderDataChange({ kind: "feeds" });
+	}
+
+	private applyFeedsPanelRefresh(): void {
+		for (const leaf of this.app.workspace.getLeavesOfType(VIEW_TYPE_UNREADER)) {
+			if (leaf.view instanceof UNreaderView) leaf.view.refreshFeedsPanel(false);
+		}
+		this.refreshNativeSidebarFeeds();
 	}
 
 	/** 隔离墙去抖计时器（`scheduleNoteIndexPurge`；卸载时清，见 onload）。 */
@@ -3126,6 +3310,14 @@ this.registerCommands();
 			return;
 		}
 		await this.whenDataReady();
+		if (this.feedStore.getLoadError()) {
+			await this.feedStore.init();
+			const retryError = this.feedStore.getLoadError();
+			if (retryError) {
+				new Notice(`${retryError}。为保护原数据，本次没有发起订阅刷新。`);
+				return;
+			}
+		}
 		const results = await this.feedService.refreshAll(true);
 		if (!results.length) {
 			new Notice("没有可刷新的订阅（订阅源可能都已停用）");
@@ -3163,6 +3355,8 @@ this.registerCommands();
 	}
 
 	getPosition(path: string): BookPosition | undefined {
+		const identity = this.bookIdentity?.getKnown(path);
+		if (identity) this.progress.bindIdentity(path, identity.id);
 		return this.progress?.get(path) ?? this.settings.positions[path];
 	}
 
@@ -3183,12 +3377,11 @@ this.registerCommands();
 	}
 
 	savePosition(path: string, position: BookPosition, immediate = false): void {
-		// 内存镜像保留（三方插件/降级兼容），落盘走进度库文件（多端同步）
-		this.settings.positions[path] = position;
+		// 不再把新进度镜像回 data.json：分文件存储的意义就是避免高频全局冲突。
+		// 旧 positions 只作为启动迁移和降级读取来源，迁移完成后保持为空。
 		// immediate：关闭视图 / 退出应用 / 切后台那条路 —— 不去抖，直接写盘
 		if (immediate) this.progress?.saveNow(path, position);
 		else this.progress?.save(path, position);
-		this.scheduleSave();
 	}
 
 	scheduleSave(): void {
@@ -3208,6 +3401,21 @@ this.registerCommands();
 	}
 
 	async persistData(): Promise<void> {
+		try {
+			await this.persistDataOrThrow();
+		} catch (e) {
+			console.error("[UNreader] failed to save data", e);
+		}
+	}
+
+	/** 自动化接口与迁移需要调用方感知失败，不能沿用旧版“只记日志”的静默语义。 */
+	private async persistDataOrThrow(): Promise<void> {
+		const next = this.saveChain.catch(() => undefined).then(() => this.writeSettingsNow());
+		this.saveChain = next;
+		return next;
+	}
+
+	private async writeSettingsNow(): Promise<void> {
 		// 设置保存即同步诊断开关（设置页切开关后立刻生效/清缓冲）
 		debugLog.setDebugEnabled(!this.unloaded && this.settings.debugLog);
 		try {
@@ -3219,8 +3427,6 @@ this.registerCommands();
 			const overflow = !this.saveDeviceAppearance();
 			const payload = overflow ? this.settings : { ...this.settings, appearance: undefined };
 			await this.saveData(payload);
-		} catch (e) {
-			console.error("[UNreader] failed to save data", e);
 		} finally {
 			this.saving = false;
 		}
