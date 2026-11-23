@@ -106,6 +106,38 @@ function anyWantsToolbarHidden(): boolean {
 	return demands.some(demand => demand.toolbar && wantsOf(demand));
 }
 
+/** 目标态是「显示」时，把被官方普通通道摘掉的底栏挂回来。
+ *
+ *  官方 `MobileToolbar.show()`（手机键盘上方的快速编辑栏）会先调
+ *  `mobileNavbar.hide()`，把底栏元素从 DOM 里摘掉。这条摘除与我们的
+ *  `is-hidden-nav` 无关，所以只摘类并不会让它重新出现。Reader 早就补过这一步，
+ *  Markdown 叠加层却一直只提交意图 —— 用户看到的就是「底部工具栏退出隐藏模式后
+ *  怎么点都不出来」。
+ *
+ *  `show()` 自带键盘/工具条互斥闸门：底栏被键盘合法摘掉时它会自己拒绝挂回。
+ *  这里只负责在最终目标态确实是显示时补一次调用，不额外 detach、不绕开官方状态。
+ *
+ *  @returns 是否真的调用了官方 `show()`（供调用方决定是否记日志）。 */
+export function ensureNativeNavbarMounted(app: object, doc: Document = document): boolean {
+	try {
+		const body = doc.body;
+		if (!body || body.classList.contains("is-hidden-nav")) return false;
+		const nav = (app as {
+			mobileNavbar?: { containerEl?: HTMLElement; show?: ChromeMethod };
+		}).mobileNavbar;
+		const el = nav?.containerEl;
+		// `isConnected` 用属性读数而不是 `instanceof HTMLElement`：popout 窗口的元素
+		// 不属于当前 realm，跨窗时实例判断会假阴性。
+		if (!nav || typeof nav.show !== "function" || !el || typeof el.isConnected !== "boolean" || el.isConnected) {
+			return false;
+		}
+		nav.show();
+		return true;
+	} catch {
+		return false;
+	}
+}
+
 /** 官方类是所有阅读视图共用的唯一显隐状态；任一不活跃 owner 都不能单独摘掉它。 */
 function syncOfficialNavbarClass(doc: Document): void {
 	try {
@@ -177,6 +209,7 @@ export class NativeChromeGate {
 		const wanted = wantsOf({ owner, app, doc, wantsHidden, navbar: next.navbar, toolbar: next.toolbar, lastWanted: false });
 		const index = demands.findIndex(demand => demand.owner === owner);
 		const current = index >= 0 ? demands[index] : null;
+		const wasWanted = current?.lastWanted ?? false;
 		// 热路径：同一 owner 的判据值与作用域都没变 —— 什么都不用做（滚动期间绝大多数调用走这里）。
 		if (current && current.app === app && current.doc === doc
 			&& current.navbar === next.navbar && current.toolbar === next.toolbar && current.lastWanted === wanted) {
@@ -198,6 +231,7 @@ export class NativeChromeGate {
 		}
 		NativeChromeGate.recompose(app);
 		syncOfficialNavbarClass(doc);
+		if (!wanted && (!current || wasWanted)) ensureNativeNavbarMounted(app, doc);
 	}
 
 	/** 注销该 owner 的 demand（其它 owner 不受影响）。 */
@@ -207,7 +241,10 @@ export class NativeChromeGate {
 		const removed = demands[index];
 		demands.splice(index, 1);
 		if (activeGate) NativeChromeGate.recompose(activeGate.app);
-		if (removed) syncOfficialNavbarClass(removed.doc);
+		if (removed) {
+			syncOfficialNavbarClass(removed.doc);
+			if (!anyWantsNavbarHidden(removed.doc)) ensureNativeNavbarMounted(removed.app, removed.doc);
+		}
 	}
 
 	/** 按全体 demand 的并集重建（只在「需要 / 不需要」或补丁集合变化时动）。 */

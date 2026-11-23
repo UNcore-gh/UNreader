@@ -723,17 +723,7 @@ export default class UNreaderPlugin extends Plugin {
 			this.noteIndexPurgeTimer = null;
 		});
 
-		// 注册原生 PagePreview hover 源，使批注块可通过原生弹窗预览/跳转（兼容旧版本 Obsidian/移动端）
-		try {
-			const ws = this.app.workspace as unknown as { registerHoverLinkSource?: (id: string, info: { display: string; defaultMod: boolean }) => { unregister: () => void } };
-			if (ws.registerHoverLinkSource) {
-				const h = ws.registerHoverLinkSource("unreader", { display: "UNreader 标注", defaultMod: true });
-				if (h && typeof (h as unknown as { unregister?: () => void }).unregister === "function") {
-					this.register(h as never);
-				}
-			}
-		} catch { // ignore
-		}
+		this.registerHoverLinkSource("unreader", { display: "UNreader 标注", defaultMod: true });
 
 		// 逐个注册扩展名：批量 registerExtensions 在遇到已被占用的扩展名时会整体抛
 		// "Attempting to register an existing file extension" 导致插件加载失败，

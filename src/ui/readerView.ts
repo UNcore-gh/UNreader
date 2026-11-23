@@ -1,3 +1,4 @@
+import { bindReferenceHover, hasPreviewModifier, requestPagePreview } from "../shared/referencePreview";
 import { withSystemLanguage } from "../core/aiTasks";
 import { openFloatingPanel, closeFloatingPanel, dismissFloatingPanel } from "./floatingPanel";
 import { setSelectionChromeHidden } from "./selectionChrome";
@@ -116,7 +117,7 @@ import { BackgroundImageModal, type BackgroundImagePick } from "./backgroundImag
 import { FontPickModal, type FontPick } from "./fontPickModal";
 import { SideNav } from "./sideNav";
 import { NativeNavGuard, PLUGIN_NAV_HIDDEN_CLASS } from "./nativeNavGuard";
-import { NativeChromeGate } from "./nativeChromeGate";
+import { ensureNativeNavbarMounted, NativeChromeGate } from "./nativeChromeGate";
 import { followHeaderMotion } from "./headerMotion";
 import { hasCoreModal, watchCoreModal, blurIfFocusInside, focusModalPrimary, arbitrateReaderFocus } from "../core/modalFocusGate";
 import { bottomBarHiddenByUs, headerHiddenByUs, type ImmersiveNativeInputs } from "./nativeNavPolicy";
@@ -2875,7 +2876,7 @@ export class UNreaderView extends ItemView {
 					this.wireDocEvents(doc, index);
 				},
 				onFootnoteRender: (view, href, anchor) => this.openFootnotePopup(view, href, anchor),
-				onInlineFootnote: (html, href, jump, anchor) => this.openInlineFootnote(html, href, jump, anchor),
+				onInlineFootnote: (html, href, jump, anchor, desktopHover) => this.openInlineFootnote(html, href, jump, anchor, desktopHover),
 				onSelection: info => this.handleContinuousSelection(info),
 				onShowAnnotation: (cfi, range) => this.handleShowAnnotation(cfi, range),
 				onFrameReady: doc => this.wireFrameDoc(doc),
@@ -4812,12 +4813,14 @@ export class UNreaderView extends ItemView {
 	/* ---------------- footnotes ---------------- */
 
 	/** 脚注气泡：锚定在注标旁的干净弹窗，只有脚注内容，无头部/按钮/提示 */
-	private mountFootnoteBubble(anchor?: { x: number; y: number }): { backdrop: HTMLElement; bubble: HTMLElement; content: HTMLElement } {
+	private mountFootnoteBubble(anchor?: { x: number; y: number }, desktopHover = false): { backdrop: HTMLElement; bubble: HTMLElement; content: HTMLElement } {
 		this.closeFootnotePopup();
 		const backdrop = createDiv();
 		backdrop.className = "unreader-footnote-backdrop unreader-footnote-bubble-backdrop";
 		const bubble = createDiv();
-		bubble.className = "unreader-footnote-bubble";
+		bubble.className = desktopHover
+			? "unreader-footnote-bubble unreader-footnote-bubble--reference"
+			: "unreader-footnote-bubble";
 		const content = bubble.createDiv({ cls: "unreader-footnote-content" });
 		backdrop.appendChild(bubble);
 		this.bodyEl.appendChild(backdrop);
@@ -4939,10 +4942,10 @@ export class UNreaderView extends ItemView {
 		}
 	}
 
-	private openInlineFootnote(html: string, href: string, jump?: () => void, anchor?: { x: number; y: number }): void {
+	private openInlineFootnote(html: string, href: string, jump?: () => void, anchor?: { x: number; y: number }, desktopHover = false): void {
 		void href;
 		void jump;
-		const { content } = this.mountFootnoteBubble(anchor);
+		const { content } = this.mountFootnoteBubble(anchor, desktopHover);
 		content.addClass("unreader-footnote-content--html");
 		// 官方 lint 禁 unsafe innerHTML（no-unsanitized/property）：html 是书内脚注
 		// DOM 的序列化产物，改为 DOMParser 解析后移动节点，等价且不触发规则。
@@ -5810,16 +5813,9 @@ export class UNreaderView extends ItemView {
 	 *  这里只补「目标态明明是显示、元素却不在」的那半拍残留（官方 mousedown/切 leaf
 	 *  只会补类不会补元素，官方滚动钩子又只在 markdown 视图上跑）。 */
 	private reattachNativeNavbarIfNeeded(): void {
-		try {
-			const nav = (this.app as unknown as {
-				mobileNavbar?: { containerEl?: HTMLElement; show?: () => void };
-			}).mobileNavbar;
-			const el = nav?.containerEl;
-			if (nav && typeof nav.show === "function" && el instanceof HTMLElement && !el.isConnected) {
-				nav.show();
-				debugLog.info("[nav] 官方底栏挂回（接管原生，目标态=显示）");
-			}
-		} catch { /* 官方接口缺失/形态漂移：静默降级为不挂回 */ }
+		if (ensureNativeNavbarMounted(this.app)) {
+			debugLog.info("[nav] 官方底栏挂回（接管原生，目标态=显示）");
+		}
 	}
 
 	/** 进度条顶部让位（px）：页首对内容区顶边的实际占用高度。
@@ -7381,14 +7377,7 @@ export class UNreaderView extends ItemView {
 			this.hoverAnchorEl.style.height = HOVER_ANCHOR_FALLBACK_SIZE;
 		}
 		this.bodyEl.appendChild(this.hoverAnchorEl);
-		const linktext = `${this.notePath}#^hl${hl.id}`;
-		this.app.workspace.trigger("hover-link", {
-			event,
-			source: "unreader",
-			hoverParent: this,
-			targetEl: this.hoverAnchorEl,
-			linktext,
-		});
+		requestPagePreview(this.app.workspace, event, "unreader", this.hoverAnchorEl, `${this.notePath}#^hl${hl.id}`, "", this);
 	}
 
 	private showNativePreview(hl: StoredHighlight, anchorEl: HTMLElement): void {
@@ -7410,13 +7399,7 @@ export class UNreaderView extends ItemView {
 			clientX: rect.left + rect.width / 2,
 			clientY: rect.top + rect.height / 2,
 		});
-		this.app.workspace.trigger("hover-link", {
-			event: fakeEvent,
-			source: "unreader",
-			hoverParent: this,
-			targetEl: this.hoverAnchorEl,
-			linktext: `${this.notePath}#^hl${hl.id}`,
-		});
+		requestPagePreview(this.app.workspace, fakeEvent, "unreader", this.hoverAnchorEl, `${this.notePath}#^hl${hl.id}`, "", this);
 	}
 
 	/* ---------------- highlight hover preview / click jump ---------------- */
@@ -7459,21 +7442,28 @@ export class UNreaderView extends ItemView {
 		this.highlightPopover.hide();
 	}
 
-	private handleAnnotationHover(e: MouseEvent, _doc: Document): void {
+	private readonly annotationHoverDocs = new WeakSet<Document>();
+
+	private wireAnnotationHover(doc: Document): void {
+		if (this.annotationHoverDocs.has(doc) || Platform.isMobile) return;
+		this.annotationHoverDocs.add(doc);
+		bindReferenceHover(doc, (pointer, modified, trigger) => this.handleAnnotationHover(pointer, modified, trigger), { trackMovement: true });
+	}
+
+	private handleAnnotationHover(e: MouseEvent, isPreviewKey: boolean, trigger: MouseEvent | KeyboardEvent): void {
 		if (!this.bodyEl) return;
-		const isPreviewKey = e.ctrlKey || e.metaKey;
 		if (!isPreviewKey) {
-			if (this.hoverPopover || this.hoveredId != null) this.dismissHover();
+			if (this.hoverRaf || this.hoverPopover || this.hoveredId != null) this.dismissHover();
 			return;
 		}
 		const hit = this.adapter.getHighlightAt(e.clientX, e.clientY);
 		if (!hit) {
-			if (this.hoverPopover || this.hoveredId != null) this.dismissHover();
+			if (this.hoverRaf || this.hoverPopover || this.hoveredId != null) this.dismissHover();
 			return;
 		}
 		const hl = this.annotations.highlights.find(h => h.anchor === hit.anchor);
 		if (!hl) {
-			if (this.hoverPopover || this.hoveredId != null) this.dismissHover();
+			if (this.hoverRaf || this.hoverPopover || this.hoveredId != null) this.dismissHover();
 			return;
 		}
 		if (this.hoveredId === hl.id && this.hoverPopover) return;
@@ -7482,7 +7472,10 @@ export class UNreaderView extends ItemView {
 			this.hoverRaf = 0;
 			if (!hl) return;
 			this.hoveredId = hl.id;
-			this.showNativeHover(e, hl, hit.range);
+			const event = trigger === e ? e : new MouseEvent("mousemove", {
+				clientX: e.clientX, clientY: e.clientY, metaKey: trigger.metaKey, ctrlKey: trigger.ctrlKey,
+			});
+			this.showNativeHover(event, hl, hit.range);
 		});
 	}
 
@@ -7587,11 +7580,10 @@ export class UNreaderView extends ItemView {
 			// 模态框开着时不把焦点往书页里拉（同 focusContent 的判据，见 core/modalFocusGate）
 			if (!hasCoreModal()) doc.defaultView?.focus();
 		});
-		doc.addEventListener("mousemove", e => this.handleAnnotationHover(e, doc));
+		this.wireAnnotationHover(doc);
 		// mouseleave 不主动关闭原生弹窗，交由官方距离判定，避免移向弹窗时消失
 		doc.addEventListener("keyup", e => {
-			if (!e.ctrlKey && !e.metaKey) 
-			this.dismissHover();
+			if (!hasPreviewModifier(e)) this.dismissHover();
 		});
 		doc.addEventListener("pointerup", () => {
 			window.setTimeout(() => this.captureSelection(doc, index), 0);
@@ -8207,11 +8199,10 @@ export class UNreaderView extends ItemView {
 	private wireFrameDoc(doc: Document): void {
 		if ((doc as unknown as { __unreaderWired?: boolean }).__unreaderWired) return;
 		(doc as unknown as { __unreaderWired?: boolean }).__unreaderWired = true;
-		doc.addEventListener("mousemove", e => this.handleAnnotationHover(e, doc));
+		this.wireAnnotationHover(doc);
 		// mouseleave 不主动关闭原生弹窗，交由官方距离判定，避免移向弹窗时消失
 		doc.addEventListener("keyup", e => {
-			if (!e.ctrlKey && !e.metaKey) 
-			this.dismissHover();
+			if (!hasPreviewModifier(e)) this.dismissHover();
 			if (e.key === "Escape") {
 				this.selectionToolbar?.hide();
 				this.highlightPopover?.hide();

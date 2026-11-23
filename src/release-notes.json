@@ -1,4 +1,26 @@
 {
+	"1.0.12": {
+		"title": {
+			"zh": "脚注原生预览与底栏恢复",
+			"en": "Native footnote preview and navbar restore"
+		},
+		"summary": {
+			"zh": "桌面端脚注悬停改用 Obsidian 原生页面预览，触摸端继续走点击弹窗；修复移动端退出隐藏模式后底部工具栏点不出来的问题。",
+			"en": "Desktop footnote hovers now use Obsidian's native page preview while touch keeps the tap popup; fixes the mobile bottom toolbar not reappearing after leaving hidden mode."
+		},
+		"items": {
+			"zh": [
+				"桌面端悬停书内脚注标记改用 Obsidian 原生页面预览弹窗，带修饰键触发，外观跟随主题与圆角设置；触摸端仍走原有的点击脚注气泡，不受影响。",
+				"共享的引用预览模块统一了桌面悬停与点击的判定入口，跨 UNagent / UNmemos 复用同一套预览逻辑。",
+				"修复移动端 Markdown 阅读里退出隐藏模式后，底部原生工具栏被键盘/快速编辑栏从 DOM 摘掉、怎么点都不出来的问题：目标态为显示时会自动把底栏重新挂回，且不顶开键盘与工具条互斥的合法隐藏。"
+			],
+			"en": [
+				"Desktop footnote hovers now open Obsidian's native page preview with a modifier key, styled to the theme and radius settings; touch still uses the original tap bubble.",
+				"A shared reference-preview module unifies the hover/tap decision and is reused across UNagent and UNmemos.",
+				"Fixes the mobile Markdown view where the bottom toolbar, detached from the DOM by the keyboard or quick-action bar, would not come back after leaving hidden mode: it is now re-mounted when the target state is visible, without overriding legitimate keyboard/toolbar hiding."
+			]
+		}
+	},
 	"1.0.11": {
 		"title": {
 			"zh": "阅读进度与数据保护",
@@ -164,8 +186,14 @@
 		}
 	},
 	"1.0.10": {
-		"title": {"zh": "选区 AI 工具与交接稳定性", "en": "Selection AI tools and reliable handoffs"},
-		"summary": {"zh": "选中文字后可以直接调用 UNagent，并选择正文快速输入框、当前会话或新会话；关闭阅读器或取消等待时不会再迟到提交。", "en": "Run AI tools on selected text through UNagent, choosing the quick composer, current chat, or a new chat. Closing the reader or cancelling no longer submits stale selections later."},
+		"title": {
+			"zh": "选区 AI 工具与交接稳定性",
+			"en": "Selection AI tools and reliable handoffs"
+		},
+		"summary": {
+			"zh": "选中文字后可以直接调用 UNagent，并选择正文快速输入框、当前会话或新会话；关闭阅读器或取消等待时不会再迟到提交。",
+			"en": "Run AI tools on selected text through UNagent, choosing the quick composer, current chat, or a new chat. Closing the reader or cancelling no longer submits stale selections later."
+		},
 		"items": {
 			"zh": [
 				"划词工具和自定义选中文字工具统一交给 UNagent 处理，结果继续使用 UNagent 的聊天记录、模型和权限流程。",
@@ -184,14 +212,40 @@
 		}
 	},
 	"1.0.9": {
-		"title": {"zh": "移动端面板布局修复", "en": "Mobile panel layout fix"},
-		"summary": {"zh": "重新发布移动端外观和 AI 面板的布局修复。", "en": "Re-release the mobile appearance and AI panel layout fix."},
-		"items": {"zh": ["统一外观与 AI 面板的尺寸限制，并让手机 Markdown 视图的外观面板避开底部导航栏。"], "en": ["Use consistent size limits for the appearance and AI panels, keeping the appearance panel clear of phone Markdown navigation."]}
+		"title": {
+			"zh": "移动端面板布局修复",
+			"en": "Mobile panel layout fix"
+		},
+		"summary": {
+			"zh": "重新发布移动端外观和 AI 面板的布局修复。",
+			"en": "Re-release the mobile appearance and AI panel layout fix."
+		},
+		"items": {
+			"zh": [
+				"统一外观与 AI 面板的尺寸限制，并让手机 Markdown 视图的外观面板避开底部导航栏。"
+			],
+			"en": [
+				"Use consistent size limits for the appearance and AI panels, keeping the appearance panel clear of phone Markdown navigation."
+			]
+		}
 	},
 	"1.0.8": {
-		"title": {"zh": "移动端面板布局修复", "en": "Mobile panel layout fix"},
-		"summary": {"zh": "调整移动端外观和 AI 面板的尺寸与位置。", "en": "Adjust the size and position of the appearance and AI panels on mobile."},
-		"items": {"zh": ["统一外观与 AI 面板的尺寸限制；在手机 Markdown 视图中，外观面板也会避开底部导航栏。"], "en": ["Use consistent size limits for the appearance and AI panels, and keep the appearance panel clear of the bottom navigation in phone Markdown views."]}
+		"title": {
+			"zh": "移动端面板布局修复",
+			"en": "Mobile panel layout fix"
+		},
+		"summary": {
+			"zh": "调整移动端外观和 AI 面板的尺寸与位置。",
+			"en": "Adjust the size and position of the appearance and AI panels on mobile."
+		},
+		"items": {
+			"zh": [
+				"统一外观与 AI 面板的尺寸限制；在手机 Markdown 视图中，外观面板也会避开底部导航栏。"
+			],
+			"en": [
+				"Use consistent size limits for the appearance and AI panels, and keep the appearance panel clear of the bottom navigation in phone Markdown views."
+			]
+		}
 	},
 	"1.0.7": {
 		"title": {

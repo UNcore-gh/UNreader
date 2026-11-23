@@ -15,6 +15,7 @@ import { FootnoteHandler } from "../../vendor/foliate-js/footnotes.js";
 import { searchMatcher } from "../../vendor/foliate-js/search.js";
 import { textWalker } from "../../vendor/foliate-js/text-walker.js";
 import { Platform } from "obsidian";
+import { bindReferenceHover } from "../shared/referencePreview";
 import type { AppearanceSettings, WebDeviceMode } from "../types";
 import { highlightColorOf, activeBackground, activeTextColor, activeTheme, activeBackgroundImage } from "../types";
 import { perfBegin, perfEnd, perfPoint } from "./perf";
@@ -398,7 +399,7 @@ export interface EngineHandlers {
 	onSelection?: (info: { text: string; cfi: string | null; rect: DOMRect }) => void
 	onLoadDoc: (doc: Document, index: number) => void
 	onFootnoteRender: (view: RawFoliateView, href: string, anchor?: { x: number; y: number }) => void
-	onInlineFootnote: (html: string, href: string, jump?: () => void, anchor?: { x: number; y: number }) => void
+	onInlineFootnote: (html: string, href: string, jump?: () => void, anchor?: { x: number; y: number }, desktopHover?: boolean) => void
 	onShowAnnotation: (cfi: string, range: Range | null) => void
 	onFrameReady?: (doc: Document) => void
 	/** iframe 内键盘全量上抛：复用 handleKey（命令热键执行 + 宿主转发 + 翻页） */
@@ -4763,27 +4764,38 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 			pressConsumed = ""
 			return k
 		}
-		// 悬停 380ms → 悬浮窗
+		// Preview a footnote only after a deliberate hover. Preserve the touch path.
 		let hoverTimer = 0
 		let lastKey = ""
-		d.addEventListener("pointermove", e => {
-			const ev = e as MouseEvent
-			// 同上：被高亮盖住的注标也要能悬停出注释窗
-			const a = this.linkFromEvent(ev)
+		let hoverRequest = 0
+		const cancelHover = () => {
+			window.clearTimeout(hoverTimer)
+			lastKey = ""
+			hoverRequest++
+		}
+		const onFootnoteHover = (event: MouseEvent, modified: boolean) => {
+			const a = modified ? this.linkFromEvent(event) : null
 			const key = a?.getAttribute("href") ?? ""
-			// 悬停弹注释窗仅限脚注引用；普通链接（目录/交叉引用）点击才跳转，悬停不动作
 			if (!a || !key.startsWith("#nr-") || !this.isNoterefLink(a)) {
-				if (lastKey) { window.clearTimeout(hoverTimer); lastKey = "" }
+				if (lastKey) cancelHover()
 				return
 			}
 			if (key === lastKey) return
-			lastKey = key
-			window.clearTimeout(hoverTimer)
+			cancelHover()
 			const ref = f.anchors.get(key.slice(1))
 			if (!ref) return
+			lastKey = key
+			const request = hoverRequest
 			const anchor = this.elementHostAnchor(a) ?? undefined
-			hoverTimer = window.setTimeout(() => { void this.showFrameNote(ref, a, anchor) }, 380)
-		})
+			hoverTimer = window.setTimeout(() => {
+				const stillHovering = () => request === hoverRequest && a.isConnected
+					&& !!d.defaultView?.frameElement?.isConnected
+				void this.showFrameNote(ref, a, anchor, Platform.isMobile ? undefined : stillHovering)
+			}, 380)
+		}
+		if (Platform.isMobile) d.addEventListener("pointermove", e => onFootnoteHover(e, true))
+		else bindReferenceHover(d, onFootnoteHover, { trackMovement: true, onDeactivate: cancelHover })
+
 		// 选区（pointerup + selectionchange 双保险，持续镜像给宿主插件）。
 		// **方向抑制窗口在监听器里当场推进**，不能等下面 260ms 的 debounce：浏览器
 		// 「把选区/手柄滚进可视区」发生在 selectionchange 的**当帧**，晚 260ms 再置
@@ -4881,33 +4893,36 @@ html,body{overflow-y:hidden!important;overflow-x:auto;${boxReset}touch-action:pa
 
 	/** 悬浮窗内容：目标注释元素 outerHTML（跨章时先确保 frame 就绪）。
 	 *  普通内部链接（目录/交叉引用等）不弹注释窗，直接跳转目标位置。 */
-	private async showFrameNote(ref: ContAnchorRef, from?: HTMLAnchorElement, at?: { x: number; y: number }): Promise<void> {
+	private async showFrameNote(ref: ContAnchorRef, from?: HTMLAnchorElement, at?: { x: number; y: number }, stillHovering?: () => boolean): Promise<void> {
+		const fallback = () => { if (!stillHovering) this.jumpToRef(ref) }
+		if (stillHovering && !stillHovering()) return
 		const hash = ref.hash
-		if (!hash && !ref.anchor) { this.jumpToRef(ref); return }
+		if (!hash && !ref.anchor) { fallback(); return }
 		void this.loadSections([ref.index])
 		const go = (attempt: number): void => {
+			if (stillHovering && !stillHovering()) return
 			const tf = this.contFrames.get(ref.index)
 			const d = tf?.doc
 			if (!d) {
 				if (attempt < 25) window.setTimeout(() => go(attempt + 1), 120)
-				else this.jumpToRef(ref)
+				else fallback()
 				return
 				}
-				try {
-					const elx = this.resolveAnchorElement(ref, d)
-				if (!elx) {
-					if (attempt < 25) window.setTimeout(() => go(attempt + 1), 120)
-					else this.jumpToRef(ref)
-					return
-					}
-					let note: Element | null = null
-					try { note = elx.closest(EngineAdapter.NOTE_TARGET_SELECTOR) } catch { /* ignore */ }
-					if (!note && (from && this.isNoterefLink(from))) note = this.extractNoteElement(elx)
-				if (!note) { this.jumpToRef(ref); return }
+			try {
+				const elx = this.resolveAnchorElement(ref, d)
+			if (!elx) {
+				if (attempt < 25) window.setTimeout(() => go(attempt + 1), 120)
+				else fallback()
+				return
+				}
+				let note: Element | null = null
+				try { note = elx.closest(EngineAdapter.NOTE_TARGET_SELECTOR) } catch { /* ignore */ }
+				if (!note && (from && this.isNoterefLink(from))) note = this.extractNoteElement(elx)
+				if (!note) { fallback(); return }
 				const html = note.outerHTML
 				// jump 闭包：连续模式下裸 hash 无法经 goTo 解析，直接走 jumpToRef（含隐藏注释显形）
-				if (html) this.handlers?.onInlineFootnote?.(html, hash ?? "", () => this.jumpToRef(ref), at)
-				else this.jumpToRef(ref)
+				if (html) this.handlers?.onInlineFootnote?.(html, hash ?? "", () => this.jumpToRef(ref), at, !!stillHovering)
+				else fallback()
 			} catch (e) { console.warn("[UNreader] showFrameNote failed", e) }
 		}
 		window.setTimeout(() => go(0), 30)
